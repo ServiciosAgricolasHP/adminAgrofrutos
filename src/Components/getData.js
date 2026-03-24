@@ -32,7 +32,7 @@ export async function getData() {
     const date = docSnap.id;
     console.log("la fecha es :", date)
 
-    const dayWeights = await getDocs(collection(db, "weights", date, "entry"));
+    const dayWeights = await getDocs(query(collection(db, "weights", date, "entry"), orderBy("idQr", "desc")));
     console.log("aqui es: ", dayWeights)
     dayWeights.forEach((doc) => {
           
@@ -42,7 +42,6 @@ export async function getData() {
       const worker = workersData[idQr];
 
       if (!worker) return;
-
       const rut = worker.rut;
 
       // Inicializar fila si no existe
@@ -54,11 +53,16 @@ export async function getData() {
         };
       }
 
-         // Inicializar columna de fecha si no existe
+         // Inicializar columnas de fecha si no existe, no funciona sin inicizalizarla
       if (!totalWeights[rut][date]) {
         totalWeights[rut][date] = 0;
       }
+      if (!totalWeights[rut]["total"]) {
+        totalWeights[rut]["total"] = 0;
+      }
+
        totalWeights[rut][date] += amount;
+       totalWeights[rut]["total"] += amount;
       }
     );
   });
