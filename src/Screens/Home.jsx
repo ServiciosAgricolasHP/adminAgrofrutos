@@ -2,8 +2,12 @@ import { useState, useEffect } from "react";
 import { getData } from "../Components/getData";
 
 export default function Home() {
+  // Tabla
   const [data, setData] = useState({ allDates: [], dataTable: [] });
+  // Orden asc/desc en las columnas
   const [sortColumn, setSortColumn] = useState({ key: null, direction: "asc"});
+  // Filtro/Busqueda
+  const [filters, setFilters] = useState({rut: "", name: "",  idQr: ""});
 
   function handleSort(key) {
     let direction = "asc";
@@ -14,7 +18,25 @@ export default function Home() {
     setSortColumn({ key, direction });
   }
 
-  const sortedData = [...data.dataTable].sort((a, b) => {
+  // Filtro dependiendo RUT o nombre
+  const filteredData = data.dataTable.filter((item) => {
+    const rutFilter = item.rut
+      ?.toLowerCase()
+      .includes(filters.rut.toLowerCase());
+
+    const nameFilter = item.name
+      ?.toLowerCase()
+      .includes(filters.name.toLowerCase());
+
+    const idqrFilter = item.idQr?.[0]
+      ?.toLowerCase()
+      .includes(filters.idQr.toLowerCase());
+
+    return rutFilter && nameFilter && idqrFilter;
+  });
+
+  // Ordenar dataTable
+  const sortedData = [...filteredData].sort((a, b) => {
     if (!sortColumn.key) return 0;
 
     const aValue = a[sortColumn.key] ?? 0;
@@ -43,6 +65,34 @@ export default function Home() {
       <h2>Pantalla Principal</h2>
 
       {/* Tabla de datos */}
+
+      <input
+        type="text"
+        placeholder="RUT"
+        value={filters.rut}
+        onChange={(e) =>
+          setFilters({ ...filters, rut: e.target.value })
+        }
+      />
+
+      <input
+        type="text"
+        placeholder="Nombre"
+        value={filters.name}
+        onChange={(e) =>
+          setFilters({ ...filters, name: e.target.value })
+        }
+      />
+
+      <input
+        type="text"
+        placeholder="IdQr"
+        value={filters.idQr}
+        onChange={(e) =>
+          setFilters({ ...filters, idQr: e.target.value })
+        }
+      />
+
       <table border="1" style={{ marginTop: "20px", width: "100%" }}>
         <thead>
           <tr>
@@ -55,6 +105,7 @@ export default function Home() {
             <th onClick={() => handleSort("total")}>TOTAL</th>
           </tr>
         </thead>
+
         <tbody>
           {sortedData.map((item, index) => (
             <tr key={index}>
@@ -68,6 +119,7 @@ export default function Home() {
             </tr>
           ))}
         </tbody>
+
       </table>
     </div>
   );
