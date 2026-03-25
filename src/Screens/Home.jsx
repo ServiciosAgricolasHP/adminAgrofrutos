@@ -1,13 +1,21 @@
 import { useState, useEffect } from "react";
 import { getData } from "../Components/getData";
+import { FilterBox } from "../Utils/popupFilter";
+
 
 export default function Home() {
+
   // Tabla
   const [data, setData] = useState({ allDates: [], dataTable: [] });
+  const [dateRange, setDateRange] = useState({startDate: "", endDate: ""});
+
   // Orden asc/desc en las columnas
   const [sortColumn, setSortColumn] = useState({ key: null, direction: "asc"});
+  
   // Filtro/Busqueda
+  const [showFilters, setShowFilters] = useState({rut: false, name: false, idQr: false});
   const [filters, setFilters] = useState({rut: "", name: "",  idQr: ""});
+  const [selectedID, setSelectedID] = useState("");
 
   function handleSort(key) {
     let direction = "asc";
@@ -18,7 +26,17 @@ export default function Home() {
     setSortColumn({ key, direction });
   }
 
-  // Filtro dependiendo RUT o nombre
+
+  // IDQRs disponibles
+  const idQrPrefixes = [
+    ...new Set(
+      data.dataTable
+        .map(item => item.idQr?.[0]?.split("-")[0])
+        .filter(Boolean)
+    )
+  ];
+
+  // Filtro dependiendo RUT o nombre / CAMBIAR IDQR P
   const filteredData = data.dataTable.filter((item) => {
     const rutFilter = item.rut
       ?.toLowerCase()
@@ -28,11 +46,12 @@ export default function Home() {
       ?.toLowerCase()
       .includes(filters.name.toLowerCase());
 
-    const idqrFilter = item.idQr?.[0]
-      ?.toLowerCase()
-      .includes(filters.idQr.toLowerCase());
+    const prefix = item.idQr?.[0]?.split("-")[0];
+    const prefixFilter = selectedID
+      ? prefix === selectedID
+      : true;
 
-    return rutFilter && nameFilter && idqrFilter;
+    return rutFilter && nameFilter && prefixFilter;
   });
 
   // Ordenar dataTable
@@ -48,79 +67,146 @@ export default function Home() {
   });
 
   // Obtencion de Tabla
-  useEffect(() => {
-    async function fetchData() {
-      const result = await getData();
+  
+  async function obtainData(startDate = null, endDate = null) {
+      const result = await getData(startDate, endDate);
       // cambiar direccion de columnas
       result.allDates.reverse();
       result.dataTable.reverse();
       setData(result);
-    }
-    fetchData();
+  }
+
+  useEffect(() => {
+    obtainData();
   }, []);
 
 
   return (
     <div>
-      <h2>Pantalla Principal</h2>
+
+      <div style={{ marginBottom: "10px" }}>
+        {idQrPrefixes.map((prefix) => (
+          <button
+            key={prefix}
+            onClick={() => setSelectedID(prefix)}
+            style={{
+              marginLeft: "5px",
+              background: selectedID === prefix ? "#ccc" : "#fff"
+            }}
+          >
+            {prefix}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ marginBottom: "20px" }}>
+        <label>
+          {"Fecha de Inicio: "}
+          <input
+            type="date"
+            value={dateRange.startDate}
+            onChange={(e) =>
+              setDateRange({ ...dateRange, startDate: e.target.value })
+            }
+          />
+        </label>
+
+        <label style={{ marginLeft: "10px" }}>
+          {"Fecha de Finalización: "}
+          <input
+            type="date"
+            value={dateRange.endDate}
+            onChange={(e) =>
+              setDateRange({ ...dateRange, endDate: e.target.value })
+            }
+          />
+        </label>
+
+        <button
+          style={{ marginLeft: "10px" }}
+          disabled={!dateRange.startDate || !dateRange.endDate}
+          onClick={() => obtainData(dateRange.startDate, dateRange.endDate)}
+        >
+          Crear ciclo
+        </button>
+      </div>
+
+      <h2>Total de trabajadores en la semana: {filteredData.length}</h2>
+      <h2>Total planilla: {filteredData.reduce((totalAdquire, item) => totalAdquire + (item.total || 0), 0)?.toFixed(2) || 0}</h2> 
+      <h2>Promedio por trabajador: {(filteredData.reduce((totalAdquire, item) => totalAdquire + (item.total || 0), 0) / filteredData.length)?.toFixed(2)  || 0}</h2> 
+
 
       {/* Tabla de datos */}
+      <div style={{ maxHeight: "400px", maxWidth: "900px", overflowY: "auto"}}>
+        <table border="1" style={{ marginTop: "20px", width: "100%" }}>
+          <thead style={{ position: "sticky", top: 0, background: "#fff", zIndex: 1 }}> 
+            <tr>
 
-      <input
-        type="text"
-        placeholder="RUT"
-        value={filters.rut}
-        onChange={(e) =>
-          setFilters({ ...filters, rut: e.target.value })
-        }
-      />
+              <th style={{ position: "relative" }} onClick={() => handleSort("rut")}> RUT
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setShowFilters({...showFilters, rut: !showFilters.rut});
+                  }}
+                > + </button>
 
-      <input
-        type="text"
-        placeholder="Nombre"
-        value={filters.name}
-        onChange={(e) =>
-          setFilters({ ...filters, name: e.target.value })
-        }
-      />
+                <FilterBox
+                    show={showFilters.rut}
+                    value={filters.rut}
+                    onChange={(e) =>
+                      setFilters({ ...filters, rut: e.target.value })
+                    }
+                    placeholder="Filtrar RUT"
+                  />
+              </th>
 
-      <input
-        type="text"
-        placeholder="IdQr"
-        value={filters.idQr}
-        onChange={(e) =>
-          setFilters({ ...filters, idQr: e.target.value })
-        }
-      />
+              <th onClick={() => handleSort("name")}> Nombre
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setShowFilters({...showFilters, name: !showFilters.name});
+                  }}
+                > + </button>
 
-      <table border="1" style={{ marginTop: "20px", width: "100%" }}>
-        <thead>
-          <tr>
-            <th onClick={() => handleSort("rut")}>RUT</th>
-            <th onClick={() => handleSort("name")}>Nombre</th>
-            <th onClick={() => handleSort("idQr")}>ID QR</th>
-            {data.allDates.map((date) => (
-              <th key={date} onClick={() => handleSort(date)}>{date}</th>
-            ))}
-            <th onClick={() => handleSort("total")}>TOTAL</th>
-          </tr>
-        </thead>
+                <FilterBox
+                    show={showFilters.name}
+                    value={filters.name}
+                    onChange={(e) =>
+                      setFilters({ ...filters, name: e.target.value })
+                    }
+                    placeholder="Filtrar Nombre"
+                  />
 
-        <tbody>
-          {sortedData.map((item, index) => (
-            <tr key={index}>
-              <td>{item.rut}</td>
-              <td>{item.name}</td>
-              <td>{item.idQr?.[0]}</td>
+              </th>
+              
+              <th onClick={() => handleSort("idQr")}> ID QR
+              </th>
+
               {data.allDates.map((date) => (
-                <td key={date}>{item[date]?.toFixed(2) || 0}</td>
+                <th key={date} onClick={() => handleSort(date)}>{date}</th>
               ))}
-              <td>{item["total"]?.toFixed(2) || 0}</td>
-            </tr>
-          ))}
-        </tbody>
 
-      </table>
+              <th onClick={() => handleSort("total")}>TOTAL</th>
+            </tr>
+
+          </thead>
+
+          <tbody>
+            {sortedData.map((item, index) => (
+              <tr key={index}>
+                <td>{item.rut}</td>
+                <td>{item.name}</td>
+                <td>{item.idQr?.[0]}</td>
+                {data.allDates.map((date) => (
+                  <td key={date}>{item[date]?.toFixed(2) || 0}</td>
+                ))}
+                <td>{item["total"]?.toFixed(2) || 0}</td>
+              </tr>
+            ))}
+          </tbody>
+
+        </table>
+      </div>
     </div>
   );
 }

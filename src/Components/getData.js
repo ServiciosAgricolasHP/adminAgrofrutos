@@ -1,7 +1,7 @@
 import { collection, getDocs, query, where, orderBy, limit  } from "firebase/firestore";
 import { db } from "../../firebase";
 
-export async function getData() {
+export async function getData(startDate, endDate) {
 
   const workerRef = collection(db, "worker");
   const workerSnap = await getDocs(workerRef);
@@ -20,7 +20,10 @@ export async function getData() {
   // Data de pesajes
 
   const weightRef = collection(db, "weights");
-  const weekWeights = query(weightRef, orderBy("__name__", "desc"), limit(5));
+  const weekWeights = query(weightRef,  where("__name__", ">=", startDate), 
+                                        where("__name__", "<=", endDate),
+                                        orderBy("__name__", "desc"));
+                                        
   const weightSnap = await getDocs(weekWeights);
 
   // Guardar fechas
