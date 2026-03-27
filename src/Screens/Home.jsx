@@ -1,3 +1,4 @@
+import './Home.css'
 import { useState, useEffect, useMemo } from "react";
 import { getData, getIDQR } from "../Components";
 import { FilterBox } from "../Utils/popupFilter";
@@ -8,7 +9,7 @@ export default function Home() {
   // Tabla
   const [data, setData] = useState({ allDates: [], dataTable: [] });
   const [dateRange, setDateRange] = useState({startDate: "", endDate: ""});
-
+  
   // Orden asc/desc en las columnas
   const [sortColumn, setSortColumn] = useState({ key: null, direction: "asc"});
   
@@ -81,25 +82,17 @@ export default function Home() {
 
 
   return (
-    <div style={{ display: "flex", height: "100vh" }}>
-      <aside style={{width: "200px", padding: "10px"}}>
-        <h2>Sistema de Gestión</h2>
+    <div className="container">
+      
+      {/* SideBar */}
+      <aside className="sidebar">
+        <h2 >Sistema de Gestión</h2>
         <div>
           {allIdqrs.map((prefix) => (
             <button
               key={prefix}
+              className={selectedID === prefix ? "active" : ""}
               onClick={() => setSelectedID(prefix)}
-              style={{
-                marginBottom: "10px",
-                width: "100%",
-                padding: "20px",
-                fontSize: "16px",
-                borderRadius: "14px",
-                cursor: "pointer",
-                border: "none",
-                minWidth: "200px",
-                background: selectedID === prefix ? "#ccc" : "#fff"
-              }}
             >
               {prefix}
             </button>
@@ -107,84 +100,90 @@ export default function Home() {
         </div>
       </aside >
       
-      <select
-        value={selectedRange}
-        onChange={(e) => {
-          const index = e.target.value;
-          setSelectedRange(index);
+      {/* Ingresar Ciclos */}
 
-          const range = savedRanges[index];
-          if (range) {
-            setDateRange({
-              startDate: range.startDate,
-              endDate: range.endDate
-            });
+      <div className='main'>
+        <select
+          value={selectedRange}
+          className="select"
+          onChange={(e) => {
+            const index = e.target.value;
+            setSelectedRange(index);
 
-            obtainData(range.startDate, range.endDate);
-          }
-        }}
-        style={{ marginRight: "10px", height: "20px"}}
-      >
-        <option value="">Seleccionar ciclo</option>
-        {savedRanges.map((range, index) => (
-          <option key={index} value={index}>
-            {range.name}
-          </option>
-        ))}
-      </select>
+            const range = savedRanges[index];
+            if (range) {
+              setDateRange({
+                startDate: range.startDate,
+                endDate: range.endDate
+              });
 
-      <div style={{ flex: 1}}>
-        <div style={{ marginBottom: "20px" }}>
-          <label>
-            {"Fecha de Inicio: "}
-            <input
-              type="date"
-              value={dateRange.startDate}
-              onChange={(e) =>
-                setDateRange({ ...dateRange, startDate: e.target.value })
-              }
-            />
-          </label>
+              obtainData(range.startDate, range.endDate);
+            }
+          }}
+        >
+          <option value="">Seleccionar ciclo</option>
+          {savedRanges.map((range, index) => (
+            <option key={index} value={index}>
+              {range.name}
+            </option>
+          ))}
+        </select>
 
-          <label style={{ marginLeft: "10px" }}>
-            {"Fecha de Finalización: "}
-            <input
-              type="date"
-              value={dateRange.endDate}
-              onChange={(e) =>
-                setDateRange({ ...dateRange, endDate: e.target.value })
-              }
-            />
-          </label>
+        <div >
+          <div style={{ marginBottom: "20px" }}>
+            <label>
+              {"Fecha de Inicio: "}
+              <input
+                type="date"
+                value={dateRange.startDate}
+                onChange={(e) =>
+                  setDateRange({ ...dateRange, startDate: e.target.value })
+                }
+              />
+            </label>
 
-          <button
-            style={{ marginLeft: "10px" }}
-            disabled={!dateRange.startDate || !dateRange.endDate}
-            onClick={() => {
-              const newRange = {
-                name: `Fecha ${dateRange.startDate} / ${dateRange.endDate}`,
-                startDate: dateRange.startDate,
-                endDate: dateRange.endDate
-              };
-              
-              setSavedRanges((prev) => [...prev, newRange]);
-              obtainData(dateRange.startDate, dateRange.endDate);
-            }}
-          >
-            Crear ciclo
-          </button>
+            <label style={{ marginLeft: "10px" }}>
+              {"Fecha de Finalización: "}
+              <input
+                type="date"
+                value={dateRange.endDate}
+                onChange={(e) =>
+                  setDateRange({ ...dateRange, endDate: e.target.value })
+                }
+              />
+            </label>
+
+            <button
+              style={{ marginLeft: "10px" }}
+              disabled={!dateRange.startDate || !dateRange.endDate}
+              onClick={() => {
+                const newRange = {
+                  name: `Fecha ${dateRange.startDate} / ${dateRange.endDate}`,
+                  startDate: dateRange.startDate,
+                  endDate: dateRange.endDate
+                };
+                
+                setSavedRanges((prev) => [...prev, newRange]);
+                obtainData(dateRange.startDate, dateRange.endDate);
+              }}
+            >
+              Crear ciclo
+            </button>
+          </div>
         </div>
 
-        <div style={{ position: "sticky", top: 0, background: "#fff", zIndex: 1 }}> 
-          <h2>Total de trabajadores en la semana: {filteredData.length}</h2>
-          <h2>Total planilla: {filteredData.reduce((totalAdquire, item) => totalAdquire + (item.total || 0), 0)?.toFixed(2) || 0}</h2> 
-          <h2>Promedio por trabajador: {(filteredData.reduce((totalAdquire, item) => totalAdquire + (item.total || 0), 0) / filteredData.length)?.toFixed(2)  || 0}</h2> 
+        {/* Totales */}
+        
+        <div className="card-container"> 
+          <div className="card"> <span>Total Trabajadores: </span>{filteredData.length}</div>
+          <div className="card"> <span>Total Planilla: </span>{filteredData.reduce((totalAdquire, item) => totalAdquire + (item.total || 0), 0)?.toFixed(2) || 0}</div> 
+          <div className="card"> <span>Promedio por trabajador: </span>{(filteredData.reduce((totalAdquire, item) => totalAdquire + (item.total || 0), 0) / filteredData.length)?.toFixed(2)  || 0}</div> 
         </div>
 
         {/* Tabla de datos */}
-        <div style={{ maxHeight: "400px", maxWidth: "900px", overflowY: "auto"}}>
-          <table border="1" style={{ marginTop: "20px", width: "100%" }}>
-            <thead style={{ position: "sticky", top: 0, background: "#fff", zIndex: 1 }}> 
+        <div className="table-container">
+          <table className='table'>
+            <thead style={{ position: "sticky", top: 0, zIndex: 1 }}> 
               <tr>
 
                 <th style={{ position: "relative" }} onClick={() => handleSort("rut")}> RUT

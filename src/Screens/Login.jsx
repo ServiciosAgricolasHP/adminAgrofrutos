@@ -1,25 +1,44 @@
 import { useState } from "react";
 
 export default function Login({ signIn }) {
-  const [email, setEmail] = useState("");
+  const [user, setUser] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    signIn(email);
+    if (user === "admin" && password === "admin123") {
+      setError("");
+      signIn(user);
+    } else {
+      setError("Usuario o contraseña incorrectos");
+    }
   };
 
   return (
     <div >
       <h2>Login</h2>
       <form onSubmit={handleSubmit}>
+
         <input
-          type="email"
-          placeholder="Ingresa tu correo"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
+          type="text"
+          placeholder="Usuario"
+          value={user}
+          onChange={(e) => setUser(e.target.value)}
         />
+
+        <input
+          type="password"
+          placeholder="Contraseña"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
+        
         <button type="submit">Entrar</button>
       </form>
+      
+      {error && <p style={{ color: "red" }}>{error}</p>}
+
     </div>
   );
 }
