@@ -82,174 +82,191 @@ export default function Home() {
 
 
   return (
-    <div className="container">
+    <div className="main">
+
+      {/* Titulo */}
+
+      <header className="header">
+        <h1>Sistema de Gestión de Faenas</h1>
+      </header>
       
-      {/* SideBar */}
-      <aside className="sidebar">
-        <h2 >Sistema de Gestión</h2>
-        <div>
-          {allIdqrs.map((prefix) => (
-            <button
-              key={prefix}
-              className={selectedID === prefix ? "active" : ""}
-              onClick={() => setSelectedID(prefix)}
-            >
-              {prefix}
-            </button>
-          ))}
-        </div>
-      </aside >
-      
-      {/* Ingresar Ciclos */}
+      <div className="container">
+        
+        {/* SideBar */}
+        <aside className="sidebar">
+          <span>FAENAS</span>
+          <div>
+            {allIdqrs.map((prefix) => (
+              <button
+                key={prefix}
+                className={selectedID === prefix ? "active" : ""}
+                onClick={() => setSelectedID(prefix)}
+              >
+                {prefix}
+              </button>
+            ))}
+          </div>
+        </aside >
+        
 
-      <div className='main'>
-        <select
-          value={selectedRange}
-          className="select"
-          onChange={(e) => {
-            const index = e.target.value;
-            setSelectedRange(index);
+        <div className='layout'>
 
-            const range = savedRanges[index];
-            if (range) {
-              setDateRange({
-                startDate: range.startDate,
-                endDate: range.endDate
-              });
+          {/* Ingresar Ciclos */}
+          <header className="header">
+            <select
+              value={selectedRange}
+              className="select"
+              onChange={(e) => {
+                const index = e.target.value;
+                setSelectedRange(index);
 
-              obtainData(range.startDate, range.endDate);
-            }
-          }}
-        >
-          <option value="">Seleccionar ciclo</option>
-          {savedRanges.map((range, index) => (
-            <option key={index} value={index}>
-              {range.name}
-            </option>
-          ))}
-        </select>
+                const range = savedRanges[index];
+                if (range) {
+                  setDateRange({
+                    startDate: range.startDate,
+                    endDate: range.endDate
+                  });
 
-        <div >
-          <div style={{ marginBottom: "20px" }}>
-            <label>
-              {"Fecha de Inicio: "}
-              <input
-                type="date"
-                value={dateRange.startDate}
-                onChange={(e) =>
-                  setDateRange({ ...dateRange, startDate: e.target.value })
+                  obtainData(range.startDate, range.endDate);
                 }
-              />
-            </label>
-
-            <label style={{ marginLeft: "10px" }}>
-              {"Fecha de Finalización: "}
-              <input
-                type="date"
-                value={dateRange.endDate}
-                onChange={(e) =>
-                  setDateRange({ ...dateRange, endDate: e.target.value })
-                }
-              />
-            </label>
-
-            <button
-              style={{ marginLeft: "10px" }}
-              disabled={!dateRange.startDate || !dateRange.endDate}
-              onClick={() => {
-                const newRange = {
-                  name: `Fecha ${dateRange.startDate} / ${dateRange.endDate}`,
-                  startDate: dateRange.startDate,
-                  endDate: dateRange.endDate
-                };
-                
-                setSavedRanges((prev) => [...prev, newRange]);
-                obtainData(dateRange.startDate, dateRange.endDate);
               }}
             >
-              Crear ciclo
-            </button>
-          </div>
-        </div>
-
-        {/* Totales */}
-        
-        <div className="card-container"> 
-          <div className="card"> <span>Total Trabajadores: </span>{filteredData.length}</div>
-          <div className="card"> <span>Total Planilla: </span>{filteredData.reduce((totalAdquire, item) => totalAdquire + (item.total || 0), 0)?.toFixed(2) || 0}</div> 
-          <div className="card"> <span>Promedio por trabajador: </span>{(filteredData.reduce((totalAdquire, item) => totalAdquire + (item.total || 0), 0) / filteredData.length)?.toFixed(2)  || 0}</div> 
-        </div>
-
-        {/* Tabla de datos */}
-        <div className="table-container">
-          <table className='table'>
-            <thead style={{ position: "sticky", top: 0, zIndex: 1 }}> 
-              <tr>
-
-                <th style={{ position: "relative" }} onClick={() => handleSort("rut")}> RUT
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setShowFilters({...showFilters, rut: !showFilters.rut});
-                    }}
-                  > + </button>
-
-                  <FilterBox
-                      show={showFilters.rut}
-                      value={filters.rut}
-                      onChange={(e) =>
-                        setFilters({ ...filters, rut: e.target.value })
-                      }
-                      placeholder="Filtrar RUT"
-                    />
-                </th>
-
-                <th onClick={() => handleSort("name")}> Nombre
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setShowFilters({...showFilters, name: !showFilters.name});
-                    }}
-                  > + </button>
-
-                  <FilterBox
-                      show={showFilters.name}
-                      value={filters.name}
-                      onChange={(e) =>
-                        setFilters({ ...filters, name: e.target.value })
-                      }
-                      placeholder="Filtrar Nombre"
-                    />
-
-                </th>
-                
-                <th onClick={() => handleSort("idQr")}> ID QR
-                </th>
-
-                {data.allDates.map((date) => (
-                  <th key={date} onClick={() => handleSort(date)}>{date}</th>
-                ))}
-
-                <th onClick={() => handleSort("total")}>TOTAL</th>
-              </tr>
-
-            </thead>
-
-            <tbody>
-              {sortedData.map((item) => (
-                <tr key={item.rut}>
-                  <td>{item.rut}</td>
-                  <td>{item.name}</td>
-                  <td>{item.idQr?.[0]}</td>
-                  {data.allDates.map((date) => (
-                    <td key={date}>{item[date]?.toFixed(2) || 0}</td>
-                  ))}
-                  <td>{item["total"]?.toFixed(2) || 0}</td>
-                </tr>
+              <option value="">Seleccionar ciclo</option>
+              {savedRanges.map((range, index) => (
+                <option key={index} value={index}>
+                  {range.name}
+                </option>
               ))}
-            </tbody>
+            </select>
 
-          </table>
+            <div>
+              <div className='select-date'>
+                <label>
+                  {"Fecha de Inicio: "}
+                  <input
+                    type="date"
+                    value={dateRange.startDate}
+                    onChange={(e) =>
+                      setDateRange({ ...dateRange, startDate: e.target.value })
+                    }
+                  />
+                </label>
+
+                <label className='select-date'>
+                  {"Fecha de Finalización: "}
+                  <input
+                    type="date"
+                    value={dateRange.endDate}
+                    onChange={(e) =>
+                      setDateRange({ ...dateRange, endDate: e.target.value })
+                    }
+                  />
+                </label>
+
+                <button
+                  disabled={!dateRange.startDate || !dateRange.endDate}
+                  onClick={() => {
+                    const newRange = {
+                      name: `Fecha ${dateRange.startDate} / ${dateRange.endDate}`,
+                      startDate: dateRange.startDate,
+                      endDate: dateRange.endDate
+                    };
+                    
+                    setSavedRanges((prev) => [...prev, newRange]);
+                    obtainData(dateRange.startDate, dateRange.endDate);
+                  }}
+                >
+                  Crear Ciclo
+                </button>
+              </div>
+            </div>
+          </header>
+
+          {/* Totales */}
+          
+          <div className="card-container"> 
+            <div className="card">  <span>Total Trabajadores: </span>
+                                    <span-outcome>{filteredData.length} </span-outcome>
+                                    <span>en ciclo actual </span></div>
+            <div className="card">  <span>Total Planilla: </span>
+                                    <span-outcome>{filteredData.reduce((totalAdquire, item) => totalAdquire + (item.total || 0), 0)?.toFixed(2) || 0} </span-outcome>
+                                    <span>por pagar </span></div> 
+            <div className="card">  <span>Promedio por trabajador: </span>
+                                    <span-outcome>{(filteredData.reduce((totalAdquire, item) => totalAdquire + (item.total || 0), 0) / filteredData.length)?.toFixed(2)  || 0} </span-outcome>
+                                    <span> en este ciclo</span></div> 
+          </div>
+
+          {/* Tabla de datos */}
+          <div className="table-container">
+            <table className='table'>
+              <thead style={{ position: "sticky", top: 0, zIndex: 1 }}> 
+                <tr>
+
+                  <th style={{ position: "relative" }} onClick={() => handleSort("rut")}> RUT
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setShowFilters({...showFilters, rut: !showFilters.rut});
+                      }}
+                    > + </button>
+
+                    <FilterBox
+                        show={showFilters.rut}
+                        value={filters.rut}
+                        onChange={(e) =>
+                          setFilters({ ...filters, rut: e.target.value })
+                        }
+                        placeholder="Filtrar RUT"
+                      />
+                  </th>
+
+                  <th onClick={() => handleSort("name")}> Nombre
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setShowFilters({...showFilters, name: !showFilters.name});
+                      }}
+                    > + </button>
+
+                    <FilterBox
+                        show={showFilters.name}
+                        value={filters.name}
+                        onChange={(e) =>
+                          setFilters({ ...filters, name: e.target.value })
+                        }
+                        placeholder="Filtrar Nombre"
+                      />
+
+                  </th>
+                  
+                  <th onClick={() => handleSort("idQr")}> ID QR
+                  </th>
+
+                  {data.allDates.map((date) => (
+                    <th key={date} onClick={() => handleSort(date)}>{date}</th>
+                  ))}
+
+                  <th onClick={() => handleSort("total")}>TOTAL</th>
+                </tr>
+
+              </thead>
+
+              <tbody>
+                {sortedData.map((item) => (
+                  <tr key={item.rut}>
+                    <td>{item.rut}</td>
+                    <td>{item.name}</td>
+                    <td>{item.idQr?.[0]}</td>
+                    {data.allDates.map((date) => (
+                      <td key={date}>{item[date]?.toFixed(2) || 0}</td>
+                    ))}
+                    <td>{item["total"]?.toFixed(2) || 0}</td>
+                  </tr>
+                ))}
+              </tbody>
+
+            </table>
+          </div>
         </div>
       </div>
     </div>

@@ -9,6 +9,29 @@ html, body, #root, #root > div  {
   overflow: hidden;
 }
 
+.main {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100%;
+}
+
+.layout {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden; 
+}
+
+.header {
+  height: 80px;
+  background: #2a2a2a;
+  display: flex;
+  align-items: center;
+  padding: 0 20px;
+  border-bottom: 1px solid #444;
+}
+
 
 body {
   margin: 0;
@@ -30,10 +53,23 @@ input::placeholder {
   color: #aaa;
 }
 
+header button {
+  cursor: pointer;
+  background: #8b5cf6;
+  color: white;
+  margin-left: 10px;
+}
+
+header button:hover {
+  background: #7c3aed;
+}
+
+
 button {
   cursor: pointer;
   background: #3a3a3a;
   color: white;
+  margin-left: 10px;
 }
 
 button:hover {
@@ -50,12 +86,21 @@ button:hover {
 }
 
 .sidebar {
-  width: 250px;
+  width: 17%;
   background: #2a2a2a;
   padding: 20px;
-  min-width: 250px;
-  max-width: 250px;
+  min-width: 17%;
+  max-width: 17%;
+  border-right: 1px solid #444;
 }
+
+.sidebar span {
+  font-size: 12px;
+  color: #aaa;
+  font-weight: lighter;
+  margin: 10px;
+}
+
 
 .sidebar button {
   width: 100%;
@@ -69,21 +114,20 @@ button:hover {
 }
 
 .sidebar button.active {
-  background: #7c3aed;
-}
-
-.main {
-  flex: 1;
-  padding: 20px;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden; 
+  background: #8b5cf6;
 }
 
 .select {
   margin-right: 10px;
-  height: 35px;
-  padding: 8px;
+  height: 75px;
+  padding-top: 1%;
+  border-radius: 8px;
+}
+
+.select-date {
+  margin-right: 10px;
+  height: 75px;
+  padding-top: 2%;
   border-radius: 8px;
 }
 
@@ -96,14 +140,15 @@ button:hover {
 
 .card-container {
   display: flex;
+  padding: 1.5%;
   gap: 20px;
-  margin-bottom: 20px;
 }
 
 .card {
   flex: 1;
   background: #2a2a2a;
   padding: 20px;
+  border: 1px solid #444;;
   border-radius: 15px;
   font-weight: bold;
   display: flex;
@@ -117,24 +162,30 @@ button:hover {
   font-weight: lighter;
 }
 
+.card span-outcome {
+  font-size: 28px;
+  color: #fff;
+  font-weight: bold;
+}
+
 .table-container {
   flex: 1;
   overflow-y: auto;
-  border-radius: 10px;
+  border-radius: 20px;
   overflow-y: auto;
-  border-radius: 10px;
+  padding-left: 1.5%;
 }
 
 table {
   width: 100%;
   border-collapse: collapse;
-  background: #2a2a2a;
+  background: #fff;
 }
 
 th {
   background: #333;
   padding: 10px;
-  position: sticky;
+  position: static;
   top: 0;
   z-index: 2;
 }
@@ -142,9 +193,17 @@ th {
 td {
   padding: 10px;
   text-align: center;
+  color: #1e1e1e;
 }
 
 tr:hover {
   transition: 0.2s;
-  background: #444;
+  background: #eee;
+}
+
+h1 {
+  font-size: 5.1mm;
+  font-weight: normal;
+  line-height: 1.0;
+  color: #fff;
 }

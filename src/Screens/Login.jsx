@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
 export default function Login({ signIn }) {
   const [user, setUser] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+
 
   const handleSubmit = (e) => {
     e.preventDefault();
@@ -14,6 +15,14 @@ export default function Login({ signIn }) {
       setError("Usuario o contraseña incorrectos");
     }
   };
+
+  useEffect(() => {
+    const savedUser = localStorage.getItem("user");
+    if (savedUser) {
+      signIn(savedUser);
+    }
+  }, []);
+
 
   return (
     <div >
@@ -34,7 +43,7 @@ export default function Login({ signIn }) {
           onChange={(e) => setPassword(e.target.value)}
         />
         
-        <button type="submit">Entrar</button>
+        <button type="submit" disabled={!user || !password}>Entrar</button>
       </form>
       
       {error && <p style={{ color: "red" }}>{error}</p>}
