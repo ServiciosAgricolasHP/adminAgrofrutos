@@ -29,14 +29,6 @@ export default function Login() {
     }
   };
 
-  useEffect(() => {
-    const savedUser = localStorage.getItem("user");
-    if (savedUser) {
-      signIn(savedUser);
-    }
-  }, []);
-
-
   return (
 
     <div className="flex min-h-screen items-center justify-center bg-[var(--color-bg)] px-4 text-[var(--color-text)]">

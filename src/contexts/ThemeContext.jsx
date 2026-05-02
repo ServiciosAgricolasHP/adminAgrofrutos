@@ -3,22 +3,36 @@ import { createContext, useContext, useEffect, useState } from "react";
 const ThemeContext = createContext(null);
 const STORAGE_KEY = "af.theme";
 
+export const THEMES = [
+  { key: "light", label: "Claro", isDark: false },
+  { key: "dark", label: "Oscuro", isDark: true },
+  { key: "donDiego", label: "Don Diego", isDark: true },
+  { key: "sheridan", label: "Sheridan", isDark: true },
+];
+
+const VALID = new Set(THEMES.map((t) => t.key));
+const KEYS = THEMES.map((t) => `theme-${t.key}`);
+
+function detectInitial() {
+  const saved = localStorage.getItem(STORAGE_KEY);
+  if (saved && VALID.has(saved)) return saved;
+  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
 export function ThemeProvider({ children }) {
-  const [theme, setTheme] = useState(() => {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved === "light" || saved === "dark") return saved;
-    return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-  });
+  const [theme, setTheme] = useState(detectInitial);
 
   useEffect(() => {
-    document.documentElement.classList.toggle("dark", theme === "dark");
+    const root = document.documentElement;
+    root.classList.remove(...KEYS);
+    root.classList.add(`theme-${theme}`);
+    const isDark = THEMES.find((t) => t.key === theme)?.isDark;
+    root.classList.toggle("dark", !!isDark);
     localStorage.setItem(STORAGE_KEY, theme);
   }, [theme]);
 
-  const toggleTheme = () => setTheme((t) => (t === "dark" ? "light" : "dark"));
-
   return (
-    <ThemeContext.Provider value={{ theme, toggleTheme }}>
+    <ThemeContext.Provider value={{ theme, setTheme, themes: THEMES }}>
       {children}
     </ThemeContext.Provider>
   );
