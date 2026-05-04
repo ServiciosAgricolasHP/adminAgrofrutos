@@ -3,7 +3,7 @@ export const BANKS = [
   { code: "012", name: "Banco del Estado de Chile" },
   { code: "001", name: "Banco de Chile" },
   { code: "037", name: "Banco Santander" },
-  { code: "016", name: "Banco de Crédito e Inversiones" },
+  { code: "016", name: "Banco de Crédito e Inversiones/Mach" },
   { code: "504", name: "Banco BBVA" },
   { code: "027", name: "Banco Corpbanca" },
   { code: "028", name: "Banco BICE" },
