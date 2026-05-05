@@ -323,6 +323,16 @@ export default function Faenas() {
     }
   };
 
+  const cyclePrefix = (faenaId, subfaenaId) => {
+    const f = faenas.find((x) => x.id === faenaId);
+    const subList = subsByFaena[faenaId] || [];
+    const s = subList.find((x) => x.id === subfaenaId);
+    const parts = [];
+    if (f?.name) parts.push(f.name);
+    if (s?.name) parts.push(s.name);
+    return parts.length ? parts.join("/") + "/" : "";
+  };
+
   const submitCycle = async (e) => {
     e.preventDefault();
     const { mode, faenaId, data } = cycleForm;
@@ -345,10 +355,12 @@ export default function Faenas() {
     setBusy(true);
     try {
       const labors = data.labors && data.labors.length ? data.labors : defaultLabors();
+      const prefix = cyclePrefix(faenaId, data.subfaenaId);
+      const suffix = (data.labelSuffix ?? data.label ?? "").trim();
       const payload = {
         faenaId,
         subfaenaId: data.subfaenaId || null,
-        label: data.label.trim(),
+        label: prefix + suffix,
         startDate: data.startDate || todayStr(),
         notes: data.notes || "",
         status: data.status || "open",
@@ -380,7 +392,7 @@ export default function Faenas() {
       mode: "create",
       faenaId,
       data: {
-        label: `Ciclo ${scope.length + 1}`,
+        labelSuffix: `Ciclo ${scope.length + 1}`,
         subfaenaId,
         startDate: todayStr(),
         notes: "",
@@ -425,7 +437,7 @@ export default function Faenas() {
       await cyclesService.create({
         faenaId: closeFlow.faenaId,
         subfaenaId: prev.subfaenaId || null,
-        label: `Ciclo ${nextNumber}`,
+        label: cyclePrefix(closeFlow.faenaId, prev.subfaenaId) + `Ciclo ${nextNumber}`,
         startDate: todayStr(),
         notes: "",
         status: "open",
@@ -815,13 +827,27 @@ export default function Faenas() {
       >
         {cycleForm && (
           <form onSubmit={submitCycle} className="space-y-4">
-            <TextField
-              label="Etiqueta"
-              required
-              autoFocus
-              value={cycleForm.data.label}
-              onChange={(v) => setCycleForm((c) => ({ ...c, data: { ...c.data, label: v } }))}
-            />
+            <label className="block">
+              <span className="mb-1 block text-sm text-[var(--color-muted)]">
+                Etiqueta<span className="ml-0.5 text-[var(--color-danger)]">*</span>
+              </span>
+              <div className="flex items-stretch overflow-hidden rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)]">
+                <span className="flex items-center bg-[var(--color-surface)] px-2 text-xs text-[var(--color-muted)] border-r border-[var(--color-border)]">
+                  {cyclePrefix(cycleForm.faenaId, cycleForm.data.subfaenaId) || "—"}
+                </span>
+                <input
+                  required
+                  autoFocus
+                  value={cycleForm.data.labelSuffix ?? ""}
+                  onChange={(e) => setCycleForm((c) => ({ ...c, data: { ...c.data, labelSuffix: e.target.value } }))}
+                  placeholder="Ciclo 1"
+                  className="flex-1 bg-transparent px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)]"
+                />
+              </div>
+              <span className="mt-1 block text-[10px] text-[var(--color-muted)]">
+                El prefijo Faena/Subfaena/ es fijo
+              </span>
+            </label>
             {selectedSubs && selectedSubs.length > 0 && (
               <Select
                 label="Subfaena"

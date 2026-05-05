@@ -9,7 +9,8 @@
       "Bash(git rm *)",
       "Bash(rm src/Components/getData.js src/Components/getIDQR.js src/Components/index.js src/App.css)",
       "Bash(git add *)",
-      "Bash(git mv *)"
+      "Bash(git mv *)",
+      "Bash(npm run *)"
     ]
   }
 }

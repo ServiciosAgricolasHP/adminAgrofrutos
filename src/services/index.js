@@ -6,7 +6,7 @@ export const harvestsService = createService("harvest", "harvests");
 export const cyclesService = createService("cycle", "cycles");
 export const workersService = createService("worker", "worker");
 export const workdaysService = createService("workday", "workdays");
-export const transportsService = createService("transport", "transports");
+export { tripsService as transportsService, paymentsService as transportPaymentsService } from "./transportsService";
 export const logsService = createService("log", "logs");
 
 export { logAction } from "./logger";

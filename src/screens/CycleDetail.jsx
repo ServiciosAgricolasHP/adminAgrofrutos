@@ -3,7 +3,7 @@ import { useParams, Link } from "react-router-dom";
 import { AgGridReact } from "ag-grid-react";
 import { ModuleRegistry, AllCommunityModule } from "ag-grid-community";
 import "ag-grid-community/styles/ag-grid.css";
-import { toPng } from "html-to-image";
+import { toPng, toBlob } from "html-to-image";
 import { cyclesService, faenasService, subfaenasService, workdaysService } from "../services";
 import { formatRutForDisplay } from "../utils/rutUtils";
 import { parseAmount } from "../utils/formula";
@@ -44,6 +44,8 @@ import TextField from "../components/TextField";
 import Select from "../components/Select";
 import ConfirmDialog from "../components/ConfirmDialog";
 import WorkerPickerModal from "../components/WorkerPickerModal";
+import TransportsModal from "../components/TransportsModal";
+import { tripsService } from "../services/transportsService";
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
@@ -56,7 +58,7 @@ const fmtCurrency = (value) =>
   );
 
 const LABOR_TYPES = [
-  { value: "main", label: "Principal (a trato)" },
+  { value: "main", label: "Pago al día" },
   { value: "supervision", label: "Supervisión" },
   { value: "extra", label: "Adicional" },
   { value: "cosecha", label: "Cosecha" },
@@ -87,14 +89,17 @@ function buildRowsCosecha(workers, days, wdMap, dayCombosByDate) {
     let total = 0;
     for (const d of days) {
       const combos = dayCombosByDate[d] || [];
+      let dayTotal = 0;
       for (const c of combos) {
         const wd = wdMap[workdayMapKey(w.rut, d, c.key)];
         const qty = Number(wd?.qty) || 0;
         const amt = Number(wd?.amount) || 0;
         row[`${d}__${c.key}`] = qty;
         row[`${d}__${c.key}__amt`] = amt;
-        total += amt;
+        dayTotal += amt;
       }
+      row[`${d}__total`] = dayTotal;
+      total += dayTotal;
     }
     row.total = total;
     return row;
@@ -215,6 +220,9 @@ export default function CycleDetail() {
   const [dayModeEdit, setDayModeEdit] = useState(null); // { laborId, date }
   const [defaultLeadersOpen, setDefaultLeadersOpen] = useState(false);
   const [tratoHEView, setTratoHEView] = useState("detalle"); // "detalle" | "resumen"
+  const [cosechaView, setCosechaView] = useState("detalle"); // "detalle" | "resumen"
+  const [transportsOpen, setTransportsOpen] = useState(false);
+  const [cycleTrips, setCycleTrips] = useState([]);
 
   const gridRef = useRef(null);
   const photoRef = useRef(null);
@@ -468,10 +476,30 @@ export default function CycleDetail() {
     return out;
   }, [cycle?.labors, workdaysByLabor]);
 
-  const grandTotal = useMemo(
-    () => Object.values(totalsByLabor).reduce((a, b) => a + b, 0),
-    [totalsByLabor],
+  const transportTotal = useMemo(
+    () => cycleTrips.reduce((s, t) => s + (Number(t.amount) || 0), 0),
+    [cycleTrips],
   );
+
+  const grandTotal = useMemo(
+    () => Object.values(totalsByLabor).reduce((a, b) => a + b, 0) + transportTotal,
+    [totalsByLabor, transportTotal],
+  );
+
+  const reloadTransports = async () => {
+    if (!id) return;
+    try {
+      const list = await tripsService.listByCycle(id);
+      setCycleTrips(list);
+    } catch (err) {
+      console.error("[Transports] load failed:", err);
+    }
+  };
+
+  useEffect(() => {
+    reloadTransports();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
 
   const persistDays = async (nextDays) => {
     await cyclesService.update(id, { days: nextDays });
@@ -555,6 +583,9 @@ export default function CycleDetail() {
     baseDayDefault: labor?.baseDayDefault ?? DEFAULT_BASE_DAY,
   });
 
+  const effectiveDayPrice = (labor, dayCfg) =>
+    Number(dayCfg?.price) || Number(labor?.baseDayDefault) || DEFAULT_BASE_DAY;
+
   const computeTratoHEAmount = (labor, dayCfg, wd) =>
     calcTratoHEAmount({
       qty: wd.qty,
@@ -562,7 +593,7 @@ export default function CycleDetail() {
       hasManejo: wd.hasManejo,
       hasSupervision: wd.hasSupervision,
       extras: wd.extras,
-      dayPrice: dayCfg?.price ?? labor?.baseDayDefault ?? DEFAULT_BASE_DAY,
+      dayPrice: effectiveDayPrice(labor, dayCfg),
       dayMode: dayCfg?.mode || "normal",
       ...tratoHERates(labor),
     });
@@ -699,17 +730,12 @@ export default function CycleDetail() {
     if (raw === undefined) return;
     const price = parseAmount(String(raw)) || 0;
     setLocalPriceInputs((prev) => { const n = { ...prev }; delete n[k]; return n; });
-    // For tier keys (t0, t1, etc.) update directly
+    // For tier keys (t0, t1, etc.) route through persistComboConfig so existing wds get recalculated
     if (isTrato && typeof ck === "string" && ck.startsWith("t")) {
       const entry = dayPrices?.[laborId]?.[date];
       const cur = entry?.[ck];
-      if (cur && price !== Number(cur.price)) {
-        const newEntry = { ...dayPrices };
-        const dayEntry = { ...(newEntry[laborId]?.[date] || {}) };
-        dayEntry[ck] = { ...dayEntry[ck], price };
-        newEntry[laborId] = { ...(newEntry[laborId] || {}), [date]: dayEntry };
-        setDayPrices(newEntry);
-        cyclesService.update(id, { dayPrices: newEntry });
+      if (!cur || price !== Number(cur.price)) {
+        persistComboConfig(laborId, date, ck, { price }, true);
       }
       return;
     }
@@ -1121,6 +1147,50 @@ export default function CycleDetail() {
     }
   };
 
+  const copyImage = async () => {
+    if (!photoRef.current) return;
+    setExporting(true);
+    try {
+      const bg = getComputedStyle(document.body).backgroundColor || "#ffffff";
+      const blob = await toBlob(photoRef.current, { backgroundColor: bg, pixelRatio: 2, cacheBust: true });
+      if (!blob) throw new Error("No se pudo generar la imagen");
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+      showToast("Imagen copiada");
+    } catch (err) {
+      console.error(err);
+      showToast("No se pudo copiar la imagen");
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const printPhoto = async () => {
+    if (!photoRef.current) return;
+    setExporting(true);
+    try {
+      const bg = getComputedStyle(document.body).backgroundColor || "#ffffff";
+      const dataUrl = await toPng(photoRef.current, { backgroundColor: bg, pixelRatio: 2, cacheBust: true });
+      const win = window.open("", "_blank", "width=1100,height=800");
+      if (!win) return;
+      win.document.write(`<!DOCTYPE html><html><head><title>${cycle.label} · ${activeLabor?.name || ""}</title>
+        <style>
+          * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; color-adjust: exact !important; }
+          body { margin: 0; padding: 16px; background: #fff; }
+          img { max-width: 100%; height: auto; display: block; }
+          @media print { @page { size: landscape; margin: 8mm; } body { padding: 0; } }
+        </style>
+      </head><body><img src="${dataUrl}" /></body></html>`);
+      win.document.close();
+      win.focus();
+      setTimeout(() => { win.print(); }, 300);
+    } catch (err) {
+      console.error(err);
+      showToast("No se pudo imprimir");
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const buildCopyFields = () => {
     const base = [{ headerName: "RUT", field: "rut" }, { headerName: "Nombre", field: "name" }];
     if (isCosechaLabor) {
@@ -1203,6 +1273,22 @@ export default function CycleDetail() {
     }];
 
     if (isCosechaLabor) {
+      if (cosechaView === "resumen") {
+        const dayCols = days.map((d) => ({
+          headerName: d,
+          field: `${d}__total`,
+          editable: false,
+          width: 110,
+          valueFormatter: (p) => (p.value ? fmtCurrency(p.value) : ""),
+          cellRenderer: (p) => {
+            const amt = Number(p.value) || 0;
+            if (!amt) return "";
+            return <span className="text-right text-sm font-semibold tabular-nums">{fmtCurrency(amt)}</span>;
+          },
+          cellStyle: { textAlign: "right" },
+        }));
+        return [...baseLeft, ...dayCols, totalCol, ...actionsCol];
+      }
       const dayGroups = days.map((d) => {
         const combos = dayCombosByDate[d] || [];
         const children = combos.map((c) => ({
@@ -1285,12 +1371,13 @@ export default function CycleDetail() {
         const m = !!data?.[`${d}__m`];
         const s = !!data?.[`${d}__s`];
         const x = Number(data?.[`${d}__x`]) || 0;
+        const dayPrice = effectiveDayPrice(labor, cfg);
         const lines = [];
-        const base = cfg.mode === "overtimeOnly" ? 0 : (Number(cfg.price) || 0) * qty;
+        const base = cfg.mode === "overtimeOnly" ? 0 : dayPrice * qty;
         if (cfg.mode === "overtimeOnly") {
           lines.push(`Solo HE (sin base)`);
         } else if (qty > 0) {
-          lines.push(`Base: ${fmtCurrency(cfg.price)} × ${qty} = ${fmtCurrency(base)}`);
+          lines.push(`Base: ${fmtCurrency(dayPrice)} × ${qty} = ${fmtCurrency(base)}`);
         }
         if (he > 0) lines.push(`HE: ${he}h × ${fmtCurrency(rates.overtimeRate)} = ${fmtCurrency(he * rates.overtimeRate)}`);
         if (m) lines.push(`Manejo: ${fmtCurrency(rates.bonusManejo)}`);
@@ -1415,7 +1502,7 @@ export default function CycleDetail() {
     }));
     return [...baseLeft, ...dayCols, totalCol, ...actionsCol];
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [days, readOnly, photoMode, isCosechaLabor, isTratoLabor, isTratoHELabor, dayCombosByDate, dayTiersByDate, catalogs, dayPrices, activeLabor, tratoHEView]);
+  }, [days, readOnly, photoMode, isCosechaLabor, isTratoLabor, isTratoHELabor, dayCombosByDate, dayTiersByDate, catalogs, dayPrices, activeLabor, tratoHEView, cosechaView]);
 
   if (loading) return <div className="text-[var(--color-muted)]">Cargando...</div>;
   if (!cycle) return <div className="text-[var(--color-muted)]">Ciclo no encontrado.</div>;
@@ -1450,14 +1537,20 @@ export default function CycleDetail() {
   if (photoMode) {
     return (
       <div className="fixed inset-0 z-50 flex flex-col bg-[var(--color-bg)] p-6">
-        <div className="mb-3 flex items-center gap-2">
+        <div className="mb-3 flex flex-wrap items-center gap-2">
           <button onClick={copyAll} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)]">
-            Copiar todo
+            📋 Copiar texto
+          </button>
+          <button onClick={copyImage} disabled={exporting} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)] disabled:opacity-60">
+            {exporting ? "..." : "🖼 Copiar imagen"}
           </button>
           <button onClick={exportPng} disabled={exporting} className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-[var(--color-accent-fg)] hover:bg-[var(--color-accent-hover)] disabled:opacity-60">
-            {exporting ? "Generando..." : "Descargar PNG"}
+            {exporting ? "Generando..." : "📥 Descargar PNG"}
           </button>
-          <button onClick={() => setPhotoMode(false)} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)]">
+          <button onClick={printPhoto} disabled={exporting} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)] disabled:opacity-60">
+            🖨 Imprimir
+          </button>
+          <button onClick={() => setPhotoMode(false)} className="ml-auto rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)]">
             Salir modo foto
           </button>
         </div>
@@ -1523,6 +1616,9 @@ export default function CycleDetail() {
           <button onClick={() => setCatalogsOpen(true)} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)]">
             ⚙ Catálogos
           </button>
+          <button onClick={() => setTransportsOpen(true)} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)]">
+            🚐 Transportes
+          </button>
           {!closed && (
             <button onClick={() => setCloseFlow(true)} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)]">
               Cerrar ciclo
@@ -1555,7 +1651,7 @@ export default function CycleDetail() {
           const qtyByContainer = totalQtyByContainerByLabor[l.id] || {};
           const totalQty = totalQtyByLabor[l.id] || 0;
           const heMetrics = tratoHEMetricsByLabor[l.id];
-          const tag = isCo ? "cosecha" : isTr ? "trato" : isHE ? "jornadas+HE" : l.type;
+          const tag = isCo ? "cosecha" : isTr ? "trato" : isHE ? "jornadas+HE" : l.type === "main" ? "al día" : l.type;
           const tagClass = isCo
             ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
             : isTr
@@ -1643,6 +1739,22 @@ export default function CycleDetail() {
             </button>
           );
         })}
+        {(transportTotal > 0 || cycleTrips.length > 0) && (
+          <button
+            type="button"
+            onClick={() => setTransportsOpen(true)}
+            className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3 shadow-sm text-left transition-all hover:border-[var(--color-accent)] hover:shadow-md"
+          >
+            <div className="flex items-center justify-between text-xs text-[var(--color-muted)]">
+              <span>Transporte</span>
+              <span className="rounded bg-violet-100 px-1.5 py-0.5 text-[10px] text-violet-700 dark:bg-violet-900/30 dark:text-violet-400">🚐 transp.</span>
+            </div>
+            <div className="mt-1 text-lg font-semibold tabular-nums">{fmtCurrency(transportTotal)}</div>
+            <div className="mt-0.5 text-[11px] text-[var(--color-muted)] tabular-nums">
+              {cycleTrips.length} vuelta{cycleTrips.length === 1 ? "" : "s"}
+            </div>
+          </button>
+        )}
         <div className="rounded-lg border border-[var(--color-accent)] bg-[var(--color-accent-soft)] p-3 shadow-sm">
           <div className="text-xs font-medium uppercase tracking-wider text-[var(--color-accent)]">Total ciclo</div>
           <div className="mt-1 text-lg font-bold tabular-nums text-[var(--color-accent)]">{fmtCurrency(grandTotal)}</div>
@@ -1663,7 +1775,7 @@ export default function CycleDetail() {
               : isHE
                 ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
                 : "bg-[var(--color-surface-2)] text-[var(--color-muted)]";
-          const tagIcon = isCo ? "🌾" : isTr ? "🛠" : isHE ? "⏱" : l.type;
+          const tagIcon = isCo ? "🌾" : isTr ? "🛠" : isHE ? "⏱" : l.type === "main" ? "al día" : l.type;
           return (
             <button
               key={l.id}
@@ -1742,6 +1854,30 @@ export default function CycleDetail() {
                     ⚑ Líderes / Manejo
                   </button>
                 </>
+              )}
+              {isCosechaLabor && (
+                <div className="flex rounded-md overflow-hidden border border-[var(--color-border)] text-xs">
+                  <button
+                    onClick={() => setCosechaView("detalle")}
+                    className={`px-3 py-1.5 transition-colors ${
+                      cosechaView === "detalle"
+                        ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)] font-medium"
+                        : "bg-[var(--color-surface-2)] text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)]"
+                    }`}
+                  >
+                    Detalle
+                  </button>
+                  <button
+                    onClick={() => setCosechaView("resumen")}
+                    className={`px-3 py-1.5 transition-colors ${
+                      cosechaView === "resumen"
+                        ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)] font-medium"
+                        : "bg-[var(--color-surface-2)] text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)]"
+                    }`}
+                  >
+                    Resumen
+                  </button>
+                </div>
               )}
               <button onClick={openEditLabor} disabled={readOnly} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs hover:bg-[var(--color-accent-soft)] disabled:opacity-40">
                 Editar labor
@@ -1978,16 +2114,14 @@ export default function CycleDetail() {
                           <span className="text-[var(--color-muted)]">$</span>
                           <input
                             type="number" min="0" disabled={readOnly}
-                            value={t.price || ""}
-                            onChange={(e) => {
-                              const price = Number(e.target.value) || 0;
-                              const newEntry = { ...dayPrices };
-                              const dayEntry = { ...(newEntry[activeLabor.id]?.[d] || {}) };
-                              dayEntry[t.key] = { price, mode: t.mode };
-                              newEntry[activeLabor.id] = { ...(newEntry[activeLabor.id] || {}), [d]: dayEntry };
-                              setDayPrices(newEntry);
-                            }}
-                            onBlur={() => cyclesService.update(id, { dayPrices })}
+                            value={getPriceInputValue(activeLabor.id, d, t.key, true)}
+                            onChange={(e) =>
+                              setLocalPriceInputs((prev) => ({
+                                ...prev,
+                                [inputKey(activeLabor.id, d, t.key)]: e.target.value,
+                              }))
+                            }
+                            onBlur={() => handlePriceBlur(activeLabor.id, d, t.key, true)}
                             placeholder="precio"
                             className="w-20 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-1 py-0.5 text-right text-[10px] tabular-nums outline-none focus:border-[var(--color-accent)] disabled:opacity-50"
                           />
@@ -1995,13 +2129,13 @@ export default function CycleDetail() {
                           {tiers.length > 1 && (
                             <button
                               disabled={readOnly}
-                              onClick={() => {
+                              onClick={async () => {
                                 const newEntry = { ...dayPrices };
                                 const dayEntry = { ...(newEntry[activeLabor.id]?.[d] || {}) };
                                 delete dayEntry[t.key];
                                 newEntry[activeLabor.id] = { ...(newEntry[activeLabor.id] || {}), [d]: dayEntry };
                                 setDayPrices(newEntry);
-                                cyclesService.update(id, { dayPrices: newEntry });
+                                await cyclesService.update(id, { dayPrices: newEntry });
                               }}
                               className="ml-auto text-[var(--color-danger)] text-[10px] hover:underline disabled:opacity-40"
                             >
@@ -2012,18 +2146,13 @@ export default function CycleDetail() {
                       ))}
                       {!readOnly && (
                         <button
-                          onClick={() => {
+                          onClick={async () => {
                             const newPrice = prompt("Precio:");
                             if (newPrice === null) return;
                             const price = parseAmount(newPrice) || 0;
                             if (price === 0) return;
                             const nextIndex = tiers.length;
-                            const newEntry = { ...dayPrices };
-                            const dayEntry = { ...(newEntry[activeLabor.id]?.[d] || {}) };
-                            dayEntry[`t${nextIndex}`] = { price, mode: defaultMode };
-                            newEntry[activeLabor.id] = { ...(newEntry[activeLabor.id] || {}), [d]: dayEntry };
-                            setDayPrices(newEntry);
-                            cyclesService.update(id, { dayPrices: newEntry });
+                            await persistComboConfig(activeLabor.id, d, `t${nextIndex}`, { price, mode: defaultMode }, true);
                           }}
                           className="text-[var(--color-accent)] text-[10px] hover:underline"
                         >
@@ -2259,6 +2388,19 @@ export default function CycleDetail() {
           await persistTratoHEBonusDefaults(activeLabor.id, defaults);
           setDefaultLeadersOpen(false);
         }}
+      />
+
+      <TransportsModal
+        open={transportsOpen}
+        onClose={async () => {
+          setTransportsOpen(false);
+          await reloadTransports();
+        }}
+        cycle={cycle}
+        faena={faena}
+        subfaena={subfaena}
+        days={days}
+        readOnly={readOnly}
       />
 
       {copyToast && (
