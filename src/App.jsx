@@ -16,7 +16,7 @@ export default function App() {
     <ThemeProvider>
       <AuthProvider>
         <CatalogsProvider>
-          <BrowserRouter>
+          <BrowserRouter basename="/adminAgrofrutos"> 
           <Routes>
             <Route path="/login" element={<Login />} />
             <Route

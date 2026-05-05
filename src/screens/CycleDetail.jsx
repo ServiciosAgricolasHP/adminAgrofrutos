@@ -21,6 +21,10 @@ import {
   normalizeDayPricesEntry,
   workdayDocId,
   workdayMapKey,
+  normalizeTratoDayPrices,
+  getTratoTiers,
+  normalizeTratoWorkday,
+  getTratoTierTotals,
 } from "../utils/cosechaCombos";
 import {
   TRATO_HE_MODES,
@@ -122,17 +126,23 @@ function buildRowsTratoHE(workers, days, wdMap) {
   });
 }
 
-function buildRowsTrato(workers, days, wdMap) {
+function buildRowsTrato(workers, days, wdMap, dayTiersByDate) {
   return workers.map((w) => {
     const row = { rut: w.rut, name: w.name };
     let total = 0;
     for (const d of days) {
-      const wd = wdMap[workdayMapKey(w.rut, d, SINGLE_COMBO)];
-      const qty = Number(wd?.qty) || 0;
-      const amt = Number(wd?.amount) || 0;
-      row[d] = qty;
-      row[`${d}__amt`] = amt;
-      total += amt;
+      const tiers = dayTiersByDate[d] || [];
+      let dayTotal = 0;
+      for (const t of tiers) {
+        const wd = wdMap[workdayMapKey(w.rut, d, t.key)];
+        const qty = Number(wd?.qty) || 0;
+        const amt = Number(wd?.amount) || 0;
+        row[`${d}__${t.key}`] = qty;
+        row[`${d}__${t.key}__amt`] = amt;
+        dayTotal += amt;
+      }
+      row[`${d}__total`] = dayTotal;
+      total += dayTotal;
     }
     row.total = total;
     return row;
@@ -228,9 +238,14 @@ export default function CycleDetail() {
       let dpChanged = false;
       for (const lid of Object.keys(rawDP)) {
         normalizedDP[lid] = {};
+        const labor = (c.labors || []).find((l) => l.id === lid);
+        const laborDefaultMode = labor?.tratoMode || "unit";
         for (const date of Object.keys(rawDP[lid])) {
           const before = rawDP[lid][date];
-          const after = normalizeDayPricesEntry(before);
+          const isTratoType = labor?.type === "trato";
+          const after = isTratoType
+            ? normalizeTratoDayPrices(before, laborDefaultMode)
+            : normalizeDayPricesEntry(before);
           normalizedDP[lid][date] = after;
           if (JSON.stringify(before) !== JSON.stringify(after)) dpChanged = true;
         }
@@ -249,7 +264,8 @@ export default function CycleDetail() {
         const y = Number(w.containerY) || 0;
         const ck = makeComboKey(x, y);
         if (!byLabor[lid]) byLabor[lid] = {};
-        byLabor[lid][workdayMapKey(w.workerRut, w.date, ck)] = w;
+        const normalizedWd = normalizeTratoWorkday(w);
+        byLabor[lid][workdayMapKey(w.workerRut, w.date, ck)] = normalizedWd;
       }
       setWorkdaysByLabor(byLabor);
       setLoading(false);
@@ -298,20 +314,40 @@ export default function CycleDetail() {
     return out;
   }, [isCosechaLabor, activeLabor, days, dayPrices, defaultMode, workdaysByLabor]);
 
-  const tratoDayPrice = useMemo(() => {
+  const dayTiersByDate = useMemo(() => {
     if (!isTratoLabor || !activeLabor) return {};
+    const wdMapForLabor = workdaysByLabor[activeLabor.id] || {};
     const out = {};
-    for (const d of days) out[d] = getDaySingle(dayPrices, activeLabor.id, d, defaultMode);
+    for (const d of days) {
+      const fromPrices = getTratoTiers(dayPrices, activeLabor.id, d, defaultMode);
+      const seen = new Set(fromPrices.map((t) => t.key));
+      const result = [...fromPrices];
+      for (const k in wdMapForLabor) {
+        if (!k.includes(`__${d}__`)) continue;
+        const wd = wdMapForLabor[k];
+        if (!wd?.tiers) continue;
+        for (const tk of Object.keys(wd.tiers)) {
+          const tierKey = `t${tk}`;
+          if (!seen.has(tierKey) && Number(wd.tiers[tk]?.qty) > 0) {
+            const existing = dayPrices?.[activeLabor.id]?.[d]?.[tierKey] || {};
+            result.push({ key: tierKey, index: Number(tk), price: Number(existing.price) || 0, mode: existing.mode || defaultMode });
+            seen.add(tierKey);
+          }
+        }
+      }
+      result.sort((a, b) => a.index - b.index);
+      out[d] = result;
+    }
     return out;
-  }, [isTratoLabor, activeLabor, days, dayPrices, defaultMode]);
+  }, [isTratoLabor, activeLabor, days, dayPrices, defaultMode, workdaysByLabor]);
 
   const rowData = useMemo(() => {
     if (isCosechaLabor) return buildRowsCosecha(workers, days, wdMap, dayCombosByDate);
-    if (isTratoLabor) return buildRowsTrato(workers, days, wdMap);
+    if (isTratoLabor) return buildRowsTrato(workers, days, wdMap, dayTiersByDate);
     if (isTratoHELabor) return buildRowsTratoHE(workers, days, wdMap);
     return buildRowsNormal(workers, days, wdMap);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workers, days, wdMap, isCosechaLabor, isTratoLabor, isTratoHELabor, dayCombosByDate]);
+  }, [workers, days, wdMap, isCosechaLabor, isTratoLabor, isTratoHELabor, dayCombosByDate, dayTiersByDate]);
 
   const totalsByLabor = useMemo(() => {
     const out = {};
@@ -319,7 +355,10 @@ export default function CycleDetail() {
     for (const l of cycle.labors) {
       const m = workdaysByLabor[l.id] || {};
       let sum = 0;
-      for (const k in m) sum += Number(m[k].amount) || 0;
+      for (const k in m) {
+        const wd = m[k];
+        sum += l.type === "trato" ? getTratoTierTotals(wd).amount : (Number(wd.amount) || 0);
+      }
       out[l.id] = sum;
     }
     return out;
@@ -350,7 +389,7 @@ export default function CycleDetail() {
       if (l.type !== "trato") continue;
       const m = workdaysByLabor[l.id] || {};
       let sum = 0;
-      for (const k in m) sum += Number(m[k].qty) || 0;
+      for (const k in m) sum += getTratoTierTotals(m[k]).qty;
       out[l.id] = sum;
     }
     return out;
@@ -403,17 +442,31 @@ export default function CycleDetail() {
     return out;
   }, [isCosechaLabor, activeLabor, workdaysByLabor, days, workers, dayCombosByDate]);
 
-  const totalQtyByDayTrato = useMemo(() => {
-    if (!isTratoLabor || !activeLabor) return {};
-    const m = workdaysByLabor[activeLabor.id] || {};
+  // Per-tier metrics for trato labors
+  const tratoTierMetricsByLabor = useMemo(() => {
     const out = {};
-    for (const d of days) {
-      let sum = 0;
-      for (const w of workers) sum += Number(m[workdayMapKey(w.rut, d, SINGLE_COMBO)]?.qty) || 0;
-      out[d] = sum;
+    if (!cycle?.labors) return out;
+    for (const l of cycle.labors) {
+      if (l.type !== "trato") continue;
+      const m = workdaysByLabor[l.id] || {};
+      const tiers = {};
+      for (const k in m) {
+        const wd = m[k];
+        if (!wd?.tiers) continue;
+        for (const [tk, tv] of Object.entries(wd.tiers)) {
+          const idx = Number(tk);
+          if (!tiers[idx]) tiers[idx] = { qty: 0, amount: 0, workerCount: new Set() };
+          tiers[idx].qty += Number(tv?.qty) || 0;
+          tiers[idx].amount += Number(tv?.amount) || 0;
+          tiers[idx].workerCount.add(wd.workerRut);
+        }
+      }
+      // Convert Sets to counts for serialization
+      for (const idx of Object.keys(tiers)) tiers[idx].workerCount = tiers[idx].workerCount.size;
+      out[l.id] = tiers;
     }
     return out;
-  }, [isTratoLabor, activeLabor, workdaysByLabor, days, workers]);
+  }, [cycle?.labors, workdaysByLabor]);
 
   const grandTotal = useMemo(
     () => Object.values(totalsByLabor).reduce((a, b) => a + b, 0),
@@ -646,6 +699,20 @@ export default function CycleDetail() {
     if (raw === undefined) return;
     const price = parseAmount(String(raw)) || 0;
     setLocalPriceInputs((prev) => { const n = { ...prev }; delete n[k]; return n; });
+    // For tier keys (t0, t1, etc.) update directly
+    if (isTrato && typeof ck === "string" && ck.startsWith("t")) {
+      const entry = dayPrices?.[laborId]?.[date];
+      const cur = entry?.[ck];
+      if (cur && price !== Number(cur.price)) {
+        const newEntry = { ...dayPrices };
+        const dayEntry = { ...(newEntry[laborId]?.[date] || {}) };
+        dayEntry[ck] = { ...dayEntry[ck], price };
+        newEntry[laborId] = { ...(newEntry[laborId] || {}), [date]: dayEntry };
+        setDayPrices(newEntry);
+        cyclesService.update(id, { dayPrices: newEntry });
+      }
+      return;
+    }
     const cur = isTrato
       ? getDaySingle(dayPrices, laborId, date, defaultMode)
       : getCombo(laborId, date, ck);
@@ -657,6 +724,12 @@ export default function CycleDetail() {
   const getPriceInputValue = (laborId, date, ck, isTrato = false) => {
     const k = inputKey(laborId, date, ck);
     if (k in localPriceInputs) return localPriceInputs[k];
+    // For tier keys (t0, t1, etc.)
+    if (isTrato && typeof ck === "string" && ck.startsWith("t")) {
+      const entry = dayPrices?.[laborId]?.[date];
+      const tier = entry?.[ck];
+      return tier?.price || "";
+    }
     const cur = isTrato
       ? getDaySingle(dayPrices, laborId, date, defaultMode)
       : getCombo(laborId, date, ck);
@@ -669,7 +742,7 @@ export default function CycleDetail() {
 
   const onCellValueChanged = async (params) => {
     const field = params.colDef.field;
-    if (!field || field === "total" || field === "rut" || field === "name" || field.endsWith("__amt")) return;
+    if (!field || field === "total" || field === "rut" || field === "name" || field.endsWith("__amt") || field.endsWith("__total")) return;
 
     if (isCosechaLabor) {
       const [date, ...rest] = field.split("__");
@@ -740,13 +813,17 @@ export default function CycleDetail() {
     }
 
     if (isTratoLabor) {
-      const date = field;
+      const [date, ...rest] = field.split("__");
+      const tierKey = rest.join("_"); // e.g., "t0", "t1"
       const workerRut = params.data.rut;
-      const docId = workdayDocId(id, activeLabor.id, workerRut, date, SINGLE_COMBO);
-      const mapKey = workdayMapKey(workerRut, date, SINGLE_COMBO);
+      const docId = workdayDocId(id, activeLabor.id, workerRut, date, tierKey);
+      const mapKey = workdayMapKey(workerRut, date, tierKey);
       const qty = parseAmount(params.newValue) || 0;
-      const cfg = getDaySingle(dayPrices, activeLabor.id, date, defaultMode);
-      const amount = cfg.mode === "flat" ? cfg.price : qty * cfg.price;
+
+      // Find the tier config to calculate amount
+      const tiers = dayTiersByDate[date] || [];
+      const tier = tiers.find((t) => t.key === tierKey);
+      const amount = tier && tier.mode === "flat" ? (qty > 0 ? tier.price : 0) : qty * (tier?.price || 0);
 
       if (qty === 0) {
         if (wdMap[mapKey]) {
@@ -757,8 +834,8 @@ export default function CycleDetail() {
             return { ...prev, [activeLabor.id]: lab };
           });
         }
-        params.node.setDataValue(date, 0);
-        params.node.setDataValue(`${date}__amt`, 0);
+        params.node.setDataValue(field, 0);
+        params.node.setDataValue(`${field}__amt`, 0);
       } else {
         await workdaysService.upsert(docId, {
           cycleId: id, laborId: activeLabor.id, workerRut, date, qty, amount,
@@ -768,14 +845,21 @@ export default function CycleDetail() {
           lab[mapKey] = { ...lab[mapKey], cycleId: id, laborId: activeLabor.id, workerRut, date, qty, amount };
           return { ...prev, [activeLabor.id]: lab };
         });
-        params.node.setDataValue(date, qty);
-        params.node.setDataValue(`${date}__amt`, amount);
+        params.node.setDataValue(field, qty);
+        params.node.setDataValue(`${field}__amt`, amount);
       }
-      const newTotal = days.reduce(
-        (acc, d) => acc + (d === date ? amount : Number(params.data[`${d}__amt`]) || 0),
-        0,
-      );
-      params.node.setDataValue("total", newTotal);
+
+      // Recalc total from grid row data
+      let rowTotal = 0;
+      for (const d of days) {
+        const combos = dayTiersByDate[d] || [];
+        for (const t of combos) {
+          const f = `${d}__${t.key}`;
+          if (f === field) rowTotal += amount;
+          else rowTotal += Number(params.data[`${f}__amt`]) || 0;
+        }
+      }
+      params.node.setDataValue("total", rowTotal);
       return;
     }
 
@@ -1045,6 +1129,12 @@ export default function CycleDetail() {
           base.push({ headerName: `${d} ${comboLabel(catalogs, c.x, c.y)}`, field: `${d}__${c.key}` });
         }
       }
+    } else if (isTratoLabor) {
+      for (const d of days) {
+        for (const t of (dayTiersByDate[d] || [])) {
+          base.push({ headerName: `${d} · $${t.price}`, field: `${d}__${t.key}` });
+        }
+      }
     } else {
       for (const d of days) base.push({ headerName: d, field: d });
     }
@@ -1149,27 +1239,37 @@ export default function CycleDetail() {
     }
 
     if (isTratoLabor) {
-      const dayCols = days.map((d) => ({
-        headerName: d, field: d,
-        editable: !readOnly && !photoMode,
-        width: 120,
-        type: "numericColumn",
-        valueParser: (p) => parseAmount(p.newValue),
-        cellRenderer: (p) => {
-          const qty = Number(p.value) || 0;
-          const amt = Number(p.data?.[`${d}__amt`]) || 0;
-          if (!qty && !amt) return "";
-          return (
-            <div className="leading-tight">
-              <div className="font-medium tabular-nums">{qty.toLocaleString("es-CL")}</div>
-              {amt > 0 && (
-                <div className="text-[10px] text-[var(--color-muted)] tabular-nums">{fmtCurrency(amt)}</div>
-              )}
-            </div>
-          );
-        },
-      }));
-      return [...baseLeft, ...dayCols, totalCol, ...actionsCol];
+      const dayGroups = days.map((d) => {
+        const tiers = dayTiersByDate[d] || [];
+        const children = tiers.map((t) => ({
+          headerName: `${fmtCurrency(t.price)} ${t.mode === "flat" ? "/día" : "/unid"}`,
+          field: `${d}__${t.key}`,
+          editable: !readOnly && !photoMode,
+          width: 120,
+          type: "numericColumn",
+          valueParser: (p) => parseAmount(p.newValue),
+          cellRenderer: (p) => {
+            const qty = Number(p.value) || 0;
+            const amt = Number(p.data?.[`${d}__${t.key}__amt`]) || 0;
+            if (!qty && !amt) return "";
+            return (
+              <div className="leading-tight">
+                <div className="font-medium tabular-nums">{qty.toLocaleString("es-CL")}</div>
+                {amt > 0 && (
+                  <div className="text-[10px] text-[var(--color-muted)] tabular-nums">{fmtCurrency(amt)}</div>
+                )}
+              </div>
+            );
+          },
+        }));
+        return {
+          headerName: d, groupId: `g_${d}`,
+          children: children.length ? children : [{
+            headerName: "—", field: `${d}__placeholder`, editable: false, width: 80, valueGetter: () => "",
+          }],
+        };
+      });
+      return [...baseLeft, ...dayGroups, totalCol, ...actionsCol];
     }
 
     if (isTratoHELabor) {
@@ -1315,7 +1415,7 @@ export default function CycleDetail() {
     }));
     return [...baseLeft, ...dayCols, totalCol, ...actionsCol];
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [days, readOnly, photoMode, isCosechaLabor, isTratoLabor, isTratoHELabor, dayCombosByDate, catalogs, dayPrices, activeLabor, tratoHEView]);
+  }, [days, readOnly, photoMode, isCosechaLabor, isTratoLabor, isTratoHELabor, dayCombosByDate, dayTiersByDate, catalogs, dayPrices, activeLabor, tratoHEView]);
 
   if (loading) return <div className="text-[var(--color-muted)]">Cargando...</div>;
   if (!cycle) return <div className="text-[var(--color-muted)]">Ciclo no encontrado.</div>;
@@ -1486,8 +1586,24 @@ export default function CycleDetail() {
                 </div>
               )}
               {isTr && (
-                <div className="mt-0.5 text-[11px] text-[var(--color-muted)]">
-                  {tratoTypeLabel(catalogs, l.tratoType ?? 0)} · {totalQty.toLocaleString("es-CL")} unid.
+                <div className="mt-1 space-y-0.5 text-[11px] tabular-nums">
+                  <div className="text-[var(--color-muted)]">
+                    {tratoTypeLabel(catalogs, l.tratoType ?? 0)} · {totalQty.toLocaleString("es-CL")} unid.
+                  </div>
+                  {tratoTierMetricsByLabor[l.id] && Object.keys(tratoTierMetricsByLabor[l.id]).length > 1 && (
+                    <div className="mt-0.5 space-y-0">
+                      {Object.entries(tratoTierMetricsByLabor[l.id])
+                        .sort(([a], [b]) => Number(a) - Number(b))
+                        .map(([idx, tm]) => (
+                          <div key={idx} className="flex justify-between gap-2 text-[var(--color-muted)]">
+                            <span>Precio {Number(idx) + 1}:</span>
+                            <span>
+                              {tm.qty.toLocaleString("es-CL")} unid. · {fmtCurrency(tm.amount)}
+                            </span>
+                          </div>
+                        ))}
+                    </div>
+                  )}
                 </div>
               )}
               {isHE && heMetrics && (
@@ -1833,70 +1949,90 @@ export default function CycleDetail() {
               </div>
               <div className="flex flex-wrap gap-2">
                 {days.map((d) => {
-                  const cfg = tratoDayPrice[d] || { price: 0, mode: defaultMode };
-                  const totalQty = totalQtyByDayTrato[d] || 0;
-                  const workersWithQty = workers.filter(
-                    (w) => (wdMap[workdayMapKey(w.rut, d, SINGLE_COMBO)]?.qty || 0) > 0,
-                  ).length;
-                  const totalAmt = cfg.mode === "flat" ? cfg.price * workersWithQty : totalQty * cfg.price;
+                  const tiers = dayTiersByDate[d] || [];
+                  // Calculate total qty and amount from workday records
+                  let totalQty = 0, totalAmt = 0;
+                  for (const w of workers) {
+                    for (const t of tiers) {
+                      const wd = wdMap[workdayMapKey(w.rut, d, t.key)];
+                      totalQty += Number(wd?.qty) || 0;
+                      totalAmt += Number(wd?.amount) || 0;
+                    }
+                  }
                   return (
                     <div
                       key={d}
                       className={`flex flex-col gap-1.5 rounded-lg border px-3 py-2 text-xs ${
-                        cfg.price > 0 ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)]" : "border-[var(--color-border)] bg-[var(--color-surface-2)]"
+                        tiers.length > 0 && tiers.some((t) => t.price > 0)
+                          ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)]"
+                          : "border-[var(--color-border)] bg-[var(--color-surface-2)]"
                       }`}
                     >
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center justify-between gap-2">
                         <span className="font-medium text-[var(--color-text)]">{d}</span>
-                        <span className="text-[var(--color-muted)]">·</span>
-                        <span className="text-[var(--color-muted)]">{totalQty.toLocaleString("es-CL")}</span>
+                        {totalQty > 0 && <span className="text-[var(--color-muted)]">{totalQty.toLocaleString("es-CL")}</span>}
                       </div>
-                      <div className="flex rounded-md overflow-hidden border border-[var(--color-border)] text-[10px]">
-                        <button
-                          disabled={readOnly}
-                          onClick={() => persistComboConfig(activeLabor.id, d, SINGLE_COMBO, { mode: "unit" }, true)}
-                          className={`flex-1 px-2 py-0.5 transition-colors ${
-                            cfg.mode === "unit"
-                              ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)] font-medium"
-                              : "bg-[var(--color-surface-2)] text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)]"
-                          } disabled:opacity-50`}
-                        >
-                          $/unidad
-                        </button>
-                        <button
-                          disabled={readOnly}
-                          onClick={() => persistComboConfig(activeLabor.id, d, SINGLE_COMBO, { mode: "flat" }, true)}
-                          className={`flex-1 px-2 py-0.5 transition-colors ${
-                            cfg.mode === "flat"
-                              ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)] font-medium"
-                              : "bg-[var(--color-surface-2)] text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)]"
-                          } disabled:opacity-50`}
-                        >
-                          $/día
-                        </button>
-                      </div>
-                      <div className="flex items-center gap-1">
-                        <span className="text-[var(--color-muted)]">$</span>
-                        <input
-                          type="number" min="0" disabled={readOnly}
-                          value={getPriceInputValue(activeLabor.id, d, SINGLE_COMBO, true)}
-                          onChange={(e) =>
-                            setLocalPriceInputs((prev) => ({
-                              ...prev,
-                              [inputKey(activeLabor.id, d, SINGLE_COMBO)]: e.target.value,
-                            }))
-                          }
-                          onBlur={() => handlePriceBlur(activeLabor.id, d, SINGLE_COMBO, true)}
-                          placeholder={cfg.mode === "flat" ? "tarifa/trab." : "precio/unidad"}
-                          className="w-28 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-0.5 text-right tabular-nums outline-none focus:border-[var(--color-accent)] disabled:opacity-50"
-                        />
-                      </div>
-                      {totalAmt > 0 && (
-                        <div className="text-[var(--color-accent)] font-medium tabular-nums">
-                          = {fmtCurrency(totalAmt)}
-                          {cfg.mode === "flat" && workersWithQty > 0 && (
-                            <span className="ml-1 font-normal text-[var(--color-muted)]">({workersWithQty} trab.)</span>
+                      {tiers.map((t, i) => (
+                        <div key={t.key} className="flex items-center gap-1 rounded-md bg-[var(--color-surface)] px-2 py-1">
+                          <span className="text-[var(--color-muted)] text-[10px] w-12">P{i + 1}</span>
+                          <span className="text-[var(--color-muted)]">$</span>
+                          <input
+                            type="number" min="0" disabled={readOnly}
+                            value={t.price || ""}
+                            onChange={(e) => {
+                              const price = Number(e.target.value) || 0;
+                              const newEntry = { ...dayPrices };
+                              const dayEntry = { ...(newEntry[activeLabor.id]?.[d] || {}) };
+                              dayEntry[t.key] = { price, mode: t.mode };
+                              newEntry[activeLabor.id] = { ...(newEntry[activeLabor.id] || {}), [d]: dayEntry };
+                              setDayPrices(newEntry);
+                            }}
+                            onBlur={() => cyclesService.update(id, { dayPrices })}
+                            placeholder="precio"
+                            className="w-20 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-1 py-0.5 text-right text-[10px] tabular-nums outline-none focus:border-[var(--color-accent)] disabled:opacity-50"
+                          />
+                          <span className="text-[var(--color-muted)] text-[10px]">{t.mode === "flat" ? "/día" : "/unid"}</span>
+                          {tiers.length > 1 && (
+                            <button
+                              disabled={readOnly}
+                              onClick={() => {
+                                const newEntry = { ...dayPrices };
+                                const dayEntry = { ...(newEntry[activeLabor.id]?.[d] || {}) };
+                                delete dayEntry[t.key];
+                                newEntry[activeLabor.id] = { ...(newEntry[activeLabor.id] || {}), [d]: dayEntry };
+                                setDayPrices(newEntry);
+                                cyclesService.update(id, { dayPrices: newEntry });
+                              }}
+                              className="ml-auto text-[var(--color-danger)] text-[10px] hover:underline disabled:opacity-40"
+                            >
+                              ✕
+                            </button>
                           )}
+                        </div>
+                      ))}
+                      {!readOnly && (
+                        <button
+                          onClick={() => {
+                            const newPrice = prompt("Precio:");
+                            if (newPrice === null) return;
+                            const price = parseAmount(newPrice) || 0;
+                            if (price === 0) return;
+                            const nextIndex = tiers.length;
+                            const newEntry = { ...dayPrices };
+                            const dayEntry = { ...(newEntry[activeLabor.id]?.[d] || {}) };
+                            dayEntry[`t${nextIndex}`] = { price, mode: defaultMode };
+                            newEntry[activeLabor.id] = { ...(newEntry[activeLabor.id] || {}), [d]: dayEntry };
+                            setDayPrices(newEntry);
+                            cyclesService.update(id, { dayPrices: newEntry });
+                          }}
+                          className="text-[var(--color-accent)] text-[10px] hover:underline"
+                        >
+                          + Agregar precio
+                        </button>
+                      )}
+                      {totalAmt > 0 && (
+                        <div className="text-[var(--color-accent)] font-medium tabular-nums text-[11px]">
+                          = {fmtCurrency(totalAmt)}
                         </div>
                       )}
                     </div>
@@ -2121,8 +2257,6 @@ export default function CycleDetail() {
         onSave={async (defaults) => {
           if (!activeLabor) return;
           await persistTratoHEBonusDefaults(activeLabor.id, defaults);
-          // Recalc: defaults only seed new workdays, but if user wants existing to update,
-          // they must edit per workday. Just close.
           setDefaultLeadersOpen(false);
         }}
       />

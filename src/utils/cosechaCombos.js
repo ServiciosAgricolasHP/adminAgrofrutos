@@ -89,3 +89,60 @@ export const workdayDocId = (cycleId, laborId, rut, date, ck = "0_0") =>
 
 export const workdayMapKey = (rut, date, ck = "0_0") =>
   `${rut}__${date}__${ck}`;
+
+// ============================================================
+// Multi-price tier helpers for "trato" labors
+// ============================================================
+
+// Normalize legacy dayPrices entry to tier-based format.
+// Legacy: { price, mode } or { "0_0": { price, mode } }
+// New: { t0: { price, mode }, t1: { price, mode }, ... }
+export function normalizeTratoDayPrices(entry, defaultMode = "unit") {
+  if (!entry || typeof entry !== "object") return { t0: { price: 0, mode: defaultMode } };
+  // Already has tier keys (t0, t1, etc.)
+  if (Object.keys(entry).some((k) => k.startsWith("t") && /^\d+$/.test(k.slice(1)))) return entry;
+  // Legacy { price, mode }
+  if ("price" in entry || "mode" in entry) {
+    return { t0: { price: Number(entry.price) || 0, mode: entry.mode || defaultMode } };
+  }
+  // Legacy { "0_0": { price, mode } }
+  const single = entry["0_0"];
+  if (single) return { t0: { price: Number(single.price) || 0, mode: single.mode || defaultMode } };
+  return { t0: { price: 0, mode: defaultMode } };
+}
+
+// Get price tiers for a labor+date from dayPrices.
+// Returns [{key: "t0", index: 0, price, mode}, ...]
+export function getTratoTiers(dayPrices, laborId, date, defaultMode = "unit") {
+  const entry = dayPrices?.[laborId]?.[date];
+  const normalized = normalizeTratoDayPrices(entry, defaultMode);
+  return Object.entries(normalized)
+    .filter(([k]) => k.startsWith("t") && /^\d+$/.test(k.slice(1)))
+    .map(([k, v]) => ({ key: k, index: Number(k.slice(1)), price: Number(v?.price) || 0, mode: v?.mode || defaultMode }))
+    .sort((a, b) => a.index - b.index);
+}
+
+// Normalize legacy workday record to tier-based format.
+// Legacy: { qty, amount }
+// New: { tiers: { "0": { qty, amount } }, totalAmount }
+export function normalizeTratoWorkday(wd) {
+  if (!wd) return wd;
+  if (wd.tiers) return wd;
+  const qty = Number(wd.qty) || 0;
+  const amount = Number(wd.amount) || 0;
+  return { ...wd, tiers: { "0": { qty, amount } }, totalAmount: amount };
+}
+
+// Get total qty and amount from a workday record (supports both legacy and new format)
+export function getTratoTierTotals(wd) {
+  if (!wd) return { qty: 0, amount: 0 };
+  if (wd.tiers) {
+    let qty = 0, amount = 0;
+    for (const t of Object.values(wd.tiers)) {
+      qty += Number(t?.qty) || 0;
+      amount += Number(t?.amount) || 0;
+    }
+    return { qty, amount };
+  }
+  return { qty: Number(wd.qty) || 0, amount: Number(wd.amount) || 0 };
+}
