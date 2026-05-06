@@ -8,6 +8,7 @@ import { deleteWorkerSafe } from "../services/workersService";
 import { formatRutForDisplay } from "../utils/rutUtils";
 import { bankName, accountTypeLabel, isCuentaRut } from "../utils/banks";
 import WorkerEditModal from "../components/WorkerEditModal";
+import WorkerSummaryModal from "../components/WorkerSummaryModal";
 import ConfirmDialog from "../components/ConfirmDialog";
 
 ModuleRegistry.registerModules([AllCommunityModule]);
@@ -17,6 +18,7 @@ export default function Workers() {
   const [loading, setLoading] = useState(true);
   const [edit, setEdit] = useState(null);
   const [confirm, setConfirm] = useState(null);
+  const [summary, setSummary] = useState(null);
   const [search, setSearch] = useState("");
 
   const load = async () => {
@@ -99,10 +101,16 @@ export default function Workers() {
       },
       {
         headerName: "",
-        width: 170,
+        width: 240,
         pinned: "right",
         cellRenderer: (p) => (
           <div className="flex h-full items-center gap-2">
+            <button
+              onClick={() => setSummary(p.data)}
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2.5 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
+            >
+              📊 Resumen
+            </button>
             <button
               onClick={() => setEdit({ mode: "edit", worker: p.data })}
               className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2.5 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
@@ -169,6 +177,12 @@ export default function Workers() {
         allWorkers={rows}
         onClose={() => setEdit(null)}
         onSaved={onSaved}
+      />
+
+      <WorkerSummaryModal
+        open={!!summary}
+        worker={summary}
+        onClose={() => setSummary(null)}
       />
 
       <ConfirmDialog

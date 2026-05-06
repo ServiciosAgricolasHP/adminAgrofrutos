@@ -35,11 +35,11 @@ src/
   main.jsx              ← punto de entrada / entry point
   App.jsx               ← router (react-router-dom)
   firebase.js           ← Firebase init (Firestore db = "hpdatabase")
-  Components/           ← UI compartida (Layout, Modal, ProtectedRoute, etc.)
-  screens/              ← componentes de ruta / page-level route components
-  contexts/             ← AuthContext, ThemeContext, CatalogsContext
-  services/             ← capa de datos (Firestore CRUD + caché + auditoría)
-  utils/                ← helpers de dominio (RUT, fórmulas, ag-grid locale, etc.)
+  Components/           ← UI compartida (Layout, Modal, ProtectedRoute, TransportsModal, etc.)
+  screens/              ← componentes de ruta / page-level route components (Transports, CycleDetail, Faenas)
+  contexts/             ← AuthContext, ThemeContext, CatalogsContext, CarriersContext
+  services/             ← capa de datos (Firestore CRUD + caché + auditoría + transportsService, carriersService)
+  utils/                ← helpers de dominio (RUT, fórmulas, ag-grid locale, cosechaCombos, etc.)
 ```
 
 ### Auth
@@ -58,7 +58,8 @@ src/
 
 ### Contexts
 
-- Orden en `App.jsx` importa: `ThemeProvider` → `AuthProvider` → `CatalogsProvider`.
+- Orden en `App.jsx` importa: `ThemeProvider` → `AuthProvider` → `CarriersProvider` → `CatalogsProvider`.
+- `CarriersProvider` precarga transportistas; expone `carriers`, `activeCarriers`, `addCarrier`, `updateCarrier`, `softDeleteCarrier`, `restoreCarrier`.
 - `CatalogsProvider` precarga tablas de lookup usadas en las pantallas.
 
 ## Convenciones / Conventions
@@ -101,6 +102,18 @@ Definidos en `src/screens/CycleDetail.jsx` (`LABOR_TYPES`). Cada labor tiene un 
 
 - Combos = calidad × envase, almacenados como `dayPrices[laborId][date]` con claves `${x}_${y}`
 - Catálogos globales para `qualities`, `containers` — editables via ⚙ Catálogos
+
+## Transports / Transporte
+
+- Pantalla: `src/screens/Transports.jsx` — gestión de viajes y pagos a transportistas.
+- Modal: `src/components/TransportsModal.jsx` — usado en `CycleDetail` para asignar viajes rápidos.
+- Servicios: `services/transportsService.js` exporta `tripsService` (alias `transportsService`) y `paymentsService` (alias `transportPaymentsService`).
+- Contexto: `CarriersContext` (`contexts/CarriersContext.jsx`) precarga transportistas; expone CRUD con soft-delete.
+- Tipos de viaje: `regular` (Vuelta), `approach` (Acercamiento) — definidos en `TRIP_KINDS`.
+- Tipos de transportista: `own` (Propio), `contracted` (Contratado) — definidos en `CARRIER_TYPES`.
+- Cada transportista tiene `alias`, `name`, `type`, `defaultRate`, `vehicles[]`, `notes`, `active`.
+- Viajes almacenan: `carrierId`, `vehicleAlias`, `cycleId`, `date`, `qty`, `rate`, `personCount`, `kind`, `notes`.
+- Pagos almacenan: `carrierId`, `cycleId`, `trips[]` (refs), `totalAmount`, `paidAt`, `notes`.
 
 ## Env
 

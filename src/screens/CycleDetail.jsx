@@ -45,6 +45,7 @@ import Select from "../components/Select";
 import ConfirmDialog from "../components/ConfirmDialog";
 import WorkerPickerModal from "../components/WorkerPickerModal";
 import TransportsModal from "../components/TransportsModal";
+import CycleSummaryModal from "../components/CycleSummaryModal";
 import { tripsService } from "../services/transportsService";
 
 ModuleRegistry.registerModules([AllCommunityModule]);
@@ -223,6 +224,7 @@ export default function CycleDetail() {
   const [cosechaView, setCosechaView] = useState("detalle"); // "detalle" | "resumen"
   const [transportsOpen, setTransportsOpen] = useState(false);
   const [cycleTrips, setCycleTrips] = useState([]);
+  const [summaryOpen, setSummaryOpen] = useState(false);
 
   const gridRef = useRef(null);
   const photoRef = useRef(null);
@@ -1619,6 +1621,9 @@ export default function CycleDetail() {
           <button onClick={() => setTransportsOpen(true)} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)]">
             🚐 Transportes
           </button>
+          <button onClick={() => setSummaryOpen(true)} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)]">
+            📊 Resumen
+          </button>
           {!closed && (
             <button onClick={() => setCloseFlow(true)} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)]">
               Cerrar ciclo
@@ -2401,6 +2406,17 @@ export default function CycleDetail() {
         subfaena={subfaena}
         days={days}
         readOnly={readOnly}
+      />
+
+      <CycleSummaryModal
+        open={summaryOpen}
+        onClose={() => setSummaryOpen(false)}
+        cycle={cycle}
+        workdaysByLabor={workdaysByLabor}
+        dayPrices={dayPrices}
+        catalogs={catalogs}
+        faena={faena}
+        subfaena={subfaena}
       />
 
       {copyToast && (
