@@ -222,6 +222,7 @@ export default function CycleDetail() {
   const [defaultLeadersOpen, setDefaultLeadersOpen] = useState(false);
   const [tratoHEView, setTratoHEView] = useState("detalle"); // "detalle" | "resumen"
   const [cosechaView, setCosechaView] = useState("detalle"); // "detalle" | "resumen"
+  const [tratoView, setTratoView] = useState("detalle"); // "detalle" | "resumen"
   const [transportsOpen, setTransportsOpen] = useState(false);
   const [cycleTrips, setCycleTrips] = useState([]);
   const [summaryOpen, setSummaryOpen] = useState(false);
@@ -1327,6 +1328,22 @@ export default function CycleDetail() {
     }
 
     if (isTratoLabor) {
+      if (tratoView === "resumen") {
+        const dayCols = days.map((d) => ({
+          headerName: d,
+          field: `${d}__total`,
+          editable: false,
+          width: 110,
+          valueFormatter: (p) => (p.value ? fmtCurrency(p.value) : ""),
+          cellRenderer: (p) => {
+            const amt = Number(p.value) || 0;
+            if (!amt) return "";
+            return <span className="text-right text-sm font-semibold tabular-nums">{fmtCurrency(amt)}</span>;
+          },
+          cellStyle: { textAlign: "right" },
+        }));
+        return [...baseLeft, ...dayCols, totalCol, ...actionsCol];
+      }
       const dayGroups = days.map((d) => {
         const tiers = dayTiersByDate[d] || [];
         const children = tiers.map((t) => ({
@@ -1504,7 +1521,7 @@ export default function CycleDetail() {
     }));
     return [...baseLeft, ...dayCols, totalCol, ...actionsCol];
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [days, readOnly, photoMode, isCosechaLabor, isTratoLabor, isTratoHELabor, dayCombosByDate, dayTiersByDate, catalogs, dayPrices, activeLabor, tratoHEView, cosechaView]);
+  }, [days, readOnly, photoMode, isCosechaLabor, isTratoLabor, isTratoHELabor, dayCombosByDate, dayTiersByDate, catalogs, dayPrices, activeLabor, tratoHEView, cosechaView, tratoView]);
 
   if (loading) return <div className="text-[var(--color-muted)]">Cargando...</div>;
   if (!cycle) return <div className="text-[var(--color-muted)]">Ciclo no encontrado.</div>;
@@ -1884,6 +1901,30 @@ export default function CycleDetail() {
                   </button>
                 </div>
               )}
+              {isTratoLabor && (
+                <div className="flex rounded-md overflow-hidden border border-[var(--color-border)] text-xs">
+                  <button
+                    onClick={() => setTratoView("detalle")}
+                    className={`px-3 py-1.5 transition-colors ${
+                      tratoView === "detalle"
+                        ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)] font-medium"
+                        : "bg-[var(--color-surface-2)] text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)]"
+                    }`}
+                  >
+                    Detalle
+                  </button>
+                  <button
+                    onClick={() => setTratoView("resumen")}
+                    className={`px-3 py-1.5 transition-colors ${
+                      tratoView === "resumen"
+                        ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)] font-medium"
+                        : "bg-[var(--color-surface-2)] text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)]"
+                    }`}
+                  >
+                    Resumen
+                  </button>
+                </div>
+              )}
               <button onClick={openEditLabor} disabled={readOnly} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs hover:bg-[var(--color-accent-soft)] disabled:opacity-40">
                 Editar labor
               </button>
@@ -2130,7 +2171,32 @@ export default function CycleDetail() {
                             placeholder="precio"
                             className="w-20 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-1 py-0.5 text-right text-[10px] tabular-nums outline-none focus:border-[var(--color-accent)] disabled:opacity-50"
                           />
-                          <span className="text-[var(--color-muted)] text-[10px]">{t.mode === "flat" ? "/día" : "/unid"}</span>
+                          <div className="flex overflow-hidden rounded border border-[var(--color-border)] text-[10px]">
+                            <button
+                              disabled={readOnly}
+                              onClick={() => persistComboConfig(activeLabor.id, d, t.key, { mode: "unit" }, true)}
+                              title="Por unidad (qty × precio)"
+                              className={`px-1.5 py-0.5 transition-colors disabled:opacity-50 ${
+                                t.mode === "unit"
+                                  ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)] font-medium"
+                                  : "bg-[var(--color-surface-2)] text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)]"
+                              }`}
+                            >
+                              /unid
+                            </button>
+                            <button
+                              disabled={readOnly}
+                              onClick={() => persistComboConfig(activeLabor.id, d, t.key, { mode: "flat" }, true)}
+                              title="Pago al día (qty informativo)"
+                              className={`px-1.5 py-0.5 transition-colors disabled:opacity-50 border-l border-[var(--color-border)] ${
+                                t.mode === "flat"
+                                  ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)] font-medium"
+                                  : "bg-[var(--color-surface-2)] text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)]"
+                              }`}
+                            >
+                              /día
+                            </button>
+                          </div>
                           {tiers.length > 1 && (
                             <button
                               disabled={readOnly}
