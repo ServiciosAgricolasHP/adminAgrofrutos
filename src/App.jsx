@@ -12,6 +12,8 @@ import Faenas from "./screens/Faenas";
 import CycleDetail from "./screens/CycleDetail";
 import Workers from "./screens/Workers";
 import Transports from "./screens/Transports";
+import Payroll from "./screens/Payroll";
+import Advances from "./screens/Advances";
 
 export default function App() {
   return (
@@ -34,6 +36,8 @@ export default function App() {
                 <Route path="cycles/:id" element={<CycleDetail />} />
                 <Route path="workers" element={<Workers />} />
                 <Route path="transports" element={<Transports />} />
+                <Route path="payroll" element={<Payroll />} />
+                <Route path="advances" element={<Advances />} />
                 <Route
                   path="audit"
                   element={

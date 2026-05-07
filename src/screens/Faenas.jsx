@@ -401,6 +401,27 @@ export default function Faenas() {
     });
   };
 
+  const openEditCycle = (cycle, faenaId) => {
+    const prefix = cyclePrefix(faenaId, cycle.subfaenaId);
+    const suffix = (cycle.label || "").startsWith(prefix)
+      ? (cycle.label || "").slice(prefix.length)
+      : cycle.label || "";
+    setCycleForm({
+      mode: "edit",
+      faenaId,
+      data: {
+        id: cycle.id,
+        labelSuffix: suffix,
+        subfaenaId: cycle.subfaenaId || "",
+        startDate: cycle.startDate || todayStr(),
+        notes: cycle.notes || "",
+        labors: cycle.labors || defaultLabors(),
+        days: cycle.days || [],
+        status: cycle.status || "open",
+      },
+    });
+  };
+
   const openCloseFlow = (cycle, faenaId) => {
     setCloseFlow({ cycle, faenaId, askNext: false, copyWorkers: true });
   };
@@ -712,6 +733,7 @@ export default function Faenas() {
           onEditSub={(s) => setSubForm({ mode: "edit", faenaId: selected.id, data: { ...s } })}
           onDeleteSub={(s) => setConfirm({ kind: "sub", item: s, message: `¿Eliminar la subfaena "${s.name}"?` })}
           onCreateCycle={(subfaenaId) => openCreateCycle(selected.id, subfaenaId || "")}
+          onEditCycle={(c) => openEditCycle(c, selected.id)}
           onOpenCloseFlow={(c) => openCloseFlow(c, selected.id)}
           onDeleteCycle={(c) =>
             setConfirm({
@@ -974,7 +996,7 @@ export default function Faenas() {
 
 // ---------------------------------------------------------------------------
 
-function CycleRow({ cycle, subName, onOpenCloseFlow, onDelete }) {
+function CycleRow({ cycle, subName, onEdit, onOpenCloseFlow, onDelete }) {
   return (
     <li className="flex items-center justify-between px-3 py-2">
       <div>
@@ -1004,6 +1026,15 @@ function CycleRow({ cycle, subName, onOpenCloseFlow, onDelete }) {
         >
           Abrir
         </Link>
+        {onEdit && (
+          <button
+            onClick={() => onEdit(cycle)}
+            title="Renombrar / editar"
+            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2.5 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
+          >
+            ✏ Renombrar
+          </button>
+        )}
         {cycle.status !== "closed" && (
           <button
             onClick={() => onOpenCloseFlow(cycle)}
@@ -1031,6 +1062,7 @@ function SelectedDetail({
   onEditSub,
   onDeleteSub,
   onCreateCycle,
+  onEditCycle,
   onOpenCloseFlow,
   onDeleteCycle,
 }) {
@@ -1128,6 +1160,7 @@ function SelectedDetail({
                       <CycleRow
                         key={c.id}
                         cycle={c}
+                        onEdit={onEditCycle}
                         onOpenCloseFlow={onOpenCloseFlow}
                         onDelete={onDeleteCycle}
                       />

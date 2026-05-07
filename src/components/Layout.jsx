@@ -8,6 +8,8 @@ const navItems = [
   { to: "/faenas", label: "Faenas", icon: "🌾" },
   { to: "/workers", label: "Trabajadores", icon: "👷" },
   { to: "/transports", label: "Transportes", icon: "🚛" },
+  { to: "/advances", label: "Anticipos", icon: "🪙" },
+  { to: "/payroll", label: "Nómina", icon: "💰" },
 ];
 
 function ThemePicker() {

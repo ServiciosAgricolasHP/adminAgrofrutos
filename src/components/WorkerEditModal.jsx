@@ -32,6 +32,7 @@ export default function WorkerEditModal({ open, mode, worker, allWorkers = [], o
     if (!open) return;
     setError("");
     setOverrideSimilar(false);
+    setAllowNewLeader(false);
     if (isCreate) {
       setForm({
         rut: "",
@@ -65,6 +66,18 @@ export default function WorkerEditModal({ open, mode, worker, allWorkers = [], o
     if (!isCreate || !form?.name || form.name.trim().length < 3) return [];
     return findSimilarWorkers(form.name, allWorkers, { threshold: 0.8, limit: 4 });
   }, [isCreate, form?.name, allWorkers]);
+
+  // Strict líder pool — only values currently saved on some worker.
+  const existingLeaders = useMemo(() => {
+    const set = new Set();
+    for (const w of allWorkers) {
+      const l = w.groupLeader?.[0];
+      if (l) set.add(String(l).toUpperCase());
+    }
+    return [...set].sort();
+  }, [allWorkers]);
+
+  const [allowNewLeader, setAllowNewLeader] = useState(false);
 
   const showSimilarBlock = isCreate && similarMatches.length > 0;
   const isForeign = form ? isForeignRut(form.rut) : false;
@@ -123,6 +136,11 @@ export default function WorkerEditModal({ open, mode, worker, allWorkers = [], o
     if (!bankCode) return setError("Selecciona el banco");
 
     const newLeader = form.groupLeader.trim().toUpperCase();
+    if (newLeader && !existingLeaders.includes(newLeader) && !allowNewLeader) {
+      return setError(
+        `"${newLeader}" no existe como líder. Selecciona uno de la lista o marca "Crear nuevo líder".`,
+      );
+    }
     const prevLeaders = form.groupLeaderHistory || [];
     let groupLeader = prevLeaders;
     if (newLeader && newLeader !== prevLeaders[0]) groupLeader = [newLeader, ...prevLeaders];
@@ -219,12 +237,43 @@ export default function WorkerEditModal({ open, mode, worker, allWorkers = [], o
         )}
 
         <div className="grid gap-4 sm:grid-cols-2">
-          <TextField
-            label="Líder de grupo actual"
-            value={form.groupLeader}
-            onChange={(v) => setForm((f) => ({ ...f, groupLeader: v }))}
-            placeholder="Nombre del líder"
-          />
+          <div>
+            <label className="mb-1 block text-xs font-medium text-[var(--color-muted)]">
+              Líder de grupo
+            </label>
+            <select
+              value={existingLeaders.includes(form.groupLeader.toUpperCase()) ? form.groupLeader.toUpperCase() : (form.groupLeader && allowNewLeader ? "__NEW__" : "")}
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v === "__NEW__") {
+                  setAllowNewLeader(true);
+                  setForm((f) => ({ ...f, groupLeader: "" }));
+                } else {
+                  setAllowNewLeader(false);
+                  setForm((f) => ({ ...f, groupLeader: v }));
+                }
+              }}
+              className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm"
+            >
+              <option value="">— Sin líder —</option>
+              {existingLeaders.map((l) => (
+                <option key={l} value={l}>{l}</option>
+              ))}
+              <option value="__NEW__">+ Crear nuevo líder...</option>
+            </select>
+            {allowNewLeader && (
+              <input
+                autoFocus
+                value={form.groupLeader}
+                onChange={(e) => setForm((f) => ({ ...f, groupLeader: e.target.value.toUpperCase() }))}
+                placeholder="Nombre del nuevo líder"
+                className="mt-2 w-full rounded-md border border-[var(--color-accent)] bg-[var(--color-surface)] px-3 py-2 text-sm"
+              />
+            )}
+            <p className="mt-1 text-[10px] text-[var(--color-muted)]">
+              Selecciona uno existente. Solo crea uno nuevo si realmente no está en la lista.
+            </p>
+          </div>
           <TextField
             label="IDs QR (separados por coma)"
             value={form.idQrText}

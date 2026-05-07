@@ -1,5 +1,7 @@
 // Bancos chilenos — código para nóminas.
+export const CASH_BANK_CODE = "EFE";
 export const BANKS = [
+  { code: "EFE", name: "Efectivo" },
   { code: "012", name: "Banco del Estado de Chile" },
   { code: "001", name: "Banco de Chile" },
   { code: "037", name: "Banco Santander" },
@@ -45,4 +47,8 @@ export function defaultBankDetails(rut) {
 
 export function isCuentaRut(bankDetails) {
   return Number(bankDetails?.[2]) === ACCOUNT_TYPE_RUT;
+}
+
+export function isCashBank(bankCode) {
+  return String(bankCode || "").toUpperCase() === CASH_BANK_CODE;
 }
