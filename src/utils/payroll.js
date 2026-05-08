@@ -79,10 +79,16 @@ export function splitBankAndCash(items) {
   return { bank, cash };
 }
 
+// Normalize leader names to UPPERCASE-trimmed so case-only duplicates merge
+// (e.g. "Grupo Oliver" / "GRUPO OLIVER" / "grupo oliver" → all the same group).
+export function normalizeLeader(s) {
+  return String(s || "").trim().toUpperCase();
+}
+
 export function groupCashByLeader(cashItems) {
   const groups = new Map();
   for (const it of cashItems) {
-    const leader = it.groupLeader || "Sin líder";
+    const leader = normalizeLeader(it.groupLeader) || "Sin líder";
     if (!groups.has(leader)) groups.set(leader, { leader, items: [], total: 0 });
     const g = groups.get(leader);
     g.items.push(it);

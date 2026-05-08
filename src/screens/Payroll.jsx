@@ -20,6 +20,7 @@ import {
 } from "../services/advancesService";
 import { formatRutForDisplay } from "../utils/rutUtils";
 import { bankName, ACCOUNT_TYPES, isCashBank, CASH_BANK_CODE } from "../utils/banks";
+import { getTratoTierTotals } from "../utils/cosechaCombos";
 import {
   aggregateWorkerAmounts,
   downloadBchileXlsx,
@@ -28,6 +29,7 @@ import {
   groupCashByLeader,
   splitBankAndCash,
   validateAccountNumber,
+  normalizeLeader,
 } from "../utils/payroll";
 import ConfirmDialog from "../components/ConfirmDialog";
 
@@ -224,7 +226,7 @@ export default function Payroll() {
             accountType: bd[2] != null ? Number(bd[2]) : 3,
             bankCode,
             email: w?.email || "",
-            groupLeader: w?.groupLeader?.[0] || "",
+            groupLeader: normalizeLeader(w?.groupLeader?.[0]),
             grossAmount: Math.round(a.total),
             advance: Math.min(Math.round(a.total), Math.round(totalAdvance)),
             advanceNote: advanceNoteParts.join(" · "),
@@ -598,7 +600,10 @@ function PreviewTable({
 
   const leaders = useMemo(() => {
     const set = new Set();
-    for (const p of items) if (p.groupLeader) set.add(p.groupLeader);
+    for (const p of items) {
+      const l = normalizeLeader(p.groupLeader);
+      if (l) set.add(l);
+    }
     return [...set].sort();
   }, [items]);
 
@@ -609,7 +614,7 @@ function PreviewTable({
       if (filter === "cash" && !isCashBank(p.bankCode)) return false;
       if (filter === "missing" && !p._missing) return false;
       if (filter === "suspicious" && !p._accountIssue) return false;
-      if (filter.startsWith("leader:") && p.groupLeader !== filter.slice(7)) return false;
+      if (filter.startsWith("leader:") && normalizeLeader(p.groupLeader) !== filter.slice(7)) return false;
       if (q && !p.name.toLowerCase().includes(q) && !p.rut.toLowerCase().includes(q)) return false;
       return true;
     });
@@ -947,7 +952,9 @@ function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedow
           <tr>
             <th className="px-3 py-2">Nombre</th>
             <th className="px-3 py-2">Estado</th>
-            <th className="px-3 py-2">Trabajadores</th>
+            <th className="px-3 py-2 text-right">Trab.</th>
+            <th className="px-3 py-2 text-right">🏦 Banco</th>
+            <th className="px-3 py-2 text-right">💵 Efectivo</th>
             <th className="px-3 py-2 text-right">Total</th>
             <th className="px-3 py-2">Creada</th>
             <th className="px-3 py-2"></th>
@@ -956,7 +963,7 @@ function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedow
         <tbody>
           {filtered.length === 0 && (
             <tr>
-              <td colSpan={6} className="px-3 py-6 text-center text-[var(--color-muted)]">
+              <td colSpan={8} className="px-3 py-6 text-center text-[var(--color-muted)]">
                 Ninguna nómina coincide con el filtro.
               </td>
             </tr>
@@ -979,8 +986,16 @@ function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedow
                   {p.status === "paid" ? "Pagada" : "Pendiente"}
                 </span>
               </td>
-              <td className="px-3 py-2">{p.workerCount || (p.items?.length ?? 0)}</td>
-              <td className="px-3 py-2 text-right">{fmtCurrency(p.total || 0)}</td>
+              <td className="px-3 py-2 text-right">{p.workerCount || (p.items?.length ?? 0)}</td>
+              <td className="px-3 py-2 text-right text-xs">
+                {fmtCurrency(p.bankTotal || 0)}
+                <div className="text-[10px] text-[var(--color-muted)]">{p.bankCount || 0}</div>
+              </td>
+              <td className="px-3 py-2 text-right text-xs">
+                {fmtCurrency(p.cashTotal || 0)}
+                <div className="text-[10px] text-[var(--color-muted)]">{p.cashCount || 0}</div>
+              </td>
+              <td className="px-3 py-2 text-right font-semibold">{fmtCurrency(p.total || 0)}</td>
               <td className="px-3 py-2 text-xs text-[var(--color-muted)]">{fmtDate(p.createdAt)}</td>
               <td className="px-3 py-2">
                 <div className="flex justify-end gap-1">
@@ -1030,10 +1045,167 @@ function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedow
   );
 }
 
-function buildCashReceiptHtml(payroll, cashGroups) {
-  const cyclesLine = (payroll.cycleDetails || [])
-    .map((c) => `${c.label}${c.faenaName ? ` (${c.faenaName}${c.subfaenaName ? "/" + c.subfaenaName : ""})` : ""}`)
-    .join(" · ");
+// Build a "grid snapshot" for a group of workers in a cycle: one labor table
+// per labor that had production, with rows = workers and columns = days.
+// Each cell content depends on labor type — mirrors the CycleDetail grid.
+function buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut) {
+  const rutSet = new Set(groupRuts);
+  const wdsCycle = workdays.filter((w) => w.cycleId === cycle.id && rutSet.has(w.workerRut));
+  if (wdsCycle.length === 0) return [];
+
+  const labors = cycle.labors || [];
+  const out = [];
+
+  for (const labor of labors) {
+    const wdsLabor = wdsCycle.filter((w) => w.laborId === labor.id);
+    if (wdsLabor.length === 0) continue;
+
+    // Aggregate per (worker, date) into a cell payload.
+    // Multiple workdays for same (worker, date) are summed (e.g. trato tiers
+    // already handled via getTratoTierTotals; cosecha quality×container etc).
+    const cellByWorkerDay = new Map(); // key: rut + "|" + date
+    const dates = new Set();
+    const workersInLabor = new Set();
+    for (const wd of wdsLabor) {
+      const key = `${wd.workerRut}|${wd.date}`;
+      dates.add(wd.date);
+      workersInLabor.add(wd.workerRut);
+      if (!cellByWorkerDay.has(key)) {
+        cellByWorkerDay.set(key, {
+          amount: 0,
+          kilos: 0,
+          jornadas: 0,
+          overtimeHours: 0,
+          extras: 0,
+          hasManejo: false,
+          hasSupervision: false,
+          isHoliday: false,
+        });
+      }
+      const c = cellByWorkerDay.get(key);
+      if (labor.type === "cosecha") {
+        c.kilos += Number(wd.qty) || 0;
+        c.amount += Number(wd.amount) || 0;
+      } else if (labor.type === "trato") {
+        const t = getTratoTierTotals(wd);
+        c.jornadas += t.qty;
+        c.amount += t.amount;
+      } else if (labor.type === "tratoHE") {
+        c.jornadas += Number(wd.qty) || 0;
+        c.amount += Number(wd.amount) || 0;
+        c.overtimeHours += Number(wd.overtimeHours) || 0;
+        c.extras += Number(wd.extras) || 0;
+        c.hasManejo = c.hasManejo || !!wd.hasManejo;
+        c.hasSupervision = c.hasSupervision || !!wd.hasSupervision;
+      } else {
+        c.amount += Number(wd.amount) || 0;
+        c.jornadas += 1;
+      }
+    }
+
+    const sortedDates = [...dates].sort();
+    const sortedRuts = [...workersInLabor].sort((a, b) =>
+      (nameByRut.get(a) || a).localeCompare(nameByRut.get(b) || b),
+    );
+
+    // Build rows
+    const rows = sortedRuts.map((rut) => {
+      let totalAmount = 0;
+      let totalKilos = 0;
+      let totalJornadas = 0;
+      const cells = {};
+      for (const d of sortedDates) {
+        const c = cellByWorkerDay.get(`${rut}|${d}`);
+        if (c) {
+          cells[d] = c;
+          totalAmount += c.amount;
+          totalKilos += c.kilos;
+          totalJornadas += c.jornadas;
+        }
+      }
+      return {
+        rut,
+        name: nameByRut.get(rut) || "",
+        cells,
+        totalAmount,
+        totalKilos,
+        totalJornadas,
+      };
+    });
+
+    // Per-day totals
+    const dayTotals = {};
+    let grandAmount = 0;
+    for (const d of sortedDates) {
+      let sum = 0;
+      for (const r of rows) sum += r.cells[d]?.amount || 0;
+      dayTotals[d] = sum;
+      grandAmount += sum;
+    }
+
+    out.push({
+      laborId: labor.id,
+      laborName: labor.name,
+      laborType: labor.type,
+      dates: sortedDates,
+      rows,
+      dayTotals,
+      grandAmount,
+    });
+  }
+
+  return out;
+}
+
+function fmtDateShort(dateStr) {
+  if (!dateStr) return "";
+  const d = new Date(dateStr + "T00:00:00");
+  if (isNaN(d.getTime())) return dateStr;
+  const m = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"][d.getMonth()];
+  return `${String(d.getDate()).padStart(2, "0")}-${m}`;
+}
+
+function renderProductionCell(cell, laborType) {
+  if (!cell) return "";
+  const fmtMoney = (v) => "$" + (Number(v) || 0).toLocaleString("es-CL");
+  const num = (v) => (Number(v) || 0).toLocaleString("es-CL", { maximumFractionDigits: 2 });
+  if (laborType === "cosecha") {
+    return `<div>${num(cell.kilos)} kg</div><div class="muted">${fmtMoney(cell.amount)}</div>`;
+  }
+  if (laborType === "trato") {
+    return `<div>${num(cell.jornadas)}</div><div class="muted">${fmtMoney(cell.amount)}</div>`;
+  }
+  if (laborType === "tratoHE") {
+    const flags = [];
+    if (cell.overtimeHours) flags.push(`HE:${num(cell.overtimeHours)}h`);
+    if (cell.hasManejo) flags.push("M");
+    if (cell.hasSupervision) flags.push("S");
+    if (cell.extras) flags.push(`X:${fmtMoney(cell.extras)}`);
+    const flagsHtml = flags.length ? `<div class="muted">${flags.join(" · ")}</div>` : "";
+    // jornadas now holds base $ (was a multiplier before).
+    const baseHtml = cell.jornadas ? `<div>Base ${fmtMoney(cell.jornadas)}</div>` : "";
+    return `${baseHtml}${flagsHtml}<div class="muted">${fmtMoney(cell.amount)}</div>`;
+  }
+  // main / supervision / extra
+  return `<div>${fmtMoney(cell.amount)}</div>`;
+}
+
+const LABOR_TYPE_LABEL = {
+  main: "Pago al día",
+  supervision: "Supervisión",
+  extra: "Adicional",
+  cosecha: "Cosecha",
+  trato: "A trato",
+  tratoHE: "Jornadas con HE",
+};
+
+function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
+  const cycleDetails = payroll.cycleDetails || [];
+  const titleOverrides = options.titleOverrides || {};
+  const workdaysByGroup = options.workdaysByGroup || {}; // { leader: { cycleId: rows[] } }
+  const cyclesById = options.cyclesById || {};
+  const cycleLabel = (cycleId) => titleOverrides[cycleId] || cyclesById[cycleId]?.label || cycleDetails.find((c) => c.id === cycleId)?.label || cycleId;
+  const cyclesLine = cycleDetails.map((c) => cycleLabel(c.id)).join(" · ");
   const fmt = (v) =>
     new Intl.NumberFormat("es-CL", { style: "currency", currency: "CLP", minimumFractionDigits: 0 }).format(
       Number(v) || 0,
@@ -1045,14 +1217,133 @@ function buildCashReceiptHtml(payroll, cashGroups) {
   };
   const today = new Date().toLocaleDateString("es-CL");
 
+  // Per-group leader palettes (same as Excel sheet).
+  const LEADER_FILLS = ["#FFE699", "#C6E0B4", "#F8CBAD", "#B4C7E7", "#E2C2F0", "#FFC9C9", "#CFE7F5", "#D9D2E9"];
+  const ITEM_FILLS   = ["#FFF2CC", "#E2EFDA", "#FCE4D6", "#D9E1F2", "#EAD8F2", "#FCE0E0", "#E7F2F8", "#EEE7F4"];
+
   const groupsHtml = cashGroups
-    .map(
-      (g) => `
+    .map((g, idx) => {
+      const itemFill = ITEM_FILLS[idx % ITEM_FILLS.length];
+      const leaderFill = LEADER_FILLS[idx % LEADER_FILLS.length];
+
+      // Only render cycle columns where ANY member of this group had production.
+      const activeCycleIds = new Set();
+      for (const it of g.items) {
+        for (const cid of Object.keys(it.byCycle || {})) {
+          if ((it.byCycle[cid] || 0) > 0) activeCycleIds.add(cid);
+        }
+      }
+      const cycleCols = cycleDetails.filter((c) => activeCycleIds.has(c.id));
+      const showCycleCols = cycleCols.length > 1;
+
+      const cycleHeaders = showCycleCols
+        ? cycleCols.map((c) => `<th style="text-align:right">${cycleLabel(c.id)}</th>`).join("")
+        : "";
+
+      const rows = g.items
+        .map((it, i) => {
+          const cellsByCycle = showCycleCols
+            ? cycleCols
+                .map(
+                  (c) =>
+                    `<td style="text-align:right">${
+                      it.byCycle && it.byCycle[c.id] ? fmt(it.byCycle[c.id]) : ""
+                    }</td>`,
+                )
+                .join("")
+            : "";
+          return `
+            <tr style="background:${itemFill}">
+              <td>${i + 1}</td>
+              <td>${it.name}</td>
+              <td class="mono">${fmtRut(it.rut)}</td>
+              ${cellsByCycle}
+              <td style="text-align:right"><b>${fmt(it.amount)}</b></td>
+              <td></td>
+            </tr>`;
+        })
+        .join("");
+
+      const subtotalCells = showCycleCols
+        ? cycleCols
+            .map((c) => {
+              const sum = g.items.reduce((s, it) => s + (it.byCycle?.[c.id] || 0), 0);
+              return `<td style="text-align:right;background:${leaderFill}"><b>${fmt(sum)}</b></td>`;
+            })
+            .join("")
+        : "";
+
+      const totalColSpan = 3; // # + Nombre + RUT
+
+      // Per-cycle production snapshot for THIS group — mirrors the CycleDetail
+      // grid: one table per labor, rows = workers, columns = days.
+      const detailHtml = cycleCols
+        .map((c) => {
+          const laborSnapshots = workdaysByGroup[g.leader]?.[c.id] || [];
+          if (laborSnapshots.length === 0) return "";
+          const laborTables = laborSnapshots
+            .map((ls) => {
+              const dayHeaders = ls.dates
+                .map((d) => `<th class="prod-day">${fmtDateShort(d)}</th>`)
+                .join("");
+              const rows = ls.rows
+                .map((row) => {
+                  const dayCells = ls.dates
+                    .map(
+                      (d) => `<td class="prod-cell">${renderProductionCell(row.cells[d], ls.laborType)}</td>`,
+                    )
+                    .join("");
+                  return `
+                    <tr>
+                      <td class="prod-name">${row.name || row.rut}</td>
+                      ${dayCells}
+                      <td class="prod-total"><b>${fmt(row.totalAmount)}</b></td>
+                    </tr>`;
+                })
+                .join("");
+              const dayTotals = ls.dates
+                .map((d) => `<td class="prod-total">${fmt(ls.dayTotals[d] || 0)}</td>`)
+                .join("");
+              return `
+                <div class="prod-table">
+                  <h4 style="background:${itemFill}">${ls.laborName} <span class="muted">(${LABOR_TYPE_LABEL[ls.laborType] || ls.laborType})</span></h4>
+                  <table class="prod">
+                    <thead>
+                      <tr>
+                        <th class="prod-name">Trabajador</th>
+                        ${dayHeaders}
+                        <th class="prod-total">Total</th>
+                      </tr>
+                    </thead>
+                    <tbody>${rows}</tbody>
+                    <tfoot>
+                      <tr style="background:${leaderFill}">
+                        <td class="prod-name"><b>Total día</b></td>
+                        ${dayTotals}
+                        <td class="prod-total"><b>${fmt(ls.grandAmount)}</b></td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>`;
+            })
+            .join("");
+
+          return `
+            <div class="detail">
+              <h3 style="background:${leaderFill}">${cycleLabel(c.id)}</h3>
+              ${laborTables}
+            </div>`;
+        })
+        .join("");
+
+      const overviewPage = (copyLabel) => `
     <section class="receipt">
       <header>
         <div class="hd">
           <div>
-            <h1>Comprobante de pago en efectivo</h1>
+            <h1>Comprobante de pago en efectivo
+              <span class="copy-tag">${copyLabel}</span>
+            </h1>
             <div class="sub">${payroll.name} · ${cyclesLine}</div>
           </div>
           <div class="meta">
@@ -1068,44 +1359,49 @@ function buildCashReceiptHtml(payroll, cashGroups) {
             <th style="width:30px">#</th>
             <th>Nombre</th>
             <th style="width:110px">RUT</th>
-            <th style="width:120px;text-align:right">Monto</th>
+            ${cycleHeaders}
+            <th style="width:120px;text-align:right">TOTAL</th>
             <th style="width:200px">Firma</th>
           </tr>
         </thead>
         <tbody>
-          ${g.items
-            .map(
-              (it, i) => `
-            <tr>
-              <td>${i + 1}</td>
-              <td>${it.name}</td>
-              <td class="mono">${fmtRut(it.rut)}</td>
-              <td style="text-align:right">${fmt(it.amount)}</td>
-              <td></td>
-            </tr>`,
-            )
-            .join("")}
+          ${rows}
         </tbody>
         <tfoot>
-          <tr>
-            <td colspan="3" style="text-align:right"><b>Total entregado</b></td>
+          <tr style="background:${leaderFill}">
+            <td colspan="${totalColSpan}" style="text-align:right"><b>Subtotal ${g.leader}</b></td>
+            ${subtotalCells}
             <td style="text-align:right"><b>${fmt(g.total)}</b></td>
             <td></td>
           </tr>
         </tfoot>
       </table>
       <div class="signs">
-        <div class="sign">
+        <div class="sign sign-right">
           <div class="line"></div>
           <div>Firma líder (${g.leader})</div>
         </div>
-        <div class="sign">
-          <div class="line"></div>
-          <div>Firma quien entrega</div>
-        </div>
       </div>
-    </section>`,
-    )
+    </section>`;
+
+      return `
+    ${overviewPage("ORIGINAL — Líder")}
+    ${overviewPage("COPIA — Empresa")}
+    ${
+      detailHtml
+        ? `<section class="receipt detail-page">
+            <div class="hd">
+              <div>
+                <h1>Detalle de producción del grupo</h1>
+                <div class="sub">${payroll.name} · Líder: ${g.leader}</div>
+              </div>
+              <div class="meta"><div><b>Fecha:</b> ${today}</div></div>
+            </div>
+            ${detailHtml}
+          </section>`
+        : ""
+    }`;
+    })
     .join("");
 
   return `<!doctype html><html><head><meta charset="utf-8"><title>${payroll.name} — Efectivo</title>
@@ -1116,26 +1412,76 @@ function buildCashReceiptHtml(payroll, cashGroups) {
   .receipt:last-child { page-break-after: auto; }
   .hd { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; border-bottom: 2px solid #555; padding-bottom: 10px; margin-bottom: 12px; }
   h1 { margin: 0 0 4px; font-size: 18px; }
+  .copy-tag { font-size: 10px; font-weight: 600; padding: 2px 8px; margin-left: 8px; border: 1px solid #999; border-radius: 4px; vertical-align: middle; background: #FFE699; color: #555; }
   .sub { color: #666; font-size: 12px; }
   .meta { font-size: 12px; text-align: right; }
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
   th { background: #B7DEE8; }
   th, td { border: 1px solid #999; padding: 5px 7px; }
-  tfoot td { background: #C6EFCE; }
+  th .muted { font-weight: normal; color: #666; font-size: 10px; }
   .mono { font-family: ui-monospace, monospace; }
-  .signs { display: flex; justify-content: space-between; margin-top: 32px; gap: 60px; font-size: 12px; }
-  .sign { flex: 1; text-align: center; }
+  .signs { display: flex; justify-content: flex-end; margin-top: 48px; gap: 60px; font-size: 12px; }
+  .sign { width: 280px; text-align: center; }
+  .sign-right { margin-left: auto; }
   .line { border-top: 1px solid #444; margin-bottom: 4px; height: 30px; }
-  @media print { @page { margin: 14mm; } .receipt { padding: 0; } }
+  .detail-title { font-size: 14px; margin: 24px 0 8px; padding-bottom: 4px; border-bottom: 1px solid #999; }
+  .detail { margin-top: 12px; }
+  .detail h3 { font-size: 12px; padding: 4px 8px; margin: 0 0 6px; border: 1px solid #999; }
+  .prod-table { margin: 6px 0 12px; }
+  .prod-table h4 { font-size: 11px; padding: 3px 6px; margin: 0 0 0; border: 1px solid #999; border-bottom: none; }
+  .prod-table h4 .muted { font-weight: normal; color: #555; font-size: 10px; }
+  table.prod { width: 100%; font-size: 10px; table-layout: auto; }
+  table.prod .prod-name { text-align: left; min-width: 110px; }
+  table.prod .prod-day { text-align: center; min-width: 60px; }
+  table.prod .prod-cell { text-align: center; }
+  table.prod .prod-cell .muted { color: #555; font-size: 9px; }
+  table.prod .prod-total { text-align: right; min-width: 70px; }
+  @media print { @page { margin: 14mm landscape; } .receipt { padding: 0; } }
 </style>
 </head><body>${groupsHtml}
 <script>window.onload = () => { window.focus(); window.print(); };</script>
 </body></html>`;
 }
 
-function printCashReceipts(payroll, cashGroups) {
+async function printCashReceipts(payroll, cashGroups, titleOverrides = {}) {
   if (cashGroups.length === 0) return;
-  const html = buildCashReceiptHtml(payroll, cashGroups);
+
+  // Load cycles (for labor types) + workdays linked to cash items.
+  const cycleIds = payroll.cycleIds || (payroll.cycleDetails || []).map((c) => c.id);
+  const cycles = await Promise.all(cycleIds.map((id) => cyclesService.getById(id)));
+  const cyclesById = {};
+  for (const c of cycles) if (c) cyclesById[c.id] = c;
+
+  // Workday ids: union of all cash items.
+  const cashItems = cashGroups.flatMap((g) => g.items);
+  const wdIdSet = new Set(cashItems.flatMap((it) => it.workdayIds || []));
+  const workdays = [];
+  for (let i = 0; i < cycleIds.length; i += 10) {
+    const chunk = cycleIds.slice(i, i + 10);
+    if (chunk.length === 0) continue;
+    const wds = await workdaysService.list({ wheres: [["cycleId", "in", chunk]] });
+    for (const w of wds) if (wdIdSet.has(w.id)) workdays.push(w);
+  }
+
+  // For each group, for each cycle, build per-labor production snapshots.
+  const nameByRut = new Map(cashItems.map((it) => [it.rut, it.name]));
+  const workdaysByGroup = {};
+  for (const g of cashGroups) {
+    const groupRuts = g.items.map((it) => it.rut);
+    const byCycle = {};
+    for (const cid of cycleIds) {
+      const cycle = cyclesById[cid];
+      if (!cycle) continue;
+      byCycle[cid] = buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut);
+    }
+    workdaysByGroup[g.leader] = byCycle;
+  }
+
+  const html = buildCashReceiptHtml(payroll, cashGroups, {
+    titleOverrides,
+    workdaysByGroup,
+    cyclesById,
+  });
   const w = window.open("", "_blank", "width=900,height=700");
   if (!w) {
     alert("Permite las ventanas emergentes para imprimir.");
@@ -1151,6 +1497,41 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
   const { bank, cash } = splitBankAndCash(items);
   const cashGroups = groupCashByLeader(cash);
   const cycleDetails = payroll.cycleDetails || [];
+
+  // Aggregate breakdowns for the summary header.
+  const bankTotal = bank.reduce((s, x) => s + (Number(x.amount) || 0), 0);
+  const cashTotal = cash.reduce((s, x) => s + (Number(x.amount) || 0), 0);
+  const grossTotal = items.reduce((s, x) => s + (Number(x.grossAmount) || Number(x.amount) || 0), 0);
+  const advanceTotal = items.reduce((s, x) => s + (Number(x.advance) || 0), 0);
+  const totalsByCycle = (cycleDetails || []).map((c) => {
+    const bankSum = bank.reduce((s, x) => s + (x.byCycle?.[c.id] || 0), 0);
+    const cashSum = cash.reduce((s, x) => s + (x.byCycle?.[c.id] || 0), 0);
+    return { cycle: c, bank: bankSum, cash: cashSum, total: bankSum + cashSum };
+  });
+
+  const titleStorageKey = `cash_receipt_titles_${payroll.id || payroll.name}`;
+  const [cycleTitleOverrides, setCycleTitleOverrides] = useState(() => {
+    try { return JSON.parse(localStorage.getItem(titleStorageKey) || "{}"); } catch { return {}; }
+  });
+  const [showTitleEditor, setShowTitleEditor] = useState(false);
+  const [printing, setPrinting] = useState(false);
+
+  const setCycleTitle = (cid, val) => {
+    setCycleTitleOverrides((prev) => {
+      const next = { ...prev, [cid]: val };
+      try { localStorage.setItem(titleStorageKey, JSON.stringify(next)); } catch {}
+      return next;
+    });
+  };
+
+  const handlePrint = async () => {
+    setPrinting(true);
+    try {
+      await printCashReceipts(payroll, cashGroups, cycleTitleOverrides);
+    } finally {
+      setPrinting(false);
+    }
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4 py-6" onClick={onClose}>
@@ -1168,6 +1549,67 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
           <button onClick={onClose} className="text-[var(--color-muted)] hover:text-[var(--color-text)]">✕</button>
         </div>
         <div className="flex-1 space-y-5 overflow-y-auto px-5 py-4">
+          {/* Resumen — desglose general */}
+          <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)] p-4">
+            <h3 className="mb-3 text-sm font-semibold">Resumen</h3>
+            <div className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+              <div>
+                <div className="text-xs text-[var(--color-muted)]">🏦 Transferencias</div>
+                <div className="text-lg font-semibold">{fmtCurrency(bankTotal)}</div>
+                <div className="text-[10px] text-[var(--color-muted)]">{bank.length} persona(s)</div>
+              </div>
+              <div>
+                <div className="text-xs text-[var(--color-muted)]">💵 Efectivo</div>
+                <div className="text-lg font-semibold">{fmtCurrency(cashTotal)}</div>
+                <div className="text-[10px] text-[var(--color-muted)]">{cash.length} persona(s) · {cashGroups.length} grupo(s)</div>
+              </div>
+              {advanceTotal > 0 && (
+                <div>
+                  <div className="text-xs text-[var(--color-muted)]">↩ Anticipos aplicados</div>
+                  <div className="text-lg font-semibold">{fmtCurrency(advanceTotal)}</div>
+                  <div className="text-[10px] text-[var(--color-muted)]">Bruto: {fmtCurrency(grossTotal)}</div>
+                </div>
+              )}
+              <div>
+                <div className="text-xs text-[var(--color-muted)]">Total a pagar</div>
+                <div className="text-lg font-semibold text-[var(--color-accent)]">{fmtCurrency(payroll.total || 0)}</div>
+                <div className="text-[10px] text-[var(--color-muted)]">{items.length} trabajador(es)</div>
+              </div>
+            </div>
+
+            {totalsByCycle.length > 1 && (
+              <div className="mt-4 overflow-x-auto rounded border border-[var(--color-border)]">
+                <table className="w-full text-xs">
+                  <thead className="bg-[var(--color-surface)] text-left text-[var(--color-muted)]">
+                    <tr>
+                      <th className="px-2 py-1.5">Ciclo</th>
+                      <th className="px-2 py-1.5 text-right">🏦 Banco</th>
+                      <th className="px-2 py-1.5 text-right">💵 Efectivo</th>
+                      <th className="px-2 py-1.5 text-right">Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {totalsByCycle.map(({ cycle, bank: b, cash: c, total }) => (
+                      <tr key={cycle.id} className="border-t border-[var(--color-border)]">
+                        <td className="px-2 py-1">
+                          <span className="font-medium">{cycle.label}</span>
+                          {cycle.faenaName && (
+                            <span className="ml-1 text-[10px] text-[var(--color-muted)]">
+                              · {cycle.faenaName}{cycle.subfaenaName ? `/${cycle.subfaenaName}` : ""}
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-2 py-1 text-right">{fmtCurrency(b)}</td>
+                        <td className="px-2 py-1 text-right">{fmtCurrency(c)}</td>
+                        <td className="px-2 py-1 text-right font-semibold">{fmtCurrency(total)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+
           {cycleDetails.length > 0 && (
             <section>
               <h3 className="mb-2 text-sm font-semibold">Ciclos / Faenas pagadas</h3>
@@ -1224,7 +1666,41 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
 
           {cashGroups.length > 0 && (
             <section>
-              <h3 className="mb-2 text-sm font-semibold">💵 Efectivo agrupado por líder ({cash.length})</h3>
+              <div className="mb-2 flex items-center justify-between">
+                <h3 className="text-sm font-semibold">💵 Efectivo agrupado por líder ({cash.length})</h3>
+                <button
+                  onClick={() => setShowTitleEditor((v) => !v)}
+                  className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
+                >
+                  📝 Editar encabezados
+                </button>
+              </div>
+              {showTitleEditor && (
+                <div className="mb-3 space-y-2 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] p-3">
+                  <p className="text-xs text-[var(--color-muted)]">
+                    Personaliza el nombre de cada ciclo solo para los comprobantes impresos.
+                  </p>
+                  {cycleDetails.map((c) => (
+                    <div key={c.id} className="flex items-center gap-2">
+                      <label className="w-32 text-xs text-[var(--color-muted)]">{c.label}:</label>
+                      <input
+                        value={cycleTitleOverrides[c.id] ?? c.label}
+                        onChange={(e) => setCycleTitle(c.id, e.target.value)}
+                        className="flex-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-xs"
+                      />
+                      {cycleTitleOverrides[c.id] != null && cycleTitleOverrides[c.id] !== c.label && (
+                        <button
+                          onClick={() => setCycleTitle(c.id, c.label)}
+                          className="text-xs text-[var(--color-muted)] hover:text-[var(--color-accent)]"
+                          title="Restaurar"
+                        >
+                          ↺
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
               <div className="space-y-3">
                 {cashGroups.map((g) => (
                   <div key={g.leader} className="rounded border border-[var(--color-border)]">
@@ -1256,10 +1732,11 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
         <div className="flex shrink-0 justify-end gap-2 border-t border-[var(--color-border)] px-5 py-3">
           {cashGroups.length > 0 && (
             <button
-              onClick={() => printCashReceipts(payroll, cashGroups)}
-              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-4 py-2 text-sm font-medium hover:bg-[var(--color-accent-soft)]"
+              onClick={handlePrint}
+              disabled={printing}
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-4 py-2 text-sm font-medium hover:bg-[var(--color-accent-soft)] disabled:opacity-50"
             >
-              🖨 Comprobantes efectivo
+              {printing ? "Cargando..." : "🖨 Comprobantes efectivo"}
             </button>
           )}
           <button

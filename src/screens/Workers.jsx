@@ -114,7 +114,7 @@ export default function Workers() {
         pinned: "left",
       },
       { headerName: "Nombre", field: "name", flex: 1, minWidth: 180, pinned: "left" },
-      { headerName: "Líder", valueGetter: (p) => p.data.groupLeader?.[0] || "—", width: 160 },
+      { headerName: "Líder", valueGetter: (p) => (p.data.groupLeader?.[0] || "").toUpperCase().trim() || "—", width: 160 },
       {
         headerName: "IDs QR",
         valueGetter: (p) => (p.data.idQr || []).join(", ") || "—",

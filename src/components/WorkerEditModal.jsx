@@ -67,12 +67,15 @@ export default function WorkerEditModal({ open, mode, worker, allWorkers = [], o
     return findSimilarWorkers(form.name, allWorkers, { threshold: 0.8, limit: 4 });
   }, [isCreate, form?.name, allWorkers]);
 
-  // Strict líder pool — only values currently saved on some worker.
+  // Strict líder pool — case-insensitive (uppercase + trimmed) to merge dupes.
   const existingLeaders = useMemo(() => {
     const set = new Set();
     for (const w of allWorkers) {
       const l = w.groupLeader?.[0];
-      if (l) set.add(String(l).toUpperCase());
+      if (l) {
+        const norm = String(l).trim().toUpperCase();
+        if (norm) set.add(norm);
+      }
     }
     return [...set].sort();
   }, [allWorkers]);

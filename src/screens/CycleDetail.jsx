@@ -196,6 +196,11 @@ export default function CycleDetail() {
 
   const [addDayOpen, setAddDayOpen] = useState(false);
   const [newDay, setNewDay] = useState(todayStr());
+  const [selectedDays, setSelectedDays] = useState(() => new Set());
+  const [viewMonth, setViewMonth] = useState(() => {
+    const d = new Date();
+    return { year: d.getFullYear(), month: d.getMonth() };
+  });
   const [pickerOpen, setPickerOpen] = useState(false);
 
   const [removeWorker, setRemoveWorker] = useState(null);
@@ -932,6 +937,23 @@ export default function CycleDetail() {
     setAddDayOpen(false);
   };
 
+  const addSelectedDays = async () => {
+    const toAdd = [...selectedDays].filter((d) => !days.includes(d));
+    if (toAdd.length === 0) { setAddDayOpen(false); return; }
+    await persistDays([...days, ...toAdd].sort());
+    setSelectedDays(new Set());
+    setAddDayOpen(false);
+  };
+
+  const toggleSelectedDay = (date) => {
+    setSelectedDays((prev) => {
+      const next = new Set(prev);
+      if (next.has(date)) next.delete(date);
+      else next.add(date);
+      return next;
+    });
+  };
+
   const removeDay = async (date) => {
     const wds = await workdaysService.list({
       wheres: [["cycleId", "==", id], ["date", "==", date]], take: 1,
@@ -1124,8 +1146,7 @@ export default function CycleDetail() {
   };
 
   const handleReopenCycle = async () => {
-    if (!isAdmin) return;
-    if (!confirm("¿Reabrir el ciclo? Solo admin puede hacerlo.")) return;
+    if (!confirm("¿Reabrir el ciclo?")) return;
     await cyclesService.update(id, { status: "open", endDate: null });
     setCycle((c) => ({ ...c, status: "open", endDate: null }));
     showToast("Ciclo reabierto");
@@ -1390,13 +1411,12 @@ export default function CycleDetail() {
         const m = !!data?.[`${d}__m`];
         const s = !!data?.[`${d}__s`];
         const x = Number(data?.[`${d}__x`]) || 0;
-        const dayPrice = effectiveDayPrice(labor, cfg);
         const lines = [];
-        const base = cfg.mode === "overtimeOnly" ? 0 : dayPrice * qty;
+        const base = cfg.mode === "overtimeOnly" ? 0 : qty;
         if (cfg.mode === "overtimeOnly") {
           lines.push(`Solo HE (sin base)`);
         } else if (qty > 0) {
-          lines.push(`Base: ${fmtCurrency(dayPrice)} × ${qty} = ${fmtCurrency(base)}`);
+          lines.push(`Base: ${fmtCurrency(base)}`);
         }
         if (he > 0) lines.push(`HE: ${he}h × ${fmtCurrency(rates.overtimeRate)} = ${fmtCurrency(he * rates.overtimeRate)}`);
         if (m) lines.push(`Manejo: ${fmtCurrency(rates.bonusManejo)}`);
@@ -1453,14 +1473,33 @@ export default function CycleDetail() {
           headerClass: red ? "ag-header-red-day" : undefined,
           children: [
             {
-              headerName: "D",
+              headerName: "Base",
               field: `${d}__qty`,
               editable: !readOnly && !photoMode,
-              width: 60,
+              width: 110,
               type: "numericColumn",
               valueParser: (p) => parseAmount(p.newValue),
-              valueFormatter: (p) => (p.value ? String(p.value) : ""),
-              headerTooltip: "Día (1=jornada completa, 0.5=media jornada)",
+              valueFormatter: (p) => (p.value ? fmtCurrency(p.value) : ""),
+              headerTooltip: `Base del día (monto). Sugerido: ${fmtCurrency(effectiveDayPrice(labor, cfg))}. Click para usar el sugerido si está vacío.`,
+              cellStyle: { textAlign: "right" },
+              cellRenderer: (p) => {
+                const v = Number(p.value) || 0;
+                if (v) return fmtCurrency(v);
+                if (readOnly || photoMode || cfg.mode === "overtimeOnly") return "";
+                const suggested = effectiveDayPrice(labor, cfg);
+                return (
+                  <button
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      await upsertTratoHEWorkday(activeLabor.id, d, p.data.rut, { qty: suggested });
+                    }}
+                    className="h-full w-full text-right text-xs text-[var(--color-muted)] hover:text-[var(--color-accent)]"
+                    title={`Usar base sugerida: ${fmtCurrency(suggested)}`}
+                  >
+                    {fmtCurrency(suggested)}
+                  </button>
+                );
+              },
             },
             {
               headerName: "HE",
@@ -1646,7 +1685,7 @@ export default function CycleDetail() {
               Cerrar ciclo
             </button>
           )}
-          {closed && isAdmin && (
+          {closed && (
             <button onClick={handleReopenCycle} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)]">
               Reabrir ciclo
             </button>
@@ -1727,13 +1766,13 @@ export default function CycleDetail() {
               {isHE && heMetrics && (
                 <div className="mt-1 space-y-0.5 text-[11px] tabular-nums">
                   <div className="flex justify-between gap-2">
-                    <span className="text-[var(--color-muted)]">Jornadas:</span>
+                    <span className="text-[var(--color-muted)]">Base:</span>
                     <span>
-                      <span className="font-medium">{heMetrics.normalQty.toLocaleString("es-CL")}</span>
+                      <span className="font-medium">{fmtCurrency(heMetrics.normalQty)}</span>
                       <span className="text-[var(--color-muted)]"> norm.</span>
                       {heMetrics.holidayQty > 0 && (
                         <span className="ml-1 text-[var(--color-danger)]">
-                          + {heMetrics.holidayQty.toLocaleString("es-CL")} fer.
+                          + {fmtCurrency(heMetrics.holidayQty)} fer.
                         </span>
                       )}
                     </span>
@@ -2249,21 +2288,34 @@ export default function CycleDetail() {
       {/* Modals */}
       <Modal
         open={addDayOpen}
-        onClose={() => setAddDayOpen(false)}
-        title="Agregar día"
+        onClose={() => { setAddDayOpen(false); setSelectedDays(new Set()); }}
+        title="Agregar días"
+        size="md"
         footer={
           <>
-            <button onClick={() => setAddDayOpen(false)} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)]">
+            <button onClick={() => { setAddDayOpen(false); setSelectedDays(new Set()); }} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)]">
               Cancelar
             </button>
-            <button onClick={addDay} className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-[var(--color-accent-fg)] hover:bg-[var(--color-accent-hover)]">
-              Agregar
+            <button
+              onClick={addSelectedDays}
+              disabled={selectedDays.size === 0}
+              className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-[var(--color-accent-fg)] hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+            >
+              {selectedDays.size === 0 ? "Agregar" : `Agregar ${selectedDays.size} día${selectedDays.size > 1 ? "s" : ""}`}
             </button>
           </>
         }
       >
-        <TextField label="Fecha" type="date" value={newDay} onChange={setNewDay} autoFocus />
-        <p className="mt-2 text-xs text-[var(--color-muted)]">El día se aplica a todas las labores del ciclo.</p>
+        <DayCalendarPicker
+          viewMonth={viewMonth}
+          setViewMonth={setViewMonth}
+          selectedDays={selectedDays}
+          toggleDay={toggleSelectedDay}
+          existingDays={days}
+        />
+        <p className="mt-3 text-xs text-[var(--color-muted)]">
+          Click sobre los días para seleccionar varios a la vez. Los días ya agregados aparecen en gris.
+        </p>
       </Modal>
 
       <Modal
@@ -2928,5 +2980,79 @@ function DefaultLeadersModal({ open, onClose, labor, readOnly, onSave }) {
         </button>
       </div>
     </Modal>
+  );
+}
+
+// ============================================================
+// Day calendar picker — multi-select
+// ============================================================
+const MONTHS_ES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"];
+const WEEKDAYS_ES = ["Lu", "Ma", "Mi", "Ju", "Vi", "Sá", "Do"];
+
+function pad2(n) { return String(n).padStart(2, "0"); }
+function isoDate(y, m, d) { return `${y}-${pad2(m + 1)}-${pad2(d)}`; }
+
+function DayCalendarPicker({ viewMonth, setViewMonth, selectedDays, toggleDay, existingDays }) {
+  const { year, month } = viewMonth;
+  const firstDay = new Date(year, month, 1);
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  // ISO week: Monday = 0, Sunday = 6
+  const firstWeekday = (firstDay.getDay() + 6) % 7;
+  const cells = [];
+  for (let i = 0; i < firstWeekday; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+  while (cells.length % 7 !== 0) cells.push(null);
+
+  const existingSet = new Set(existingDays);
+  const todayIso = new Date().toISOString().slice(0, 10);
+
+  const prevMonth = () =>
+    setViewMonth(({ year, month }) =>
+      month === 0 ? { year: year - 1, month: 11 } : { year, month: month - 1 },
+    );
+  const nextMonth = () =>
+    setViewMonth(({ year, month }) =>
+      month === 11 ? { year: year + 1, month: 0 } : { year, month: month + 1 },
+    );
+
+  return (
+    <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
+      <div className="mb-2 flex items-center justify-between">
+        <button onClick={prevMonth} className="rounded px-2 py-1 text-sm hover:bg-[var(--color-accent-soft)]">‹</button>
+        <div className="text-sm font-semibold">{MONTHS_ES[month]} {year}</div>
+        <button onClick={nextMonth} className="rounded px-2 py-1 text-sm hover:bg-[var(--color-accent-soft)]">›</button>
+      </div>
+      <div className="grid grid-cols-7 gap-1 text-center text-[10px] font-medium text-[var(--color-muted)]">
+        {WEEKDAYS_ES.map((w) => <div key={w} className="py-1">{w}</div>)}
+      </div>
+      <div className="grid grid-cols-7 gap-1">
+        {cells.map((d, i) => {
+          if (d == null) return <div key={i} className="aspect-square" />;
+          const iso = isoDate(year, month, d);
+          const isExisting = existingSet.has(iso);
+          const isSelected = selectedDays.has(iso);
+          const isToday = iso === todayIso;
+          let cls = "aspect-square rounded text-sm transition-colors flex items-center justify-center cursor-pointer ";
+          if (isExisting) {
+            cls += "bg-[var(--color-surface-2)] text-[var(--color-muted)] cursor-not-allowed line-through";
+          } else if (isSelected) {
+            cls += "bg-[var(--color-accent)] text-[var(--color-accent-fg)] font-semibold";
+          } else {
+            cls += "hover:bg-[var(--color-accent-soft)] " + (isToday ? "ring-1 ring-[var(--color-accent)]" : "");
+          }
+          return (
+            <button
+              key={i}
+              type="button"
+              disabled={isExisting}
+              onClick={() => toggleDay(iso)}
+              className={cls}
+            >
+              {d}
+            </button>
+          );
+        })}
+      </div>
+    </div>
   );
 }

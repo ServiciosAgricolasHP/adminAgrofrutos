@@ -561,6 +561,8 @@ function PaymentsTab() {
         open={generating}
         onClose={() => setGenerating(false)}
         carriers={activeCarriers}
+        faenaById={faenaById}
+        subfaenaById={subfaenaById}
         onGenerated={async () => {
           setGenerating(false);
           await reload();
@@ -661,7 +663,16 @@ function PaymentSection({ title, payments, carrierById, onView, empty, dim = fal
   );
 }
 
-function GenerateSummaryModal({ open, onClose, carriers, onGenerated }) {
+function GenerateSummaryModal({ open, onClose, carriers, faenaById, subfaenaById, onGenerated }) {
+  const groupLabel = (g) => {
+    if (g.date) return g.date;
+    const fName = faenaById?.get(g.faenaId)?.name;
+    const sName = subfaenaById?.get(g.subfaenaId)?.name;
+    if (fName && sName) return `${fName} / ${sName}`;
+    if (fName) return fName;
+    if (sName) return sName;
+    return "Sin faena";
+  };
   const [carrierId, setCarrierId] = useState("");
   const [periodFrom, setPeriodFrom] = useState("");
   const [periodTo, setPeriodTo] = useState("");
@@ -796,7 +807,7 @@ function GenerateSummaryModal({ open, onClose, carriers, onGenerated }) {
                 <tbody>
                   {grouped.map((g, i) => (
                     <tr key={i} className="border-t border-[var(--color-border)]">
-                      <td className="px-2 py-1">{g.date || g.key}</td>
+                      <td className="px-2 py-1">{groupLabel(g)}</td>
                       <td className="px-2 py-1 text-right tabular-nums">{g.trips.length}</td>
                       <td className="px-2 py-1 text-right tabular-nums">{fmtCurrency(g.total)}</td>
                     </tr>

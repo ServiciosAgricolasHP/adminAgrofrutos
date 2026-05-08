@@ -346,15 +346,32 @@ export default function Faenas() {
       const scope = existing.filter((c) =>
         data.subfaenaId ? c.subfaenaId === data.subfaenaId : !c.subfaenaId,
       );
-      const open = scope.find((c) => c.status !== "closed");
-      if (open) {
-        alert(`Ya existe un ciclo abierto ("${open.label}") en este ámbito. Ciérralo antes de crear uno nuevo.`);
+      const openCount = scope.filter((c) => c.status !== "closed").length;
+      if (openCount >= 2) {
+        alert(`Ya hay 2 ciclos abiertos en este ámbito. Cierra uno antes de crear otro.`);
         return;
       }
     }
     setBusy(true);
     try {
-      const labors = data.labors && data.labors.length ? data.labors : defaultLabors();
+      let labors;
+      if (mode === "create" && data.copyWorkers && data.prevCycle) {
+        const prevLabors = data.prevCycle.labors || [];
+        labors = prevLabors.map((l) => ({
+          id: newId(),
+          name: l.name,
+          type: l.type,
+          workers: l.workers || [],
+          // Carry over labor-specific config so the next cycle starts ready.
+          ...(l.baseDayDefault != null ? { baseDayDefault: l.baseDayDefault } : {}),
+          ...(l.bonusManejo != null ? { bonusManejo: l.bonusManejo } : {}),
+          ...(l.bonusSupervision != null ? { bonusSupervision: l.bonusSupervision } : {}),
+          ...(l.overtimeRate != null ? { overtimeRate: l.overtimeRate } : {}),
+        }));
+        if (labors.length === 0) labors = defaultLabors();
+      } else {
+        labors = data.labors && data.labors.length ? data.labors : defaultLabors();
+      }
       const prefix = cyclePrefix(faenaId, data.subfaenaId);
       const suffix = (data.labelSuffix ?? data.label ?? "").trim();
       const payload = {
@@ -383,11 +400,19 @@ export default function Faenas() {
     }
     const existing = cyclesByFaena[faenaId] || [];
     const scope = existing.filter((c) => c.subfaenaId === subfaenaId);
-    const open = scope.find((c) => c.status !== "closed");
-    if (open) {
-      alert(`Ya existe un ciclo abierto ("${open.label}") en este ámbito. Ciérralo antes de crear uno nuevo.`);
+    const openCount = scope.filter((c) => c.status !== "closed").length;
+    if (openCount >= 2) {
+      alert(`Ya hay 2 ciclos abiertos en este ámbito. Cierra uno antes de crear otro.`);
       return;
     }
+
+    // Most recent cycle in this scope (open or closed), for optional worker import.
+    const sortKey = (c) => c.endDate || c.startDate || c.createdAt?.toDate?.()?.toISOString?.() || "";
+    const prevCycle = [...scope].sort((a, b) => sortKey(b).localeCompare(sortKey(a)))[0];
+    const prevWorkerCount = prevCycle
+      ? new Set((prevCycle.labors || []).flatMap((l) => l.workers || [])).size
+      : 0;
+
     setCycleForm({
       mode: "create",
       faenaId,
@@ -397,6 +422,9 @@ export default function Faenas() {
         startDate: todayStr(),
         notes: "",
         labors: defaultLabors(),
+        prevCycle: prevCycle || null,
+        prevWorkerCount,
+        copyWorkers: !!prevCycle && prevWorkerCount > 0,
       },
     });
   };
@@ -735,6 +763,10 @@ export default function Faenas() {
           onCreateCycle={(subfaenaId) => openCreateCycle(selected.id, subfaenaId || "")}
           onEditCycle={(c) => openEditCycle(c, selected.id)}
           onOpenCloseFlow={(c) => openCloseFlow(c, selected.id)}
+          onReopenCycle={async (c) => {
+            await cyclesService.update(c.id, { status: "open", endDate: null });
+            await loadCycles(selected.id);
+          }}
           onDeleteCycle={(c) =>
             setConfirm({
               kind: "cycle",
@@ -891,8 +923,31 @@ export default function Faenas() {
               value={cycleForm.data.notes}
               onChange={(v) => setCycleForm((c) => ({ ...c, data: { ...c.data, notes: v } }))}
             />
+            {cycleForm.mode === "create" && cycleForm.data.prevCycle && cycleForm.data.prevWorkerCount > 0 && (
+              <div className="rounded-md border border-[var(--color-accent-soft)] bg-[var(--color-accent-soft)]/30 p-3 text-sm">
+                <label className="flex items-start gap-2">
+                  <input
+                    type="checkbox"
+                    checked={!!cycleForm.data.copyWorkers}
+                    onChange={(e) =>
+                      setCycleForm((c) => ({ ...c, data: { ...c.data, copyWorkers: e.target.checked } }))
+                    }
+                    className="mt-0.5"
+                  />
+                  <span>
+                    Importar <b>{cycleForm.data.prevWorkerCount}</b> trabajador(es) y las labores del último ciclo{" "}
+                    <span className="text-[var(--color-muted)]">
+                      ({cycleForm.data.prevCycle.label}
+                      {cycleForm.data.prevCycle.status !== "closed" ? " · abierto" : ""})
+                    </span>.
+                  </span>
+                </label>
+              </div>
+            )}
             <p className="text-xs text-[var(--color-muted)]">
-              Se creará con una labor "Principal" por defecto. Podrás agregar más al abrir el ciclo.
+              {cycleForm.mode === "create" && cycleForm.data.copyWorkers && cycleForm.data.prevCycle
+                ? "Se copiarán las labores y trabajadores del ciclo anterior."
+                : 'Se creará con una labor "Principal" por defecto. Podrás agregar más al abrir el ciclo.'}
             </p>
             <div className="flex justify-end gap-2 pt-2">
               <button
@@ -996,7 +1051,7 @@ export default function Faenas() {
 
 // ---------------------------------------------------------------------------
 
-function CycleRow({ cycle, subName, onEdit, onOpenCloseFlow, onDelete }) {
+function CycleRow({ cycle, subName, onEdit, onOpenCloseFlow, onReopen, onDelete }) {
   return (
     <li className="flex items-center justify-between px-3 py-2">
       <div>
@@ -1035,13 +1090,23 @@ function CycleRow({ cycle, subName, onEdit, onOpenCloseFlow, onDelete }) {
             ✏ Renombrar
           </button>
         )}
-        {cycle.status !== "closed" && (
+        {cycle.status !== "closed" ? (
           <button
             onClick={() => onOpenCloseFlow(cycle)}
             className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2.5 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
           >
             Cerrar
           </button>
+        ) : (
+          onReopen && (
+            <button
+              onClick={() => onReopen(cycle)}
+              title="Reabrir ciclo cerrado"
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2.5 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
+            >
+              ↻ Reabrir
+            </button>
+          )
         )}
         <button
           onClick={() => onDelete(cycle)}
@@ -1064,6 +1129,7 @@ function SelectedDetail({
   onCreateCycle,
   onEditCycle,
   onOpenCloseFlow,
+  onReopenCycle,
   onDeleteCycle,
 }) {
   const cyclesBySub = (cycles || []).reduce((acc, c) => {
@@ -1162,6 +1228,7 @@ function SelectedDetail({
                         cycle={c}
                         onEdit={onEditCycle}
                         onOpenCloseFlow={onOpenCloseFlow}
+                        onReopen={onReopenCycle}
                         onDelete={onDeleteCycle}
                       />
                     ))}

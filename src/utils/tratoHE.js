@@ -1,6 +1,11 @@
 // Helpers for "trato con horas extras" labor type.
-// Workday for tratoHE: { qty, overtimeHours, hasManejo, hasSupervision, extras, amount }
-// Day config in dayPrices[laborId][date]["0_0"]: { price, mode: "normal"|"overtimeOnly", isHoliday }
+// Workday for tratoHE:
+//   { qty, overtimeHours, hasManejo, hasSupervision, extras, amount }
+//   `qty` semantically holds the BASE DAY AMOUNT for that worker on that day
+//   (currency, e.g. 25000). Empty/0 means "didn't work that day".
+// Day config in dayPrices[laborId][date]["0_0"]:
+//   { price, mode: "normal"|"overtimeOnly", isHoliday }
+//   `price` is the SUGGESTED default base for the column (used to pre-fill rows).
 
 export const TRATO_HE_MODES = [
   { value: "normal", label: "Jornada normal (base + HE + bonos)" },
@@ -31,13 +36,13 @@ export function calcTratoHEAmount(input) {
     hasManejo = false,
     hasSupervision = false,
     extras = 0,
-    dayPrice = 0,
     dayMode = "normal",
     bonusManejo = DEFAULT_BONUS_MANEJO,
     bonusSupervision = DEFAULT_BONUS_SUPERVISION,
     overtimeRate = DEFAULT_OVERTIME_RATE,
   } = input || {};
-  const base = dayMode === "overtimeOnly" ? 0 : (Number(dayPrice) || 0) * (Number(qty) || 0);
+  // qty IS the base amount in currency now (no multiplication by dayPrice).
+  const base = dayMode === "overtimeOnly" ? 0 : Number(qty) || 0;
   const oh = (Number(overtimeHours) || 0) * (Number(overtimeRate) || 0);
   const m = hasManejo ? (Number(bonusManejo) || 0) : 0;
   const s = hasSupervision ? (Number(bonusSupervision) || 0) : 0;
