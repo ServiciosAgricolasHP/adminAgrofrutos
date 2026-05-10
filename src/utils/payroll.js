@@ -97,6 +97,8 @@ export function groupCashByLeader(cashItems) {
   return [...groups.values()].sort((a, b) => a.leader.localeCompare(b.leader));
 }
 
+export const groupItemsByLeader = groupCashByLeader;
+
 // ─────────────────────────── Styling helpers ───────────────────────────
 const BORDER_THIN = { style: "thin", color: { argb: "FF999999" } };
 const BORDER_ALL = { top: BORDER_THIN, left: BORDER_THIN, bottom: BORDER_THIN, right: BORDER_THIN };

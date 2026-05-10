@@ -18,7 +18,7 @@ export default function Dashboard() {
         const [f, c, w] = await Promise.all([
           faenasService.list({ order: ["name", "asc"], cache: true, persist: true, ttl: 10 * 60 * 1000 }),
           cyclesService.list({ cache: true, ttl: 2 * 60 * 1000 }),
-          workersService.list({ cache: true, persist: true, ttl: 5 * 60 * 1000 }),
+          workersService.list({ cache: true, persist: true, ttl: 24 * 60 * 60 * 1000 }),
         ]);
         if (cancelled) return;
         setFaenas(f);
@@ -32,7 +32,6 @@ export default function Dashboard() {
   }, []);
 
   const metrics = useMemo(() => {
-    const harvestFaenas = faenas.filter((f) => f.isHarvest).length;
     const openCycles = cycles.filter((c) => c.status !== "closed");
     const closedCycles = cycles.length - openCycles.length;
     const cyclesByFaena = openCycles.reduce((acc, c) => {
@@ -41,7 +40,6 @@ export default function Dashboard() {
     }, {});
     return {
       faenas: faenas.length,
-      harvestFaenas,
       openCycles: openCycles.length,
       closedCycles,
       workers: workers.length,
@@ -76,9 +74,6 @@ export default function Dashboard() {
             <div className={card}>
               <div className="text-xs uppercase tracking-wider text-[var(--color-muted)]">Faenas</div>
               <div className="mt-2 text-3xl font-semibold">{metrics.faenas}</div>
-              <div className="mt-1 text-xs text-[var(--color-muted)]">
-                {metrics.harvestFaenas} marcadas como cosecha
-              </div>
             </div>
             <div className={card}>
               <div className="text-xs uppercase tracking-wider text-[var(--color-muted)]">Ciclos abiertos</div>
@@ -135,11 +130,6 @@ export default function Dashboard() {
                     <li key={f.id} className="flex items-center justify-between py-2">
                       <div className="flex items-center gap-2">
                         <span className="text-sm font-medium">{f.name}</span>
-                        {f.isHarvest && (
-                          <span className="rounded bg-[var(--color-accent-soft)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-accent)]">
-                            COSECHA
-                          </span>
-                        )}
                       </div>
                       <span className="text-xs text-[var(--color-muted)]">
                         {metrics.cyclesByFaena[f.id] || 0} abiertos

@@ -10,7 +10,9 @@
       "Bash(rm src/Components/getData.js src/Components/getIDQR.js src/Components/index.js src/App.css)",
       "Bash(git add *)",
       "Bash(git mv *)",
-      "Bash(npm run *)"
+      "Bash(npm run *)",
+      "Bash(node -e ' *)",
+      "PowerShell($line = \\(Get-Content 'src/services/workersService.js' -Encoding UTF8\\)[25]; [System.BitConverter]::ToString\\([System.Text.Encoding]::UTF8.GetBytes\\($line\\)\\))"
     ]
   }
 }

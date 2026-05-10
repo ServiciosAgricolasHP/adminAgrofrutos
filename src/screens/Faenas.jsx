@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import {
   faenasService,
@@ -18,8 +18,9 @@ import Modal from "../components/Modal";
 import ConfirmDialog from "../components/ConfirmDialog";
 import TextField from "../components/TextField";
 import Select from "../components/Select";
+import { useIsMobile } from "../hooks/useIsMobile";
 
-const emptyFaena = { name: "", location: "", notes: "", isHarvest: false };
+const emptyFaena = { name: "", location: "", notes: "" };
 const emptySub = { name: "", notes: "" };
 
 const orderKey = (uid) => `af.faenaOrder.${uid || "anon"}`;
@@ -42,6 +43,7 @@ function defaultLabors(workers = []) {
 }
 
 export default function Faenas() {
+  const isMobile = useIsMobile();
   const { user, isAdmin } = useAuth();
   const storageKey = orderKey(user?.uid);
   const [searchParams, setSearchParams] = useSearchParams();
@@ -294,7 +296,6 @@ export default function Faenas() {
         name: faenaForm.data.name.trim(),
         location: faenaForm.data.location || "",
         notes: faenaForm.data.notes || "",
-        isHarvest: !!faenaForm.data.isHarvest,
       };
       if (faenaForm.mode === "create") {
         const created = await faenasService.create(payload);
@@ -597,6 +598,37 @@ export default function Faenas() {
   const selected = faenas.find((f) => f.id === selectedId);
   const selectedSubs = selectedId ? subsByFaena[selectedId] : null;
   const selectedCycles = selectedId ? cyclesByFaena[selectedId] : null;
+  const selectedGroupId = selectedId
+    ? (layout.faenaGroup[selectedId] && layout.groups.some((g) => g.id === layout.faenaGroup[selectedId])
+        ? layout.faenaGroup[selectedId]
+        : UNGROUPED_ID)
+    : null;
+
+  const renderSelectedDetail = () =>
+    selected && (
+      <SelectedDetail
+        selected={selected}
+        subs={selectedSubs}
+        cycles={selectedCycles}
+        onCreateSub={() => setSubForm({ mode: "create", faenaId: selected.id, data: { ...emptySub } })}
+        onEditSub={(s) => setSubForm({ mode: "edit", faenaId: selected.id, data: { ...s } })}
+        onDeleteSub={(s) => setConfirm({ kind: "sub", item: s, message: `¿Eliminar la subfaena "${s.name}"?` })}
+        onCreateCycle={(subfaenaId) => openCreateCycle(selected.id, subfaenaId || "")}
+        onEditCycle={(c) => openEditCycle(c, selected.id)}
+        onOpenCloseFlow={(c) => openCloseFlow(c, selected.id)}
+        onReopenCycle={async (c) => {
+          await cyclesService.update(c.id, { status: "open", endDate: null });
+          await loadCycles(selected.id);
+        }}
+        onDeleteCycle={(c) =>
+          setConfirm({
+            kind: "cycle",
+            item: { ...c, faenaId: selected.id },
+            message: `¿Eliminar el ciclo "${c.label}"?`,
+          })
+        }
+      />
+    );
 
   return (
     <div>
@@ -678,8 +710,7 @@ export default function Faenas() {
                       const isSelected = selectedId === f.id;
                       const cardColor = colorOf(f);
                       return (
-                        <div
-                          key={f.id}
+                        <Fragment key={f.id}><div
                           draggable
                           onDragStart={onDragStart(f.id)}
                           onDragOver={onDragOver(f.id)}
@@ -700,11 +731,6 @@ export default function Faenas() {
                               <div>
                                 <div className="flex items-center gap-2">
                                   <span className="font-semibold leading-tight">{f.name}</span>
-                                  {f.isHarvest && (
-                                    <span className="rounded bg-[var(--color-accent-soft)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-accent)]">
-                                      COSECHA
-                                    </span>
-                                  )}
                                 </div>
                                 {f.location && <div className="mt-0.5 text-xs text-[var(--color-muted)]">{f.location}</div>}
                               </div>
@@ -717,8 +743,8 @@ export default function Faenas() {
                             </div>
                           </div>
                           {f.notes && <p className="mb-3 line-clamp-2 text-xs text-[var(--color-muted)]">{f.notes}</p>}
-                          <div className="mt-3 flex items-center justify-between border-t border-[var(--color-border)] pt-3 text-xs">
-                            <div className="flex gap-1.5">
+                          <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--color-border)] pt-3 text-xs">
+                            <div className="flex flex-wrap gap-1.5">
                               <span className="rounded-full bg-[var(--color-surface-2)] px-2 py-0.5 text-[var(--color-muted)]">
                                 {subsCount != null ? `${subsCount} sub` : "—"}
                               </span>
@@ -726,7 +752,7 @@ export default function Faenas() {
                                 {cyclesCount != null ? `${cyclesCount} ciclos` : "—"}
                               </span>
                             </div>
-                            <div className="flex gap-1" onClick={(e) => e.stopPropagation()}>
+                            <div className="ml-auto flex shrink-0 gap-1" onClick={(e) => e.stopPropagation()}>
                               <button
                                 onClick={() => setFaenaForm({ mode: "edit", data: { ...f } })}
                                 className="rounded-md px-2 py-1 text-[var(--color-muted)] hover:bg-[var(--color-surface-2)] hover:text-[var(--color-text)]"
@@ -742,39 +768,22 @@ export default function Faenas() {
                             </div>
                           </div>
                         </div>
+                        {isMobile && isSelected && (
+                          <div className="col-span-full">
+                            {renderSelectedDetail()}
+                          </div>
+                        )}
+                        </Fragment>
                       );
                     })}
                   </div>
                 )}
+                {!isMobile && selectedGroupId === g.id && renderSelectedDetail()}
               </section>
             );
           })}
+          {!isMobile && selected && !layout.groups.some((g) => g.id === selectedGroupId) && renderSelectedDetail()}
         </div>
-      )}
-
-      {selected && (
-        <SelectedDetail
-          selected={selected}
-          subs={selectedSubs}
-          cycles={selectedCycles}
-          onCreateSub={() => setSubForm({ mode: "create", faenaId: selected.id, data: { ...emptySub } })}
-          onEditSub={(s) => setSubForm({ mode: "edit", faenaId: selected.id, data: { ...s } })}
-          onDeleteSub={(s) => setConfirm({ kind: "sub", item: s, message: `¿Eliminar la subfaena "${s.name}"?` })}
-          onCreateCycle={(subfaenaId) => openCreateCycle(selected.id, subfaenaId || "")}
-          onEditCycle={(c) => openEditCycle(c, selected.id)}
-          onOpenCloseFlow={(c) => openCloseFlow(c, selected.id)}
-          onReopenCycle={async (c) => {
-            await cyclesService.update(c.id, { status: "open", endDate: null });
-            await loadCycles(selected.id);
-          }}
-          onDeleteCycle={(c) =>
-            setConfirm({
-              kind: "cycle",
-              item: { ...c, faenaId: selected.id },
-              message: `¿Eliminar el ciclo "${c.label}"?`,
-            })
-          }
-        />
       )}
 
       {/* Faena modal */}
@@ -802,15 +811,6 @@ export default function Faenas() {
               value={faenaForm.data.notes}
               onChange={(v) => setFaenaForm((f) => ({ ...f, data: { ...f.data, notes: v } }))}
             />
-            <label className="flex items-center gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-sm">
-              <input
-                type="checkbox"
-                checked={!!faenaForm.data.isHarvest}
-                onChange={(e) => setFaenaForm((f) => ({ ...f, data: { ...f.data, isHarvest: e.target.checked } }))}
-              />
-              <span>¿Es una cosecha?</span>
-              <span className="text-xs text-[var(--color-muted)]">(etiqueta informativa)</span>
-            </label>
             <div className="flex justify-end gap-2 pt-2">
               <button
                 type="button"
@@ -1053,9 +1053,9 @@ export default function Faenas() {
 
 function CycleRow({ cycle, subName, onEdit, onOpenCloseFlow, onReopen, onDelete }) {
   return (
-    <li className="flex items-center justify-between px-3 py-2">
-      <div>
-        <div className="flex items-center gap-2 text-sm font-medium">
+    <li className="flex flex-wrap items-center justify-between gap-2 px-3 py-2">
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-2 text-sm font-medium">
           {cycle.label}
           <span
             className={`rounded px-1.5 py-0.5 text-[10px] ${
@@ -1074,7 +1074,7 @@ function CycleRow({ cycle, subName, onEdit, onOpenCloseFlow, onReopen, onDelete 
           {` · ${(cycle.labors || []).length} labores`}
         </div>
       </div>
-      <div className="flex gap-2">
+      <div className="ml-auto flex shrink-0 flex-wrap gap-1.5">
         <Link
           to={`/cycles/${cycle.id}`}
           className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2.5 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
@@ -1192,12 +1192,12 @@ function SelectedDetail({
             const subCycles = cyclesBySub[s.id] || [];
             return (
               <div key={s.id} className="rounded-md border border-[var(--color-border)]">
-                <div className="flex items-center justify-between gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2">
-                  <div>
-                    <div className="text-sm font-medium">{s.name}</div>
-                    {s.notes && <div className="text-xs text-[var(--color-muted)]">{s.notes}</div>}
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-medium">{s.name}</div>
+                    {s.notes && <div className="truncate text-xs text-[var(--color-muted)]">{s.notes}</div>}
                   </div>
-                  <div className="flex gap-2">
+                  <div className="ml-auto flex shrink-0 flex-wrap gap-1">
                     <button
                       onClick={() => onCreateCycle(s.id)}
                       className="rounded-md bg-[var(--color-accent)] px-2.5 py-1 text-xs font-medium text-[var(--color-accent-fg)] hover:bg-[var(--color-accent-hover)]"

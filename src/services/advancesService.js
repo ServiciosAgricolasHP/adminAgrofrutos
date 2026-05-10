@@ -1,7 +1,19 @@
 // Anticipos & Adelantos — single collection with type discriminator.
 // type "anticipo": adelanto pequeño / vale (suele ir contra el ciclo en curso).
 // type "adelanto": préstamo o adelanto mayor contra futuras nóminas.
-import { writeBatch, doc, serverTimestamp } from "firebase/firestore";
+//
+// Doc shape:
+//   id, type, workerRut, workerName, amount, date, note,
+//   status: "pending" | "partial" | "applied" | "cancelled",
+//   amountPaid: number (sum of payments[]),
+//   payments: [{ payrollId, amount, paidAt }],
+//   appliedPayrollId: string | null  (last payroll that touched it; legacy)
+//   appliedAt, appliedBy
+//
+// "pending"  → no amount applied yet (or amountPaid == 0).
+// "partial"  → amountPaid > 0 but < amount; can keep being applied.
+// "applied"  → amountPaid >= amount.
+import { writeBatch, doc, getDoc, serverTimestamp } from "firebase/firestore";
 import { db, auth } from "../firebase";
 import { createService } from "./firestoreBase";
 
@@ -14,6 +26,7 @@ export const advancesService = createService("advance", "advances");
 
 export async function listPendingForWorkers(workerRuts) {
   // Firestore "in" supports up to 30 elements per query.
+  // Includes both "pending" and "partial" — both still have remaining balance.
   const out = [];
   const seen = new Set();
   const ruts = [...new Set(workerRuts)].filter(Boolean);
@@ -22,7 +35,7 @@ export async function listPendingForWorkers(workerRuts) {
     const list = await advancesService.list({
       wheres: [
         ["workerRut", "in", chunk],
-        ["status", "==", "pending"],
+        ["status", "in", ["pending", "partial"]],
       ],
     });
     for (const a of list) {
@@ -33,6 +46,13 @@ export async function listPendingForWorkers(workerRuts) {
     }
   }
   return out;
+}
+
+// Helper: how much of an advance is still owed.
+export function advanceRemaining(adv) {
+  const amount = Number(adv?.amount) || 0;
+  const paid = Number(adv?.amountPaid) || 0;
+  return Math.max(0, amount - paid);
 }
 
 export async function listAllPending() {
@@ -46,34 +66,76 @@ export async function listAll() {
   return advancesService.list({ order: ["date", "desc"] });
 }
 
-// Mark a list of advances as "applied" against a payroll.
-export async function applyAdvancesToPayroll(advanceIds, payrollId) {
-  if (!advanceIds || advanceIds.length === 0) return;
-  await batchPatch(advanceIds, {
-    status: "applied",
-    appliedPayrollId: payrollId,
-    appliedAt: serverTimestamp(),
-    appliedBy: auth.currentUser?.uid || null,
-  });
-}
+// Apply partial / full payments against advances.
+// `applications`: [{ advanceId, amount }]  — `amount` is what this payroll
+// actually paid against that advance. The advance's status flips to "partial"
+// or "applied" depending on whether amountPaid reaches the full amount.
+export async function applyAdvancesToPayroll(applications, payrollId) {
+  if (!applications || applications.length === 0) return;
+  // Fetch each advance to compute its new amountPaid + status.
+  const docs = await Promise.all(
+    applications.map(async (app) => {
+      const snap = await getDoc(doc(db, "advances", app.advanceId));
+      return { app, data: snap.exists() ? snap.data() : null };
+    }),
+  );
 
-// Restore advances back to "pending" (when payroll is deleted).
-export async function restoreAdvancesFromPayroll(advanceIds) {
-  if (!advanceIds || advanceIds.length === 0) return;
-  await batchPatch(advanceIds, {
-    status: "pending",
-    appliedPayrollId: null,
-    appliedAt: null,
-  });
-}
-
-async function batchPatch(ids, patch) {
+  const now = new Date(); // serverTimestamp() can't be used inside arrayUnion
+  const uid = auth.currentUser?.uid || null;
   const chunkSize = 450;
-  for (let i = 0; i < ids.length; i += chunkSize) {
+  for (let i = 0; i < docs.length; i += chunkSize) {
     const batch = writeBatch(db);
-    const chunk = ids.slice(i, i + chunkSize);
-    for (const id of chunk) {
-      batch.update(doc(db, "advances", id), patch);
+    for (const { app, data } of docs.slice(i, i + chunkSize)) {
+      if (!data) continue;
+      const total = Number(data.amount) || 0;
+      const prevPaid = Number(data.amountPaid) || 0;
+      const newPaid = Math.min(total, prevPaid + (Number(app.amount) || 0));
+      const status = newPaid >= total && total > 0 ? "applied" : (newPaid > 0 ? "partial" : "pending");
+      const payments = Array.isArray(data.payments) ? [...data.payments] : [];
+      payments.push({ payrollId, amount: Number(app.amount) || 0, paidAt: now.toISOString() });
+      batch.update(doc(db, "advances", app.advanceId), {
+        status,
+        amountPaid: newPaid,
+        payments,
+        appliedPayrollId: payrollId,
+        appliedAt: serverTimestamp(),
+        appliedBy: uid,
+      });
+    }
+    await batch.commit();
+  }
+  advancesService.invalidate();
+}
+
+// Reverse the payments[] entries that match `payrollId`. If no other payroll
+// has paid against it, the advance returns to "pending"; otherwise it stays
+// "partial" with the reduced amountPaid.
+export async function restoreAdvancesFromPayroll(advanceIds, payrollId) {
+  if (!advanceIds || advanceIds.length === 0) return;
+  const docs = await Promise.all(
+    advanceIds.map(async (id) => {
+      const snap = await getDoc(doc(db, "advances", id));
+      return { id, data: snap.exists() ? snap.data() : null };
+    }),
+  );
+  const chunkSize = 450;
+  for (let i = 0; i < docs.length; i += chunkSize) {
+    const batch = writeBatch(db);
+    for (const { id, data } of docs.slice(i, i + chunkSize)) {
+      if (!data) continue;
+      const total = Number(data.amount) || 0;
+      const payments = Array.isArray(data.payments) ? data.payments : [];
+      const remainingPayments = payments.filter((p) => p.payrollId !== payrollId);
+      const newPaid = remainingPayments.reduce((s, p) => s + (Number(p.amount) || 0), 0);
+      const status = newPaid >= total && total > 0 ? "applied" : (newPaid > 0 ? "partial" : "pending");
+      batch.update(doc(db, "advances", id), {
+        status,
+        amountPaid: newPaid,
+        payments: remainingPayments,
+        // Best effort: clear appliedPayrollId only if this was the last pointer.
+        appliedPayrollId: status === "pending" ? null : (data.appliedPayrollId === payrollId ? null : data.appliedPayrollId),
+        appliedAt: status === "pending" ? null : data.appliedAt,
+      });
     }
     await batch.commit();
   }

@@ -487,7 +487,8 @@ function CobrarEditor({ labors, carriers, carrierById, onLaborChange, onCarrierC
                 <td className="px-2 py-1.5 text-right">
                   <input
                     type="number"
-                    value={l.rate}
+                    value={l.rate || ""}
+                    placeholder="0"
                     onChange={(e) => onLaborChange(l.labor.id, { chargeRate: Number(e.target.value) || 0 })}
                     className="w-24 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-1 py-0.5 text-right tabular-nums outline-none focus:border-[var(--color-accent)]"
                   />
@@ -517,7 +518,8 @@ function CobrarEditor({ labors, carriers, carrierById, onLaborChange, onCarrierC
                   <td className="px-2 py-1.5 text-right">
                     <input
                       type="number"
-                      value={c.rate}
+                      value={c.rate || ""}
+                      placeholder="0"
                       onChange={(e) => onCarrierChange(c.carrierId, { chargeRate: Number(e.target.value) || 0 })}
                       className="w-24 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-1 py-0.5 text-right tabular-nums outline-none focus:border-[var(--color-accent)]"
                     />

@@ -14,6 +14,8 @@ import Workers from "./screens/Workers";
 import Transports from "./screens/Transports";
 import Payroll from "./screens/Payroll";
 import Advances from "./screens/Advances";
+import MigrateWorkers from "./screens/MigrateWorkers";
+import CleanupPaidWorkdays from "./screens/CleanupPaidWorkdays";
 
 export default function App() {
   return (
@@ -43,6 +45,22 @@ export default function App() {
                   element={
                     <ProtectedRoute adminOnly>
                       <Placeholder title="Auditoría" />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="admin/migrate-workers"
+                  element={
+                    <ProtectedRoute adminOnly>
+                      <MigrateWorkers />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="admin/cleanup-paid-workdays"
+                  element={
+                    <ProtectedRoute adminOnly>
+                      <CleanupPaidWorkdays />
                     </ProtectedRoute>
                   }
                 />

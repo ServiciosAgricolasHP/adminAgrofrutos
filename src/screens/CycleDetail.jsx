@@ -4,7 +4,7 @@ import { AgGridReact } from "ag-grid-react";
 import { ModuleRegistry, AllCommunityModule } from "ag-grid-community";
 import "ag-grid-community/styles/ag-grid.css";
 import { toPng, toBlob } from "html-to-image";
-import { cyclesService, faenasService, subfaenasService, workdaysService } from "../services";
+import { cyclesService, faenasService, subfaenasService, workdaysService, workersService, groupLeadersService } from "../services";
 import { formatRutForDisplay } from "../utils/rutUtils";
 import { parseAmount } from "../utils/formula";
 import { AG_GRID_LOCALE_ES } from "../utils/agGridLocale";
@@ -82,6 +82,84 @@ function normalizeCycle(c) {
   }
   labors = labors.map(({ days: _drop, ...rest }) => rest);
   return { ...c, days, labors };
+}
+
+function LeaderPickerModal({ open, onClose, leaders, workerName, busy, onPick }) {
+  const [filter, setFilter] = useState("");
+
+  useEffect(() => {
+    if (open) setFilter("");
+  }, [open]);
+
+  const filtered = useMemo(() => {
+    const q = filter.trim().toUpperCase();
+    if (!q) return leaders;
+    return leaders.filter((l) => l.includes(q));
+  }, [leaders, filter]);
+
+  return (
+    <Modal open={open} onClose={() => !busy && onClose()} title={`Asignar líder a ${workerName}`} size="md">
+      <div className="space-y-3">
+        <TextField
+          label="Buscar líder"
+          value={filter}
+          onChange={setFilter}
+          autoFocus
+          placeholder="Filtrar..."
+        />
+        <div className="max-h-72 overflow-y-auto rounded-md border border-[var(--color-border)]">
+          {leaders.length === 0 ? (
+            <div className="p-3 text-sm text-[var(--color-muted)]">
+              No hay líderes habilitados. Habilita líderes en la colección <code>groupLeader</code>.
+            </div>
+          ) : filtered.length === 0 ? (
+            <div className="p-3 text-sm text-[var(--color-muted)]">Sin resultados.</div>
+          ) : (
+            <ul className="divide-y divide-[var(--color-border)]">
+              {filtered.map((l) => (
+                <li key={l}>
+                  <button
+                    onClick={() => onPick(l)}
+                    disabled={busy}
+                    className="flex w-full items-center justify-between px-3 py-2 text-left text-sm hover:bg-[var(--color-accent-soft)] disabled:opacity-50"
+                  >
+                    <span className="font-medium">{l}</span>
+                    <span className="text-xs text-[var(--color-muted)]">→</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function GroupHeaderRowRenderer(props) {
+  const data = props.data || {};
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "0 12px",
+        height: "100%",
+        background: "var(--color-accent-soft)",
+        borderTop: "1px solid var(--color-border)",
+        borderBottom: "1px solid var(--color-border)",
+        fontWeight: 600,
+        fontSize: 12,
+        letterSpacing: "0.04em",
+        textTransform: "uppercase",
+        color: "var(--color-accent)",
+      }}
+    >
+      <span>👥 {data._leader}</span>
+      <span style={{ opacity: 0.7, fontWeight: 400 }}>· {data._count} trab.</span>
+    </div>
+  );
 }
 
 function buildRowsCosecha(workers, days, wdMap, dayCombosByDate) {
@@ -231,6 +309,13 @@ export default function CycleDetail() {
   const [transportsOpen, setTransportsOpen] = useState(false);
   const [cycleTrips, setCycleTrips] = useState([]);
   const [summaryOpen, setSummaryOpen] = useState(false);
+  const [groupView, setGroupView] = useState(() => {
+    try { return localStorage.getItem("cycleDetail.groupView") === "group" ? "group" : "all"; }
+    catch { return "all"; }
+  });
+  const [allWorkers, setAllWorkers] = useState([]);
+  const [enabledLeaders, setEnabledLeaders] = useState([]);
+  const [groupBusy, setGroupBusy] = useState(false);
 
   const gridRef = useRef(null);
   const photoRef = useRef(null);
@@ -290,6 +375,66 @@ export default function CycleDetail() {
 
   const closed = cycle?.status === "closed";
   const readOnly = closed && !isAdmin;
+
+  const loadAllWorkers = async () => {
+    const list = await workersService.list({
+      order: ["name", "asc"],
+      cache: true,
+      persist: true,
+      ttl: 24 * 60 * 60 * 1000,
+    });
+    setAllWorkers(list);
+  };
+
+  const loadEnabledLeaders = async () => {
+    const list = await groupLeadersService.list({
+      cache: true,
+      persist: true,
+      ttl: 24 * 60 * 60 * 1000,
+    });
+    const names = list
+      .filter((d) => d.habilitado === true)
+      .map((d) => String(d.name || d.nombre || d.id || "").trim().toUpperCase())
+      .filter(Boolean);
+    const dedup = [...new Set(names)].sort();
+    setEnabledLeaders(dedup);
+  };
+
+  useEffect(() => {
+    loadAllWorkers();
+    loadEnabledLeaders();
+  }, []);
+
+  useEffect(() => {
+    try { localStorage.setItem("cycleDetail.groupView", groupView); } catch { /* ignore */ }
+  }, [groupView]);
+
+  const rutToLeader = useMemo(() => {
+    const m = new Map();
+    for (const w of allWorkers) {
+      const l = String(w.groupLeader?.[0] || "").trim().toUpperCase();
+      if (l) m.set(w.id, l);
+    }
+    return m;
+  }, [allWorkers]);
+
+  const LEADER_LOCAL = "CHILENOS";
+  const LEADER_FOREIGN = "EXTRANJEROS";
+  const LEADER_NONE = "__NONE__";
+
+  const orderLeaders = (leaders) => {
+    const arr = [...leaders];
+    return arr.sort((a, b) => {
+      if (a === b) return 0;
+      if (a === LEADER_LOCAL) return -1;
+      if (b === LEADER_LOCAL) return 1;
+      if (a === LEADER_FOREIGN) return -1;
+      if (b === LEADER_FOREIGN) return 1;
+      if (a === LEADER_NONE) return 1;
+      if (b === LEADER_NONE) return -1;
+      return a.localeCompare(b);
+    });
+  };
 
   const activeLabor = useMemo(
     () => cycle?.labors?.find((l) => l.id === activeLaborId) || cycle?.labors?.[0] || null,
@@ -357,13 +502,76 @@ export default function CycleDetail() {
     return out;
   }, [isTratoLabor, activeLabor, days, dayPrices, defaultMode, workdaysByLabor]);
 
-  const rowData = useMemo(() => {
+  const rowDataRaw = useMemo(() => {
     if (isCosechaLabor) return buildRowsCosecha(workers, days, wdMap, dayCombosByDate);
     if (isTratoLabor) return buildRowsTrato(workers, days, wdMap, dayTiersByDate);
     if (isTratoHELabor) return buildRowsTratoHE(workers, days, wdMap);
     return buildRowsNormal(workers, days, wdMap);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workers, days, wdMap, isCosechaLabor, isTratoLabor, isTratoHELabor, dayCombosByDate, dayTiersByDate]);
+
+  const groupBuckets = useMemo(() => {
+    const buckets = new Map();
+    for (const row of rowDataRaw) {
+      const leader = rutToLeader.get(row.rut) || LEADER_NONE;
+      if (!buckets.has(leader)) buckets.set(leader, []);
+      buckets.get(leader).push(row);
+    }
+    for (const [, rows] of buckets) rows.sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
+    return buckets;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rowDataRaw, rutToLeader]);
+
+  const orderedGroups = useMemo(() => {
+    const keys = orderLeaders([...groupBuckets.keys()]);
+    return keys.map((k) => ({
+      key: k,
+      label: k === LEADER_NONE ? "SIN GRUPO" : k,
+      count: groupBuckets.get(k)?.length || 0,
+      rows: groupBuckets.get(k) || [],
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [groupBuckets]);
+
+  const useGrouped = groupView === "group" && !photoMode;
+
+  const rowData = useMemo(() => {
+    if (!useGrouped) return rowDataRaw;
+    const out = [];
+    for (const g of orderedGroups) {
+      out.push({
+        rut: `__group__${g.key}`,
+        _isHeader: true,
+        _leader: g.label,
+        _leaderKey: g.key,
+        _count: g.count,
+      });
+      for (const r of g.rows) out.push(r);
+    }
+    return out;
+  }, [useGrouped, rowDataRaw, orderedGroups]);
+
+  const scrollToGroup = (key) => {
+    const api = gridRef.current?.api;
+    if (!api) return;
+    const node = api.getRowNode(`__group__${key}`);
+    if (node) api.ensureNodeVisible(node, "top");
+  };
+
+  const assignLeaderToWorker = async (rut, leader) => {
+    const w = allWorkers.find((x) => x.id === rut);
+    const prev = Array.isArray(w?.groupLeader) ? w.groupLeader : [];
+    const next = [leader, ...prev.filter((p) => String(p).toUpperCase() !== leader)];
+    setGroupBusy(true);
+    try {
+      await workersService.update(rut, { groupLeader: next });
+      await loadAllWorkers();
+    } finally {
+      setGroupBusy(false);
+    }
+  };
+
+  const [leaderPickerFor, setLeaderPickerFor] = useState(null); // rut | null
 
   const totalsByLabor = useMemo(() => {
     const out = {};
@@ -773,6 +981,117 @@ export default function CycleDetail() {
   // ============================================================
   // Cell value changed
   // ============================================================
+
+  // Field is one of the per-day editable fields (cosecha combo, trato tier,
+  // tratoHE qty/he, normal). All other fields (rut/name/total/__amt/__total)
+  // are derived and shouldn't be batch-written.
+  const isEditableField = (field) => {
+    if (!field) return false;
+    if (["rut", "name", "total"].includes(field)) return false;
+    if (field.endsWith("__amt") || field.endsWith("__total")) return false;
+    return true;
+  };
+
+  const dispatchCellChange = async (node, colDef, newValue) => {
+    if (!node || !colDef) return;
+    if (!isEditableField(colDef.field)) return;
+    await onCellValueChanged({
+      colDef,
+      data: node.data,
+      newValue,
+      node,
+    });
+  };
+
+  // Ctrl+D fill down: take the focused cell's value, write it to the same
+  // column on every selected row. Use Shift+Click on the row checkboxes to
+  // pick the destination range first.
+  const fillDown = async (params) => {
+    if (readOnly || photoMode) return;
+    const api = gridRef.current?.api;
+    if (!api) return;
+    const colDef = params.colDef;
+    if (!isEditableField(colDef?.field)) return;
+    const sourceValue = params.data?.[colDef.field];
+    if (sourceValue == null || sourceValue === "" || sourceValue === 0) {
+      setCopyToast("Celda fuente vacía");
+      setTimeout(() => setCopyToast(""), 1500);
+      return;
+    }
+    const selected = api.getSelectedNodes();
+    if (selected.length === 0) {
+      setCopyToast("Selecciona filas con Shift+Click primero");
+      setTimeout(() => setCopyToast(""), 2200);
+      return;
+    }
+    let count = 0;
+    for (const node of selected) {
+      if (node.id === params.node?.id) continue;
+      await dispatchCellChange(node, colDef, sourceValue);
+      count++;
+    }
+    setCopyToast(`✓ Copiado a ${count} fila(s)`);
+    setTimeout(() => setCopyToast(""), 1500);
+  };
+
+  // Ctrl+V paste: split the clipboard by lines and apply each value to the
+  // displayed row at sourceIndex+i in the same column. Tabs (multi-column
+  // copies from Excel) are not yet supported — only the first column is used.
+  const pasteFromClipboard = async (params) => {
+    if (readOnly || photoMode) return;
+    const api = gridRef.current?.api;
+    if (!api) return;
+    const colDef = params.colDef;
+    if (!isEditableField(colDef?.field)) return;
+    let text;
+    try {
+      text = await navigator.clipboard.readText();
+    } catch {
+      setCopyToast("No pude leer el portapapeles");
+      setTimeout(() => setCopyToast(""), 2000);
+      return;
+    }
+    if (!text) return;
+    const lines = text.replace(/\r/g, "").split("\n").map((l) => l.split("\t")[0]);
+    while (lines.length && lines[lines.length - 1].trim() === "") lines.pop();
+    if (lines.length === 0) return;
+    const startIdx = params.node?.rowIndex;
+    if (startIdx == null) return;
+    let count = 0;
+    let lineIdx = 0;
+    let targetIdx = startIdx;
+    while (lineIdx < lines.length) {
+      const node = api.getDisplayedRowAtIndex(targetIdx);
+      if (!node) break;
+      if (node.data?._isHeader) {
+        targetIdx++;
+        continue;
+      }
+      await dispatchCellChange(node, colDef, lines[lineIdx]);
+      lineIdx++;
+      targetIdx++;
+      count++;
+    }
+    setCopyToast(`✓ Pegadas ${count} celda(s)`);
+    setTimeout(() => setCopyToast(""), 1500);
+  };
+
+  const onCellKeyDown = async (params) => {
+    const e = params.event;
+    if (!e) return;
+    const ctrl = e.ctrlKey || e.metaKey;
+    if (!ctrl) return;
+    const key = String(e.key || "").toLowerCase();
+    if (key === "d") {
+      e.preventDefault();
+      e.stopPropagation();
+      await fillDown(params);
+    } else if (key === "v") {
+      e.preventDefault();
+      e.stopPropagation();
+      await pasteFromClipboard(params);
+    }
+  };
 
   const onCellValueChanged = async (params) => {
     const field = params.colDef.field;
@@ -1284,16 +1603,46 @@ export default function CycleDetail() {
       cellStyle: { fontWeight: 600, color: "var(--color-accent)" },
     };
     const actionsCol = photoMode ? [] : [{
-      headerName: "", field: "_actions", editable: false, width: 90, pinned: "right",
-      cellRenderer: (p) => (
-        <button
-          onClick={() => askRemoveWorker(p.data.rut)}
-          disabled={readOnly}
-          className="text-xs text-[var(--color-danger)] hover:underline disabled:opacity-40"
-        >
-          Quitar
-        </button>
-      ),
+      headerName: "", field: "_actions", editable: false,
+      width: useGrouped ? 220 : 90, pinned: "right",
+      cellRenderer: (p) => {
+        const rut = p.data?.rut;
+        if (!rut || p.data?._isHeader) return null;
+        const showAssign = useGrouped && !rutToLeader.has(rut) && !readOnly;
+        return (
+          <div className="flex items-center gap-1.5">
+            {showAssign && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => assignLeaderToWorker(rut, LEADER_LOCAL)}
+                  disabled={groupBusy}
+                  className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-1.5 py-0.5 text-[10px] hover:bg-[var(--color-accent-soft)] disabled:opacity-50"
+                  title="Marcar como CHILENOS"
+                >
+                  Chilenos
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLeaderPickerFor(rut)}
+                  disabled={groupBusy}
+                  className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-1.5 py-0.5 text-[10px] hover:bg-[var(--color-accent-soft)] disabled:opacity-50"
+                  title="Elegir otro líder"
+                >
+                  …
+                </button>
+              </>
+            )}
+            <button
+              onClick={() => askRemoveWorker(rut)}
+              disabled={readOnly}
+              className="text-xs text-[var(--color-danger)] hover:underline disabled:opacity-40"
+            >
+              Quitar
+            </button>
+          </div>
+        );
+      },
     }];
 
     if (isCosechaLabor) {
@@ -1475,7 +1824,10 @@ export default function CycleDetail() {
             {
               headerName: "Base",
               field: `${d}__qty`,
-              editable: !readOnly && !photoMode,
+              // Empty cells stay non-editable so the click reaches the
+              // "use suggested price" button rendered below; once they have
+              // a value, normal editing kicks back in.
+              editable: (p) => !readOnly && !photoMode && Number(p.data?.[`${d}__qty`] || 0) > 0,
               width: 110,
               type: "numericColumn",
               valueParser: (p) => parseAmount(p.newValue),
@@ -1566,7 +1918,7 @@ export default function CycleDetail() {
   if (!cycle) return <div className="text-[var(--color-muted)]">Ciclo no encontrado.</div>;
 
   const grid = (
-    <div className="ag-theme-quartz ag-theme-app h-full" style={{ minHeight: 400 }}>
+    <div className="ag-theme-quartz ag-theme-app h-full overflow-x-auto" style={{ minHeight: 400 }}>
       {workers.length === 0 ? (
         <div className="flex h-full items-center justify-center rounded-lg border border-dashed border-[var(--color-border)] text-[var(--color-muted)]">
           Agrega trabajadores para empezar.
@@ -1577,6 +1929,7 @@ export default function CycleDetail() {
           rowData={rowData}
           columnDefs={columnDefs}
           onCellValueChanged={onCellValueChanged}
+          onCellKeyDown={onCellKeyDown}
           singleClickEdit={!photoMode}
           stopEditingWhenCellsLoseFocus
           getRowId={(p) => p.data.rut}
@@ -1587,6 +1940,9 @@ export default function CycleDetail() {
           localeText={AG_GRID_LOCALE_ES}
           defaultColDef={{ resizable: true, sortable: true, filter: true }}
           rowHeight={isQtyLabor ? 44 : undefined}
+          isFullWidthRow={(p) => !!p.rowNode.data?._isHeader}
+          fullWidthCellRenderer={GroupHeaderRowRenderer}
+          getRowClass={(p) => (p.data?._isHeader ? "ag-group-header-row" : "")}
         />
       )}
     </div>
@@ -1699,6 +2055,18 @@ export default function CycleDetail() {
           <button onClick={() => setPhotoMode(true)} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)]">
             📷 Modo foto
           </button>
+          <span
+            className="hidden sm:inline-flex items-center gap-1 rounded-md border border-dashed border-[var(--color-border)] px-2 py-1 text-[10px] text-[var(--color-muted)]"
+            title={
+              "Atajos en el grid:\n" +
+              "  Esc → salir de edición\n" +
+              "  Shift+Click en filas → seleccionar rango\n" +
+              "  Ctrl+D → copiar valor de la celda focuseada a las filas seleccionadas\n" +
+              "  Ctrl+V → pegar columna desde portapapeles (una línea por fila)"
+            }
+          >
+            ⌨ Atajos
+          </span>
         </div>
       </div>
 
@@ -2281,11 +2649,63 @@ export default function CycleDetail() {
             </div>
           )}
 
+          {!photoMode && workers.length > 0 && (
+            <div className="mb-2 flex flex-wrap items-center gap-2">
+              <div className="inline-flex overflow-hidden rounded-md border border-[var(--color-border)] text-xs">
+                <button
+                  onClick={() => setGroupView("all")}
+                  className={`px-3 py-1.5 ${groupView === "all" ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]" : "bg-[var(--color-surface)] hover:bg-[var(--color-accent-soft)]"}`}
+                >
+                  Todos
+                </button>
+                <button
+                  onClick={() => setGroupView("group")}
+                  className={`px-3 py-1.5 ${groupView === "group" ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]" : "bg-[var(--color-surface)] hover:bg-[var(--color-accent-soft)]"}`}
+                >
+                  Por grupo
+                </button>
+              </div>
+              {useGrouped && orderedGroups.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {orderedGroups.map((g) => {
+                    const isNone = g.key === LEADER_NONE;
+                    return (
+                      <button
+                        key={g.key}
+                        type="button"
+                        onClick={() => scrollToGroup(g.key)}
+                        className={`rounded-full border px-2.5 py-1 text-xs ${
+                          isNone
+                            ? "border-[var(--color-warning)] bg-[var(--color-warning-soft)] text-[var(--color-warning)]"
+                            : "border-[var(--color-border)] bg-[var(--color-surface-2)] hover:bg-[var(--color-accent-soft)]"
+                        }`}
+                      >
+                        {g.label} · {g.count}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="flex-1">{grid}</div>
         </>
       )}
 
       {/* Modals */}
+      <LeaderPickerModal
+        open={!!leaderPickerFor}
+        onClose={() => setLeaderPickerFor(null)}
+        leaders={enabledLeaders}
+        workerName={leaderPickerFor ? (allWorkers.find((w) => w.id === leaderPickerFor)?.name || leaderPickerFor) : ""}
+        busy={groupBusy}
+        onPick={async (leader) => {
+          const rut = leaderPickerFor;
+          setLeaderPickerFor(null);
+          if (rut && leader) await assignLeaderToWorker(rut, leader);
+        }}
+      />
       <Modal
         open={addDayOpen}
         onClose={() => { setAddDayOpen(false); setSelectedDays(new Set()); }}

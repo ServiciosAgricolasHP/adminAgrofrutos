@@ -14,6 +14,14 @@ import {
   groupTripsByFaena,
 } from "../services/transportsService";
 import { faenasService, subfaenasService, cyclesService } from "../services";
+import { useIsMobile } from "../hooks/useIsMobile";
+
+const DEFAULT_HISTORY_DAYS = 90;
+const isoDateNDaysAgo = (n) => {
+  const d = new Date();
+  d.setDate(d.getDate() - n);
+  return d.toISOString().slice(0, 10);
+};
 
 const fmtCurrency = (v) =>
   new Intl.NumberFormat("es-CL", { style: "currency", currency: "CLP", minimumFractionDigits: 0 }).format(
@@ -113,10 +121,10 @@ function CarriersTab() {
                   <div className="text-sm text-[var(--color-muted)]">{c.name}</div>
                 </div>
                 <span
-                  className={`rounded px-1.5 py-0.5 text-[10px] ${
+                  className={`rounded-full px-1.5 py-0.5 text-[10px] ${
                     c.type === "own"
-                      ? "bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-400"
-                      : "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+                      ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+                      : "bg-[var(--color-warning-soft)] text-[var(--color-warning)]"
                   }`}
                 >
                   {c.type === "own" ? "propio" : "contratado"}
@@ -316,6 +324,7 @@ function CarrierEditModal({ open, onClose, carrier, onSave }) {
 // ============================================================
 
 function TripsTab() {
+  const isMobile = useIsMobile();
   const { activeCarriers, carriers } = useCarriers();
   const [trips, setTrips] = useState([]);
   const [cycles, setCycles] = useState([]);
@@ -323,15 +332,20 @@ function TripsTab() {
   const [subfaenas, setSubfaenas] = useState([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState({ carrierId: "", status: "", cycleId: "", faenaId: "" });
+  const [sinceDate, setSinceDate] = useState(() => isoDateNDaysAgo(DEFAULT_HISTORY_DAYS));
+  const [showHistoric, setShowHistoric] = useState(false);
 
   const reload = async () => {
     setLoading(true);
     try {
+      const tripPromise = showHistoric
+        ? tripsService.listAll()
+        : tripsService.listSince(sinceDate);
       const [tripList, cyc, fa, sub] = await Promise.all([
-        tripsService.listAll(),
-        cyclesService.list({ cache: true }),
-        faenasService.list({ cache: true }),
-        subfaenasService.list({ cache: true }),
+        tripPromise,
+        cyclesService.list({ cache: true, persist: true, ttl: 5 * 60 * 1000 }),
+        faenasService.list({ cache: true, persist: true, ttl: 10 * 60 * 1000 }),
+        subfaenasService.list({ cache: true, persist: true, ttl: 10 * 60 * 1000 }),
       ]);
       tripList.sort((a, b) => (a.date < b.date ? 1 : -1));
       setTrips(tripList);
@@ -345,7 +359,8 @@ function TripsTab() {
 
   useEffect(() => {
     reload();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sinceDate, showHistoric]);
 
   const carrierById = useMemo(() => new Map(carriers.map((c) => [c.id, c])), [carriers]);
   const cycleById = useMemo(() => new Map(cycles.map((c) => [c.id, c])), [cycles]);
@@ -404,16 +419,106 @@ function TripsTab() {
         </div>
       </div>
 
+      <div className="mb-3 flex flex-wrap items-center gap-2 text-xs">
+        <span className="text-[var(--color-muted)]">Mostrar:</span>
+        <input
+          type="date"
+          disabled={showHistoric}
+          value={sinceDate}
+          onChange={(e) => setSinceDate(e.target.value || isoDateNDaysAgo(DEFAULT_HISTORY_DAYS))}
+          className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-xs outline-none focus:border-[var(--color-accent)] disabled:opacity-50"
+        />
+        <span className="text-[var(--color-muted)]">en adelante</span>
+        <label className="ml-2 flex items-center gap-1">
+          <input
+            type="checkbox"
+            checked={showHistoric}
+            onChange={(e) => setShowHistoric(e.target.checked)}
+          />
+          <span>ver histórico completo</span>
+        </label>
+        {!showHistoric && (
+          <span className="ml-auto text-[var(--color-muted)]">
+            Por defecto últimos {DEFAULT_HISTORY_DAYS} días
+          </span>
+        )}
+      </div>
+
       {loading ? (
         <div className="py-8 text-center text-sm text-[var(--color-muted)]">Cargando...</div>
       ) : filtered.length === 0 ? (
         <div className="rounded-md border border-dashed border-[var(--color-border)] py-8 text-center text-sm text-[var(--color-muted)]">
           Sin vueltas
         </div>
+      ) : isMobile ? (
+        <div className="space-y-2">
+          {filtered.map((t) => {
+            const c = carrierById.get(t.carrierId);
+            const cy = cycleById.get(t.cycleId);
+            const fa = faenaById.get(t.faenaId);
+            const sb = subfaenaById.get(t.subfaenaId);
+            return (
+              <div
+                key={t.id}
+                className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-3 space-y-2"
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="font-medium leading-tight">{c ? c.alias : "—"}</div>
+                    <div className="font-mono text-xs text-[var(--color-muted)]">{t.date}</div>
+                  </div>
+                  <div className="text-right">
+                    <div className="font-semibold tabular-nums">{fmtCurrency(t.amount)}</div>
+                    {t.status === "paid" ? (
+                      <span className="rounded-full bg-[var(--color-success-soft)] px-1.5 py-0.5 text-[11px] text-[var(--color-success)]">
+                        pagado
+                      </span>
+                    ) : (
+                      <span className="rounded-full bg-[var(--color-warning-soft)] px-1.5 py-0.5 text-[11px] text-[var(--color-warning)]">
+                        pendiente
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-x-2 gap-y-1 text-xs">
+                  <div>
+                    <span className="text-[var(--color-muted)]">Vehículo: </span>
+                    {t.vehicleAlias || "—"}
+                  </div>
+                  <div>
+                    <span className="text-[var(--color-muted)]">Ciclo: </span>
+                    {cy?.label || t.cycleId}
+                  </div>
+                  <div className="col-span-2">
+                    <span className="text-[var(--color-muted)]">Faena: </span>
+                    {fa?.name || "—"}
+                    {sb && <span className="text-[var(--color-muted)]"> / {sb.name}</span>}
+                  </div>
+                  <div>
+                    <span className="text-[var(--color-muted)]">Destino: </span>
+                    {t.destino || "—"}
+                  </div>
+                  <div>
+                    <span className="text-[var(--color-muted)]">#Pers: </span>
+                    {t.personCount ?? "—"}
+                  </div>
+                  <div>
+                    <span className="text-[var(--color-muted)]">Tipo: </span>
+                    {t.kind === "approach" ? "acercamiento" : "vuelta"}
+                  </div>
+                  <div>
+                    <span className="text-[var(--color-muted)]">Vlts/Tarifa: </span>
+                    <span className="tabular-nums">{t.qty} × {fmtCurrency(t.rate)}</span>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
       ) : (
         <div className="overflow-auto rounded-md border border-[var(--color-border)]">
           <table className="w-full text-sm">
-            <thead className="bg-[var(--color-surface-2)] text-left text-[var(--color-muted)]">
+            <thead className="sticky top-0 bg-[var(--color-surface-2)] text-left text-[var(--color-muted)]">
               <tr>
                 <th className="px-2 py-2">Fecha</th>
                 <th className="px-2 py-2">Transportista</th>
@@ -453,11 +558,11 @@ function TripsTab() {
                     <td className="px-2 py-1.5 text-right font-medium tabular-nums">{fmtCurrency(t.amount)}</td>
                     <td className="px-2 py-1.5">
                       {t.status === "paid" ? (
-                        <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[11px] text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
+                        <span className="rounded-full bg-[var(--color-success-soft)] px-1.5 py-0.5 text-[11px] text-[var(--color-success)]">
                           pagado
                         </span>
                       ) : (
-                        <span className="rounded bg-[var(--color-warning-soft)] px-1.5 py-0.5 text-[11px] text-[var(--color-warning)]">
+                        <span className="rounded-full bg-[var(--color-warning-soft)] px-1.5 py-0.5 text-[11px] text-[var(--color-warning)]">
                           pendiente
                         </span>
                       )}
@@ -487,15 +592,19 @@ function PaymentsTab() {
   const [generating, setGenerating] = useState(false);
   const [viewing, setViewing] = useState(null);
   const [confirmAction, setConfirmAction] = useState(null);
+  const [showHistoricPaid, setShowHistoricPaid] = useState(false);
 
   const reload = async () => {
     setLoading(true);
     try {
+      const paymentsPromise = showHistoricPaid
+        ? paymentsService.listAll()
+        : paymentsService.listSince(isoDateNDaysAgo(DEFAULT_HISTORY_DAYS));
       const [list, fa, sub, cyc] = await Promise.all([
-        paymentsService.listAll(),
-        faenasService.list({ cache: true }),
-        subfaenasService.list({ cache: true }),
-        cyclesService.list({ cache: true }),
+        paymentsPromise,
+        faenasService.list({ cache: true, persist: true, ttl: 10 * 60 * 1000 }),
+        subfaenasService.list({ cache: true, persist: true, ttl: 10 * 60 * 1000 }),
+        cyclesService.list({ cache: true, persist: true, ttl: 5 * 60 * 1000 }),
       ]);
       list.sort((a, b) => {
         const aT = a.createdAt?.seconds || 0;
@@ -513,7 +622,8 @@ function PaymentsTab() {
 
   useEffect(() => {
     reload();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showHistoricPaid]);
 
   const carrierById = useMemo(() => new Map(carriers.map((c) => [c.id, c])), [carriers]);
   const faenaById = useMemo(() => new Map(faenas.map((f) => [f.id, f])), [faenas]);
@@ -524,7 +634,20 @@ function PaymentsTab() {
 
   return (
     <div>
-      <div className="mb-3 flex justify-end">
+      <div className="mb-3 flex flex-wrap items-center justify-end gap-3">
+        <label className="flex items-center gap-1 text-xs">
+          <input
+            type="checkbox"
+            checked={showHistoricPaid}
+            onChange={(e) => setShowHistoricPaid(e.target.checked)}
+          />
+          <span>ver histórico completo</span>
+          {!showHistoricPaid && (
+            <span className="ml-1 text-[var(--color-muted)]">
+              (por defecto últimos {DEFAULT_HISTORY_DAYS} días)
+            </span>
+          )}
+        </label>
         <button
           onClick={() => setGenerating(true)}
           className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-[var(--color-accent-fg)] hover:bg-[var(--color-accent-hover)]"
@@ -1121,22 +1244,18 @@ function FaenaBatchTab() {
   const load = async () => {
     setLoading(true);
     try {
-      const [f, s, c, allT] = await Promise.all([
-        faenasService.list({ order: ["name", "asc"] }),
-        subfaenasService.list({ order: ["name", "asc"] }),
-        cyclesService.list({ order: ["createdAt", "desc"] }),
-        tripsService.listAll(),
+      const [f, s, c, pendingT] = await Promise.all([
+        faenasService.list({ order: ["name", "asc"], cache: true, persist: true, ttl: 10 * 60 * 1000 }),
+        subfaenasService.list({ order: ["name", "asc"], cache: true, persist: true, ttl: 10 * 60 * 1000 }),
+        cyclesService.list({ order: ["createdAt", "desc"], cache: true, persist: true, ttl: 5 * 60 * 1000 }),
+        tripsService.listPendingUnlinked(),
       ]);
       setFaenas(f);
       setSubfaenas(s);
       setCycles(c);
-      // Pending, unlinked trips from active cycles only.
+      // Filter to active cycles only (the server-side query already gave us pending+unlinked).
       const activeCycleIds = new Set(c.filter((x) => x.status !== "closed").map((x) => x.id));
-      setAllTrips(
-        allT.filter(
-          (t) => t.status === "pending" && !t.paymentId && activeCycleIds.has(t.cycleId),
-        ),
-      );
+      setAllTrips(pendingT.filter((t) => activeCycleIds.has(t.cycleId)));
     } finally {
       setLoading(false);
     }
@@ -1428,7 +1547,7 @@ function FaenaBatchTab() {
               {it.expanded && (
                 <div className="border-t border-[var(--color-border)]">
                   <table className="w-full text-sm">
-                    <thead className="bg-[var(--color-surface-2)] text-left">
+                    <thead className="bg-[var(--color-surface-2)] text-left text-[var(--color-muted)]">
                       <tr>
                         <th className="px-3 py-1.5 text-xs">Fecha</th>
                         <th className="px-3 py-1.5 text-xs">Vehículo</th>
@@ -1449,14 +1568,14 @@ function FaenaBatchTab() {
                             {t.lugar || "—"} → {t.destino || "—"}
                           </td>
                           <td className="px-3 py-1.5 text-xs">{t.kind === "approach" ? "Acerc." : "Vuelta"}</td>
-                          <td className="px-3 py-1.5 text-right text-xs">{t.qty}</td>
-                          <td className="px-3 py-1.5 text-right text-xs">{fmtCurrency(t.rate)}</td>
-                          <td className="px-3 py-1.5 text-right">{fmtCurrency(t.amount)}</td>
+                          <td className="px-3 py-1.5 text-right text-xs tabular-nums">{t.qty}</td>
+                          <td className="px-3 py-1.5 text-right text-xs tabular-nums">{fmtCurrency(t.rate)}</td>
+                          <td className="px-3 py-1.5 text-right tabular-nums">{fmtCurrency(t.amount)}</td>
                           <td className="px-3 py-1.5">
                             <button
                               onClick={() => removeTrip(it.carrierId, t.id)}
                               title="Quitar de este pago"
-                              className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-1.5 py-0.5 text-[10px] text-[var(--color-danger)] hover:bg-[var(--color-danger-soft)]"
+                              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-1.5 py-0.5 text-[10px] text-[var(--color-danger)] hover:bg-[var(--color-danger-soft)]"
                             >
                               ✕
                             </button>

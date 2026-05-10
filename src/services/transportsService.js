@@ -71,17 +71,37 @@ export const tripsService = {
     return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
   },
 
+  // Push the status filter to Firestore when caller only wants pending trips.
   async listByCarrier(carrierId, { onlyPending = false } = {}) {
-    const q = query(collection(db, TRIPS), where("carrierId", "==", carrierId));
+    const parts = [where("carrierId", "==", carrierId)];
+    if (onlyPending) parts.push(where("status", "==", "pending"));
+    const q = query(collection(db, TRIPS), ...parts);
     const snap = await getDocs(q);
-    let out = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-    if (onlyPending) out = out.filter((t) => t.status === "pending");
-    return out;
+    return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
   },
 
+  // Reads everything in the collection. Avoid in screens — it grows unbounded.
+  // Prefer listSince() to bound by date.
   async listAll() {
     const snap = await getDocs(collection(db, TRIPS));
     return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  },
+
+  // Server-side filter by date string (YYYY-MM-DD). Optionally also by status.
+  async listSince(sinceDate, { status } = {}) {
+    const parts = [where("date", ">=", String(sinceDate || ""))];
+    if (status) parts.push(where("status", "==", status));
+    const q = query(collection(db, TRIPS), ...parts);
+    const snap = await getDocs(q);
+    return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  },
+
+  // Pending trips not yet linked to a payment summary. paymentId==null filter
+  // is applied in JS because Firestore doesn't index missing fields uniformly.
+  async listPendingUnlinked() {
+    const q = query(collection(db, TRIPS), where("status", "==", "pending"));
+    const snap = await getDocs(q);
+    return snap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((t) => !t.paymentId);
   },
 
   async create(data) {
@@ -121,6 +141,14 @@ export const paymentsService = {
 
   async listAll() {
     const snap = await getDocs(collection(db, PAYMENTS));
+    return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  },
+
+  // Recent summaries only (filters by createdAt timestamp).
+  async listSince(sinceDate) {
+    const ts = sinceDate instanceof Date ? sinceDate : new Date(sinceDate);
+    const q = query(collection(db, PAYMENTS), where("createdAt", ">=", ts));
+    const snap = await getDocs(q);
     return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
   },
 

@@ -17,10 +17,11 @@ import {
   listPendingForWorkers,
   applyAdvancesToPayroll,
   restoreAdvancesFromPayroll,
+  advanceRemaining,
 } from "../services/advancesService";
 import { formatRutForDisplay } from "../utils/rutUtils";
 import { bankName, ACCOUNT_TYPES, isCashBank, CASH_BANK_CODE } from "../utils/banks";
-import { getTratoTierTotals } from "../utils/cosechaCombos";
+import { getTratoTierTotals, getDayCombos, getDaySingle, getTratoTiers } from "../utils/cosechaCombos";
 import {
   aggregateWorkerAmounts,
   downloadBchileXlsx,
@@ -32,6 +33,8 @@ import {
   normalizeLeader,
 } from "../utils/payroll";
 import ConfirmDialog from "../components/ConfirmDialog";
+import Modal from "../components/Modal";
+import { useIsMobile } from "../hooks/useIsMobile";
 
 const fmtCurrency = (v) =>
   new Intl.NumberFormat("es-CL", { style: "currency", currency: "CLP", minimumFractionDigits: 0 }).format(
@@ -83,11 +86,11 @@ export default function Payroll() {
     setLoading(true);
     try {
       const [f, s, c, w, p] = await Promise.all([
-        faenasService.list({ order: ["name", "asc"] }),
-        subfaenasService.list({ order: ["name", "asc"] }),
-        cyclesService.list({ order: ["createdAt", "desc"] }),
-        workersService.list({ order: ["name", "asc"] }),
-        payrollsService.list({ order: ["createdAt", "desc"] }),
+        faenasService.list({ order: ["name", "asc"], cache: true, persist: true, ttl: 10 * 60 * 1000 }),
+        subfaenasService.list({ order: ["name", "asc"], cache: true, persist: true, ttl: 10 * 60 * 1000 }),
+        cyclesService.list({ order: ["createdAt", "desc"], cache: true, persist: true, ttl: 5 * 60 * 1000 }),
+        workersService.list({ order: ["name", "asc"], cache: true, persist: true, ttl: 24 * 60 * 60 * 1000 }),
+        payrollsService.list({ order: ["createdAt", "desc"], take: 50, cache: true, persist: true, ttl: 5 * 60 * 1000 }),
       ]);
       setFaenas(f);
       setSubfaenas(s);
@@ -211,13 +214,40 @@ export default function Payroll() {
           }
           const accountIssue = validateAccountNumber(bd[1] || "", bankCode);
           const adv = advancesByRut.get(a.rut) || { anticipos: [], adelantos: [] };
-          const anticiposTotal = adv.anticipos.reduce((s, x) => s + (Number(x.amount) || 0), 0);
-          const adelantosTotal = adv.adelantos.reduce((s, x) => s + (Number(x.amount) || 0), 0);
+          // Allocate the worker's gross to advances oldest-first, partial-aware.
+          // Anticipos before adelantos within the same date.
+          const allAdvs = [...adv.anticipos, ...adv.adelantos]
+            .map((x) => ({ ...x, _typeOrder: x.type === "anticipo" ? 0 : 1 }))
+            .sort((x, y) => {
+              const da = (x.date || ""), dbb = (y.date || "");
+              if (da !== dbb) return da < dbb ? -1 : 1;
+              return x._typeOrder - y._typeOrder;
+            });
+          const grossInt = Math.round(a.total);
+          let remainingGross = grossInt;
+          const applications = []; // [{advanceId, type, amount}]
+          for (const advItem of allAdvs) {
+            if (remainingGross <= 0) break;
+            const advRem = Math.round(advanceRemaining(advItem));
+            if (advRem <= 0) continue;
+            const apply = Math.min(remainingGross, advRem);
+            if (apply <= 0) continue;
+            applications.push({ advanceId: advItem.id, type: advItem.type, amount: apply });
+            remainingGross -= apply;
+          }
+          const anticiposTotal = applications
+            .filter((x) => x.type === "anticipo")
+            .reduce((s, x) => s + x.amount, 0);
+          const adelantosTotal = applications
+            .filter((x) => x.type === "adelanto")
+            .reduce((s, x) => s + x.amount, 0);
           const totalAdvance = anticiposTotal + adelantosTotal;
-          const advanceIds = [...adv.anticipos, ...adv.adelantos].map((x) => x.id);
+          const advanceIds = applications.map((x) => x.advanceId);
           const advanceNoteParts = [];
-          if (anticiposTotal) advanceNoteParts.push(`Anticipos ${adv.anticipos.length}`);
-          if (adelantosTotal) advanceNoteParts.push(`Adelantos ${adv.adelantos.length}`);
+          const anticiposCount = applications.filter((x) => x.type === "anticipo").length;
+          const adelantosCount = applications.filter((x) => x.type === "adelanto").length;
+          if (anticiposTotal) advanceNoteParts.push(`Anticipos ${anticiposCount}`);
+          if (adelantosTotal) advanceNoteParts.push(`Adelantos ${adelantosCount}`);
           return {
             rut: a.rut,
             name: w?.name || "(sin nombre)",
@@ -227,13 +257,14 @@ export default function Payroll() {
             bankCode,
             email: w?.email || "",
             groupLeader: normalizeLeader(w?.groupLeader?.[0]),
-            grossAmount: Math.round(a.total),
-            advance: Math.min(Math.round(a.total), Math.round(totalAdvance)),
+            grossAmount: grossInt,
+            advance: totalAdvance,
             advanceNote: advanceNoteParts.join(" · "),
             advanceIds,
-            anticiposTotal: Math.round(anticiposTotal),
-            adelantosTotal: Math.round(adelantosTotal),
-            amount: Math.max(0, Math.round(a.total) - Math.min(Math.round(a.total), Math.round(totalAdvance))),
+            advanceApplications: applications.map(({ advanceId, amount }) => ({ advanceId, amount })),
+            anticiposTotal,
+            adelantosTotal,
+            amount: Math.max(0, grossInt - totalAdvance),
             byCycle,
             workdayIds: a.workdayIds || [],
             include: true,
@@ -275,6 +306,19 @@ export default function Payroll() {
           const adv = Math.max(0, Number(patch.advance) || 0);
           next.advance = adv;
           next.amount = Math.max(0, Math.round((p.grossAmount || 0) - adv));
+          // Re-clip advanceApplications oldest-first so the per-advance
+          // breakdown stays consistent with the (possibly reduced) total.
+          const apps = (p.advanceApplications || []).map((x) => ({ ...x }));
+          let remaining = adv;
+          const out = [];
+          for (const ap of apps) {
+            if (remaining <= 0) break;
+            const take = Math.min(ap.amount, remaining);
+            if (take > 0) out.push({ advanceId: ap.advanceId, amount: take });
+            remaining -= take;
+          }
+          next.advanceApplications = out;
+          next.advanceIds = out.map((x) => x.advanceId);
         }
         return next;
       }),
@@ -338,6 +382,10 @@ export default function Payroll() {
         advance: Math.round(Number(p.advance) || 0),
         advanceNote: p.advanceNote || "",
         advanceIds: p.advanceIds || [],
+        advanceApplications: (p.advanceApplications || []).map((x) => ({
+          advanceId: x.advanceId,
+          amount: Math.round(Number(x.amount) || 0),
+        })),
         anticiposTotal: Math.round(Number(p.anticiposTotal) || 0),
         adelantosTotal: Math.round(Number(p.adelantosTotal) || 0),
         amount: Math.round(Number(p.amount) || 0),
@@ -347,6 +395,7 @@ export default function Payroll() {
 
       const allWorkdayIds = cleanItems.flatMap((p) => p.workdayIds);
       const allAdvanceIds = cleanItems.flatMap((p) => p.advanceIds || []);
+      const allApplications = cleanItems.flatMap((p) => p.advanceApplications || []);
       const { bank: bankItems, cash: cashItems } = splitBankAndCash(cleanItems);
 
       const created = await payrollsService.create({
@@ -369,7 +418,7 @@ export default function Payroll() {
       });
 
       await tagWorkdaysWithPayroll(allWorkdayIds, created.id);
-      await applyAdvancesToPayroll(allAdvanceIds, created.id);
+      await applyAdvancesToPayroll(allApplications, created.id);
 
       const cyclesForExport = cycleDetails.map((c) => ({ id: c.id, label: c.label }));
       await downloadBchileXlsx(cleanItems, payrollName || payrollSuggestedName(), cyclesForExport);
@@ -395,10 +444,24 @@ export default function Payroll() {
     await markPayrollPending(p.id, p.workdayIds || []);
     await load();
   };
+  const [payConfirm, setPayConfirm] = useState(null); // { payroll, mode: "pay" | "revert" }
+  const onAskMarkPaid = (p) => setPayConfirm({ payroll: p, mode: "pay" });
+  const onAskRevert = (p) => setPayConfirm({ payroll: p, mode: "revert" });
+  const onConfirmPay = async () => {
+    if (!payConfirm) return;
+    const { payroll: p, mode } = payConfirm;
+    if (mode === "pay") {
+      await markPayrollPaid(p.id, p.workdayIds || []);
+    } else if (mode === "revert") {
+      await markPayrollPending(p.id, p.workdayIds || []);
+    }
+    setPayConfirm(null);
+    await load();
+  };
   const onDelete = async () => {
     if (!confirmDelete) return;
     await untagWorkdaysFromPayroll(confirmDelete.workdayIds || []);
-    await restoreAdvancesFromPayroll(confirmDelete.advanceIds || []);
+    await restoreAdvancesFromPayroll(confirmDelete.advanceIds || [], confirmDelete.id);
     await payrollsService.remove(confirmDelete.id);
     setConfirmDelete(null);
     await load();
@@ -466,6 +529,9 @@ export default function Payroll() {
             setPayrollName={setPayrollName}
             totalSelected={totalSelected}
             countSelected={countSelected}
+            cycleOptions={cycles
+              .filter((c) => selectedCycleIds.has(c.id))
+              .map((c) => ({ id: c.id, label: c.label || c.id }))}
             onBack={() => setStep(1)}
             onGenerate={generateAndSave}
             busy={busy}
@@ -474,8 +540,8 @@ export default function Payroll() {
       ) : (
         <HistoryList
           payrolls={payrolls}
-          onMarkPaid={onMarkPaid}
-          onMarkPending={onMarkPending}
+          onMarkPaid={onAskMarkPaid}
+          onMarkPending={onAskRevert}
           onAskDelete={setConfirmDelete}
           onRedownload={onRedownload}
           onDownloadNominaOnly={onDownloadNominaOnly}
@@ -491,6 +557,12 @@ export default function Payroll() {
         danger
         onCancel={() => setConfirmDelete(null)}
         onConfirm={onDelete}
+      />
+
+      <PayConfirmModal
+        info={payConfirm}
+        onCancel={() => setPayConfirm(null)}
+        onConfirm={onConfirmPay}
       />
 
       {detailPayroll && (
@@ -587,12 +659,14 @@ function PreviewTable({
   setPayrollName,
   totalSelected,
   countSelected,
+  cycleOptions = [],
   onBack,
   onGenerate,
   busy,
 }) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all"); // all | bank | cash | missing | leader:<name>
+  const [cycleFilter, setCycleFilter] = useState("all");
 
   const bankTotal = bankItems.reduce((s, p) => s + (Number(p.amount) || 0), 0);
   const cashTotal = cashGroups.reduce((s, g) => s + g.total, 0);
@@ -615,10 +689,11 @@ function PreviewTable({
       if (filter === "missing" && !p._missing) return false;
       if (filter === "suspicious" && !p._accountIssue) return false;
       if (filter.startsWith("leader:") && normalizeLeader(p.groupLeader) !== filter.slice(7)) return false;
+      if (cycleFilter !== "all" && !((p.byCycle?.[cycleFilter] || 0) > 0)) return false;
       if (q && !p.name.toLowerCase().includes(q) && !p.rut.toLowerCase().includes(q)) return false;
       return true;
     });
-  }, [items, search, filter]);
+  }, [items, search, filter, cycleFilter]);
 
   const toggleCash = (p) => {
     const newCode = isCashBank(p.bankCode) ? (p._origBank || "") : CASH_BANK_CODE;
@@ -655,7 +730,7 @@ function PreviewTable({
           <input
             value={payrollName}
             onChange={(e) => setPayrollName(e.target.value)}
-            className="w-72 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-sm"
+            className="w-72 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-sm outline-none focus:border-[var(--color-accent)]"
           />
         </div>
         <div className="text-sm">
@@ -683,12 +758,12 @@ function PreviewTable({
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Buscar por nombre o RUT..."
-          className="w-64 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-sm"
+          className="w-64 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-sm outline-none focus:border-[var(--color-accent)]"
         />
         <select
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
-          className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1.5 text-sm"
+          className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1.5 text-sm outline-none focus:border-[var(--color-accent)]"
         >
           <option value="all">Todos ({items.length})</option>
           <option value="bank">🏦 Banco</option>
@@ -699,29 +774,42 @@ function PreviewTable({
             <option key={l} value={`leader:${l}`}>👥 {l}</option>
           ))}
         </select>
+        {cycleOptions.length > 1 && (
+          <select
+            value={cycleFilter}
+            onChange={(e) => setCycleFilter(e.target.value)}
+            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1.5 text-sm outline-none focus:border-[var(--color-accent)]"
+            title="Filtra trabajadores que tienen producción en un ciclo específico"
+          >
+            <option value="all">📅 Todos los ciclos</option>
+            {cycleOptions.map((c) => (
+              <option key={c.id} value={c.id}>📅 {c.label}</option>
+            ))}
+          </select>
+        )}
         <div className="ml-auto flex flex-wrap gap-1 text-xs">
           <span className="text-[var(--color-muted)]">{filteredItems.length} visibles:</span>
           <button
             onClick={() => setIncludeAllVisible(true)}
-            className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 hover:bg-[var(--color-accent-soft)]"
+            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 hover:bg-[var(--color-accent-soft)]"
           >
             ✓ Incluir
           </button>
           <button
             onClick={() => setIncludeAllVisible(false)}
-            className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 hover:bg-[var(--color-accent-soft)]"
+            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 hover:bg-[var(--color-accent-soft)]"
           >
             ✗ Excluir
           </button>
           <button
             onClick={() => setBankAllVisible(true)}
-            className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 hover:bg-[var(--color-accent-soft)]"
+            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 hover:bg-[var(--color-accent-soft)]"
           >
             💵 → Efectivo
           </button>
           <button
             onClick={() => setBankAllVisible(false)}
-            className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 hover:bg-[var(--color-accent-soft)]"
+            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 hover:bg-[var(--color-accent-soft)]"
           >
             🏦 → Banco
           </button>
@@ -786,39 +874,41 @@ function PreviewTable({
                     )}
                   </td>
                   <td className="px-3 py-2 text-xs">{cash ? "—" : accountTypeShort(p.accountType)}</td>
-                  <td className="px-3 py-2 text-right text-xs text-[var(--color-muted)]">
+                  <td className="px-3 py-2 text-right text-xs text-[var(--color-muted)] tabular-nums">
                     {fmtCurrency(p.grossAmount || 0)}
                   </td>
                   <td className="px-3 py-2 text-right">
                     <input
                       type="number"
-                      value={p.advance || 0}
+                      value={p.advance || ""}
+                      placeholder="0"
                       title="Anticipo a descontar"
                       onChange={(e) => updatePreview(p.rut, { advance: Number(e.target.value) || 0 })}
-                      className="w-24 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-right text-sm"
+                      className="w-24 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-right text-sm tabular-nums outline-none focus:border-[var(--color-accent)]"
                     />
                     {Number(p.advance) > 0 && (
                       <input
                         value={p.advanceNote || ""}
                         onChange={(e) => updatePreview(p.rut, { advanceNote: e.target.value })}
                         placeholder="motivo..."
-                        className="mt-1 block w-24 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-0.5 text-right text-[10px] text-[var(--color-muted)]"
+                        className="mt-1 block w-24 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-0.5 text-right text-[10px] text-[var(--color-muted)] outline-none focus:border-[var(--color-accent)]"
                       />
                     )}
                   </td>
                   <td className="px-3 py-2 text-right">
                     <input
                       type="number"
-                      value={p.amount}
+                      value={p.amount || ""}
+                      placeholder="0"
                       onChange={(e) => updatePreview(p.rut, { amount: Number(e.target.value) || 0 })}
-                      className="w-28 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-right text-sm font-medium"
+                      className="w-28 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-right text-sm font-medium tabular-nums outline-none focus:border-[var(--color-accent)]"
                     />
                   </td>
                   <td className="px-3 py-2 text-center">
                     <button
                       onClick={() => toggleCash(p)}
                       title={cash ? "Cambiar a banco" : "Pagar en efectivo"}
-                      className={`rounded border px-2 py-1 text-xs ${
+                      className={`rounded-md border px-2 py-1 text-xs ${
                         cash
                           ? "border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
                           : "border-[var(--color-border)] bg-[var(--color-surface-2)] hover:bg-[var(--color-accent-soft)]"
@@ -865,7 +955,79 @@ function PreviewTable({
   );
 }
 
+function PayConfirmModal({ info, onCancel, onConfirm }) {
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { if (info) { setText(""); setBusy(false); } }, [info]);
+  if (!info) return null;
+  const { payroll: p, mode } = info;
+  const isRevert = mode === "revert";
+  const keyword = isRevert ? "No pagado" : "Pagado";
+  const ok = text.trim().toLowerCase() === keyword.toLowerCase();
+  const title = isRevert ? "Marcar como NO pagada" : "Marcar como pagada";
+  const intro = isRevert
+    ? "Vas a revertir esta nómina: el estado vuelve a pendiente y se liberan los días asociados (quedan disponibles para una nueva nómina)."
+    : "Vas a marcar esta nómina como pagada. Los días asociados quedan sellados con la fecha de pago.";
+  return (
+    <Modal
+      open
+      onClose={() => !busy && onCancel()}
+      title={title}
+      size="md"
+      footer={
+        <>
+          <button
+            onClick={onCancel}
+            disabled={busy}
+            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)] disabled:opacity-50"
+          >
+            Cancelar
+          </button>
+          <button
+            onClick={async () => {
+              if (!ok) return;
+              setBusy(true);
+              try { await onConfirm(); } finally { setBusy(false); }
+            }}
+            disabled={!ok || busy}
+            className={`rounded-md px-3 py-1.5 text-sm font-medium disabled:opacity-50 ${
+              isRevert
+                ? "border border-[var(--color-danger)] bg-[var(--color-danger-soft)] text-[var(--color-danger)] hover:bg-[var(--color-danger)] hover:text-white"
+                : "bg-[var(--color-accent)] text-[var(--color-accent-fg)] hover:bg-[var(--color-accent-hover)]"
+            }`}
+          >
+            {busy ? "Procesando..." : isRevert ? "Revertir" : "Confirmar"}
+          </button>
+        </>
+      }
+    >
+      <div className="space-y-3 text-sm">
+        <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] p-3">
+          <div className="font-medium">{p.name}</div>
+          <div className="text-xs text-[var(--color-muted)] mt-1">
+            {p.workerCount || 0} trab. · {fmtCurrency(p.total || 0)}
+          </div>
+        </div>
+        <p className="text-[var(--color-muted)]">{intro}</p>
+        <div>
+          <label className="mb-1 block text-xs font-medium text-[var(--color-muted)]">
+            Para confirmar, escribe <code className="rounded bg-[var(--color-surface-2)] px-1 font-semibold">{keyword}</code>:
+          </label>
+          <input
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            autoFocus
+            placeholder={keyword}
+            className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm focus:border-[var(--color-accent)] outline-none"
+          />
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedownload, onDownloadNominaOnly, onOpen }) {
+  const isMobile = useIsMobile();
   const [statusFilter, setStatusFilter] = useState("all"); // all | pending | paid
   const [monthFilter, setMonthFilter] = useState("all"); // all | YYYY-MM
   const [search, setSearch] = useState("");
@@ -918,12 +1080,12 @@ function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedow
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Buscar por nombre..."
-          className="w-56 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-sm"
+          className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-sm outline-none focus:border-[var(--color-accent)] sm:w-56"
         />
         <select
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}
-          className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1.5 text-sm"
+          className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1.5 text-sm outline-none focus:border-[var(--color-accent)]"
         >
           <option value="all">Todos</option>
           <option value="pending">Pendientes</option>
@@ -932,7 +1094,7 @@ function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedow
         <select
           value={monthFilter}
           onChange={(e) => setMonthFilter(e.target.value)}
-          className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1.5 text-sm"
+          className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1.5 text-sm outline-none focus:border-[var(--color-accent)]"
         >
           <option value="all">Todos los meses</option>
           {months.map((m) => (
@@ -946,6 +1108,101 @@ function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedow
         </div>
       </div>
 
+    {isMobile ? (
+      <div className="flex-1 space-y-2 overflow-auto">
+        {filtered.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-[var(--color-border)] py-8 text-center text-sm text-[var(--color-muted)]">
+            Ninguna nómina coincide con el filtro.
+          </div>
+        ) : (
+          filtered.map((p) => (
+            <div
+              key={p.id}
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-3 space-y-2"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <button
+                    onClick={() => onOpen(p)}
+                    className="text-left text-base font-medium text-[var(--color-accent)] hover:underline"
+                  >
+                    {p.name}
+                  </button>
+                  <div className="text-xs text-[var(--color-muted)]">{fmtDate(p.createdAt)}</div>
+                </div>
+                <span
+                  className={`shrink-0 rounded-full px-2 py-0.5 text-xs ${
+                    p.status === "paid"
+                      ? "bg-[var(--color-success-soft)] text-[var(--color-success)]"
+                      : "bg-[var(--color-warning-soft)] text-[var(--color-warning)]"
+                  }`}
+                >
+                  {p.status === "paid" ? "Pagada" : "Pendiente"}
+                </span>
+              </div>
+              <div className="grid grid-cols-2 gap-2 text-xs">
+                <div>
+                  <div className="text-[var(--color-muted)]">Trabajadores</div>
+                  <div className="font-medium tabular-nums">
+                    {p.workerCount || (p.items?.length ?? 0)}
+                  </div>
+                </div>
+                <div className="text-right">
+                  <div className="text-[var(--color-muted)]">Total</div>
+                  <div className="font-semibold tabular-nums">{fmtCurrency(p.total || 0)}</div>
+                </div>
+                <div>
+                  <div className="text-[var(--color-muted)]">🏦 Banco ({p.bankCount || 0})</div>
+                  <div className="tabular-nums">{fmtCurrency(p.bankTotal || 0)}</div>
+                </div>
+                <div className="text-right">
+                  <div className="text-[var(--color-muted)]">💵 Efectivo ({p.cashCount || 0})</div>
+                  <div className="tabular-nums">{fmtCurrency(p.cashTotal || 0)}</div>
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-1 pt-1">
+                <button
+                  onClick={() => onDownloadNominaOnly(p)}
+                  title="Solo la hoja de Nómina BChile"
+                  className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
+                >
+                  🏦 Nómina
+                </button>
+                <button
+                  onClick={() => onRedownload(p)}
+                  title="XLSX completo (Nómina + Resumen + Transferencias + Efectivo)"
+                  className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
+                >
+                  📥 Completo
+                </button>
+                {p.status === "paid" ? (
+                  <button
+                    onClick={() => onMarkPending(p)}
+                    title="Revertir: marcar como No pagado"
+                    className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
+                  >
+                    ↩ No pagado
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => onMarkPaid(p)}
+                    className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
+                  >
+                    ✓ Pagada
+                  </button>
+                )}
+                <button
+                  onClick={() => onAskDelete(p)}
+                  className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs text-[var(--color-danger)] hover:bg-[var(--color-danger-soft)]"
+                >
+                  Eliminar
+                </button>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+    ) : (
     <div className="flex-1 overflow-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">
       <table className="w-full text-sm">
         <thead className="sticky top-0 bg-[var(--color-surface-2)] text-left">
@@ -986,51 +1243,52 @@ function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedow
                   {p.status === "paid" ? "Pagada" : "Pendiente"}
                 </span>
               </td>
-              <td className="px-3 py-2 text-right">{p.workerCount || (p.items?.length ?? 0)}</td>
-              <td className="px-3 py-2 text-right text-xs">
+              <td className="px-3 py-2 text-right tabular-nums">{p.workerCount || (p.items?.length ?? 0)}</td>
+              <td className="px-3 py-2 text-right text-xs tabular-nums">
                 {fmtCurrency(p.bankTotal || 0)}
                 <div className="text-[10px] text-[var(--color-muted)]">{p.bankCount || 0}</div>
               </td>
-              <td className="px-3 py-2 text-right text-xs">
+              <td className="px-3 py-2 text-right text-xs tabular-nums">
                 {fmtCurrency(p.cashTotal || 0)}
                 <div className="text-[10px] text-[var(--color-muted)]">{p.cashCount || 0}</div>
               </td>
-              <td className="px-3 py-2 text-right font-semibold">{fmtCurrency(p.total || 0)}</td>
+              <td className="px-3 py-2 text-right font-semibold tabular-nums">{fmtCurrency(p.total || 0)}</td>
               <td className="px-3 py-2 text-xs text-[var(--color-muted)]">{fmtDate(p.createdAt)}</td>
               <td className="px-3 py-2">
                 <div className="flex justify-end gap-1">
                   <button
                     onClick={() => onDownloadNominaOnly(p)}
                     title="Solo la hoja de Nómina BChile"
-                    className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
+                    className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
                   >
                     🏦 Nómina
                   </button>
                   <button
                     onClick={() => onRedownload(p)}
                     title="XLSX completo (Nómina + Resumen + Transferencias + Efectivo)"
-                    className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
+                    className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
                   >
                     📥 Completo
                   </button>
                   {p.status === "paid" ? (
                     <button
                       onClick={() => onMarkPending(p)}
-                      className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
+                      title="Revertir: marcar como No pagado (libera los días asociados)"
+                      className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
                     >
-                      ↩ Pendiente
+                      ↩ No pagado
                     </button>
                   ) : (
                     <button
                       onClick={() => onMarkPaid(p)}
-                      className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
+                      className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
                     >
                       ✓ Pagada
                     </button>
                   )}
                   <button
                     onClick={() => onAskDelete(p)}
-                    className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs text-[var(--color-danger)] hover:bg-[var(--color-danger-soft)]"
+                    className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs text-[var(--color-danger)] hover:bg-[var(--color-danger-soft)]"
                   >
                     Eliminar
                   </button>
@@ -1041,6 +1299,7 @@ function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedow
         </tbody>
       </table>
     </div>
+    )}
     </div>
   );
 }
@@ -1053,6 +1312,7 @@ function buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut) {
   const wdsCycle = workdays.filter((w) => w.cycleId === cycle.id && rutSet.has(w.workerRut));
   if (wdsCycle.length === 0) return [];
 
+  const dayPrices = cycle.dayPrices || {};
   const labors = cycle.labors || [];
   const out = [];
 
@@ -1080,16 +1340,42 @@ function buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut) {
           hasManejo: false,
           hasSupervision: false,
           isHoliday: false,
+          byCombo: {},
+          byTier: {},
         });
       }
       const c = cellByWorkerDay.get(key);
       if (labor.type === "cosecha") {
-        c.kilos += Number(wd.qty) || 0;
-        c.amount += Number(wd.amount) || 0;
+        const x = Number(wd.qualityX) || 0;
+        const y = Number(wd.containerY) || 0;
+        const ck = `Q${x}/E${y}`;
+        const kg = Number(wd.qty) || 0;
+        const amt = Number(wd.amount) || 0;
+        c.kilos += kg;
+        c.amount += amt;
+        if (!c.byCombo[ck]) c.byCombo[ck] = { x, y, kilos: 0, amount: 0 };
+        c.byCombo[ck].kilos += kg;
+        c.byCombo[ck].amount += amt;
       } else if (labor.type === "trato") {
         const t = getTratoTierTotals(wd);
         c.jornadas += t.qty;
         c.amount += t.amount;
+        if (wd.tiers) {
+          for (const [idx, tt] of Object.entries(wd.tiers)) {
+            const i = Number(idx);
+            const q = Number(tt?.qty) || 0;
+            const a = Number(tt?.amount) || 0;
+            if (!q && !a) continue;
+            if (!c.byTier[idx]) c.byTier[idx] = { index: i, jornadas: 0, amount: 0 };
+            c.byTier[idx].jornadas += q;
+            c.byTier[idx].amount += a;
+          }
+        } else if (t.qty || t.amount) {
+          const idx = "0";
+          if (!c.byTier[idx]) c.byTier[idx] = { index: 0, jornadas: 0, amount: 0 };
+          c.byTier[idx].jornadas += t.qty;
+          c.byTier[idx].amount += t.amount;
+        }
       } else if (labor.type === "tratoHE") {
         c.jornadas += Number(wd.qty) || 0;
         c.amount += Number(wd.amount) || 0;
@@ -1133,14 +1419,45 @@ function buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut) {
       };
     });
 
-    // Per-day totals
+    // Per-day totals — break out kilos/jornadas/etc. instead of just summing $.
     const dayTotals = {};
     let grandAmount = 0;
+    let grandKilos = 0;
+    let grandJornadas = 0;
+    let grandOvertimeHours = 0;
+    let grandExtras = 0;
     for (const d of sortedDates) {
-      let sum = 0;
-      for (const r of rows) sum += r.cells[d]?.amount || 0;
-      dayTotals[d] = sum;
-      grandAmount += sum;
+      const agg = { amount: 0, kilos: 0, jornadas: 0, overtimeHours: 0, extras: 0, byCombo: {}, byTier: {} };
+      for (const r of rows) {
+        const c = r.cells[d];
+        if (!c) continue;
+        agg.amount += c.amount || 0;
+        agg.kilos += c.kilos || 0;
+        agg.jornadas += c.jornadas || 0;
+        agg.overtimeHours += c.overtimeHours || 0;
+        agg.extras += c.extras || 0;
+        for (const [ck, b] of Object.entries(c.byCombo || {})) {
+          if (!agg.byCombo[ck]) agg.byCombo[ck] = { x: b.x, y: b.y, kilos: 0, amount: 0 };
+          agg.byCombo[ck].kilos += b.kilos;
+          agg.byCombo[ck].amount += b.amount;
+        }
+        for (const [tk, b] of Object.entries(c.byTier || {})) {
+          if (!agg.byTier[tk]) agg.byTier[tk] = { index: b.index, jornadas: 0, amount: 0 };
+          agg.byTier[tk].jornadas += b.jornadas;
+          agg.byTier[tk].amount += b.amount;
+        }
+      }
+      dayTotals[d] = agg;
+      grandAmount += agg.amount;
+      grandKilos += agg.kilos;
+      grandJornadas += agg.jornadas;
+      grandOvertimeHours += agg.overtimeHours;
+      grandExtras += agg.extras;
+    }
+
+    const priceByDate = {};
+    for (const d of sortedDates) {
+      priceByDate[d] = formatLaborDayPrice(labor, d, dayPrices);
     }
 
     out.push({
@@ -1151,10 +1468,61 @@ function buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut) {
       rows,
       dayTotals,
       grandAmount,
+      grandKilos,
+      grandJornadas,
+      grandOvertimeHours,
+      grandExtras,
+      priceByDate,
     });
   }
 
   return out;
+}
+
+function fmtMoneyShort(v) {
+  return "$" + (Number(v) || 0).toLocaleString("es-CL");
+}
+
+// Pull the unit price(s) configured for a labor on a given date.
+// Returns a short string suitable for rendering under the day header.
+function formatLaborDayPrice(labor, date, dayPrices) {
+  if (!labor) return "";
+  if (labor.type === "cosecha") {
+    const combos = getDayCombos(dayPrices, labor.id, date, "unit");
+    if (!combos.length) return "";
+    if (combos.length === 1) {
+      const c = combos[0];
+      if (!c.price) return "";
+      return c.mode === "flat" ? `${fmtMoneyShort(c.price)}/día` : `${fmtMoneyShort(c.price)}/kg`;
+    }
+    return combos
+      .filter((c) => c.price)
+      .map((c) => `Q${c.x}/E${c.y}: ${fmtMoneyShort(c.price)}${c.mode === "flat" ? "/día" : "/kg"}`)
+      .join(" · ");
+  }
+  if (labor.type === "trato") {
+    const tiers = getTratoTiers(dayPrices, labor.id, date, "unit");
+    const used = tiers.filter((t) => t.price);
+    if (!used.length) return "";
+    if (used.length === 1) {
+      const t = used[0];
+      return `${fmtMoneyShort(t.price)}${t.mode === "flat" ? "/día" : "/jorn."}`;
+    }
+    return used.map((t) => `T${t.index + 1}: ${fmtMoneyShort(t.price)}`).join(" · ");
+  }
+  if (labor.type === "main" || labor.type === "supervision" || labor.type === "extra") {
+    const cfg = getDaySingle(dayPrices, labor.id, date, "normal");
+    const price = Number(cfg?.price) || Number(labor.baseDayDefault) || 0;
+    if (!price) return "";
+    return fmtMoneyShort(price) + "/día";
+  }
+  if (labor.type === "tratoHE") {
+    const cfg = getDaySingle(dayPrices, labor.id, date, "normal");
+    const price = Number(cfg?.price) || Number(labor.baseDayDefault) || 0;
+    if (!price) return "";
+    return `Base sug. ${fmtMoneyShort(price)}`;
+  }
+  return "";
 }
 
 function fmtDateShort(dateStr) {
@@ -1170,9 +1538,27 @@ function renderProductionCell(cell, laborType) {
   const fmtMoney = (v) => "$" + (Number(v) || 0).toLocaleString("es-CL");
   const num = (v) => (Number(v) || 0).toLocaleString("es-CL", { maximumFractionDigits: 2 });
   if (laborType === "cosecha") {
+    const combos = Object.entries(cell.byCombo || {})
+      .filter(([, b]) => b.kilos || b.amount)
+      .sort(([, a], [, b]) => a.x - b.x || a.y - b.y);
+    if (combos.length > 1) {
+      const lines = combos
+        .map(([ck, b]) => `<div class="muted prod-breakdown">${ck}: ${num(b.kilos)} kg</div>`)
+        .join("");
+      return `${lines}<div>${num(cell.kilos)} kg</div><div class="muted">${fmtMoney(cell.amount)}</div>`;
+    }
     return `<div>${num(cell.kilos)} kg</div><div class="muted">${fmtMoney(cell.amount)}</div>`;
   }
   if (laborType === "trato") {
+    const tiers = Object.entries(cell.byTier || {})
+      .filter(([, b]) => b.jornadas || b.amount)
+      .sort(([, a], [, b]) => a.index - b.index);
+    if (tiers.length > 1) {
+      const lines = tiers
+        .map(([, b]) => `<div class="muted prod-breakdown">T${b.index + 1}: ${num(b.jornadas)}</div>`)
+        .join("");
+      return `${lines}<div>${num(cell.jornadas)}</div><div class="muted">${fmtMoney(cell.amount)}</div>`;
+    }
     return `<div>${num(cell.jornadas)}</div><div class="muted">${fmtMoney(cell.amount)}</div>`;
   }
   if (laborType === "tratoHE") {
@@ -1190,6 +1576,45 @@ function renderProductionCell(cell, laborType) {
   return `<div>${fmtMoney(cell.amount)}</div>`;
 }
 
+// Like renderProductionCell, but for total rows/cells: keeps kg/jornadas
+// counts visible alongside the $ instead of letting them collapse into one number.
+function renderProductionTotal(totals, laborType) {
+  if (!totals) return "";
+  const fmtMoney = (v) => "$" + (Number(v) || 0).toLocaleString("es-CL");
+  const num = (v) => (Number(v) || 0).toLocaleString("es-CL", { maximumFractionDigits: 2 });
+  const amount = totals.amount || 0;
+  if (laborType === "cosecha") {
+    const kilos = totals.kilos || 0;
+    const combos = Object.entries(totals.byCombo || {})
+      .filter(([, b]) => b.kilos || b.amount)
+      .sort(([, a], [, b]) => a.x - b.x || a.y - b.y);
+    const breakdown = combos.length > 1
+      ? combos.map(([ck, b]) => `<div class="muted prod-breakdown">${ck}: ${num(b.kilos)} kg</div>`).join("")
+      : "";
+    const kHtml = kilos ? `<div>${num(kilos)} kg</div>` : "";
+    return `${breakdown}${kHtml}<div><b>${fmtMoney(amount)}</b></div>`;
+  }
+  if (laborType === "trato") {
+    const j = totals.jornadas || 0;
+    const tiers = Object.entries(totals.byTier || {})
+      .filter(([, b]) => b.jornadas || b.amount)
+      .sort(([, a], [, b]) => a.index - b.index);
+    const breakdown = tiers.length > 1
+      ? tiers.map(([, b]) => `<div class="muted prod-breakdown">T${b.index + 1}: ${num(b.jornadas)}</div>`).join("")
+      : "";
+    const jHtml = j ? `<div>${num(j)} jorn.</div>` : "";
+    return `${breakdown}${jHtml}<div><b>${fmtMoney(amount)}</b></div>`;
+  }
+  if (laborType === "tratoHE") {
+    const parts = [];
+    if (totals.overtimeHours) parts.push(`HE:${num(totals.overtimeHours)}h`);
+    if (totals.extras) parts.push(`X:${fmtMoney(totals.extras)}`);
+    const sub = parts.length ? `<div class="muted">${parts.join(" · ")}</div>` : "";
+    return `${sub}<div><b>${fmtMoney(amount)}</b></div>`;
+  }
+  return `<div><b>${fmtMoney(amount)}</b></div>`;
+}
+
 const LABOR_TYPE_LABEL = {
   main: "Pago al día",
   supervision: "Supervisión",
@@ -1204,6 +1629,11 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
   const titleOverrides = options.titleOverrides || {};
   const workdaysByGroup = options.workdaysByGroup || {}; // { leader: { cycleId: rows[] } }
   const cyclesById = options.cyclesById || {};
+  const mode = options.mode || "cash"; // "cash" | "detail"
+  const isDetail = mode === "detail";
+  const summaries = options.summaries || [];
+  const overviewTitle = isDetail ? "Detalle de pago" : "Comprobante de pago en efectivo";
+  const docTitle = isDetail ? `${payroll.name} — Detalle pago` : `${payroll.name} — Efectivo`;
   const cycleLabel = (cycleId) => titleOverrides[cycleId] || cyclesById[cycleId]?.label || cycleDetails.find((c) => c.id === cycleId)?.label || cycleId;
   const cyclesLine = cycleDetails.map((c) => cycleLabel(c.id)).join(" · ");
   const fmt = (v) =>
@@ -1284,7 +1714,11 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
           const laborTables = laborSnapshots
             .map((ls) => {
               const dayHeaders = ls.dates
-                .map((d) => `<th class="prod-day">${fmtDateShort(d)}</th>`)
+                .map((d) => {
+                  const price = ls.priceByDate?.[d];
+                  const priceLine = price ? `<div class="muted prod-price">${price}</div>` : "";
+                  return `<th class="prod-day">${fmtDateShort(d)}${priceLine}</th>`;
+                })
                 .join("");
               const rows = ls.rows
                 .map((row) => {
@@ -1293,17 +1727,29 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
                       (d) => `<td class="prod-cell">${renderProductionCell(row.cells[d], ls.laborType)}</td>`,
                     )
                     .join("");
+                  const rowTotalAgg = {
+                    amount: row.totalAmount,
+                    kilos: row.totalKilos,
+                    jornadas: row.totalJornadas,
+                  };
                   return `
                     <tr>
                       <td class="prod-name">${row.name || row.rut}</td>
                       ${dayCells}
-                      <td class="prod-total"><b>${fmt(row.totalAmount)}</b></td>
+                      <td class="prod-total">${renderProductionTotal(rowTotalAgg, ls.laborType)}</td>
                     </tr>`;
                 })
                 .join("");
               const dayTotals = ls.dates
-                .map((d) => `<td class="prod-total">${fmt(ls.dayTotals[d] || 0)}</td>`)
+                .map((d) => `<td class="prod-total">${renderProductionTotal(ls.dayTotals[d], ls.laborType)}</td>`)
                 .join("");
+              const grandTotalAgg = {
+                amount: ls.grandAmount,
+                kilos: ls.grandKilos,
+                jornadas: ls.grandJornadas,
+                overtimeHours: ls.grandOvertimeHours,
+                extras: ls.grandExtras,
+              };
               return `
                 <div class="prod-table">
                   <h4 style="background:${itemFill}">${ls.laborName} <span class="muted">(${LABOR_TYPE_LABEL[ls.laborType] || ls.laborType})</span></h4>
@@ -1320,7 +1766,7 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
                       <tr style="background:${leaderFill}">
                         <td class="prod-name"><b>Total día</b></td>
                         ${dayTotals}
-                        <td class="prod-total"><b>${fmt(ls.grandAmount)}</b></td>
+                        <td class="prod-total">${renderProductionTotal(grandTotalAgg, ls.laborType)}</td>
                       </tr>
                     </tfoot>
                   </table>
@@ -1336,14 +1782,39 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
         })
         .join("");
 
+      const rowsNoSign = isDetail
+        ? g.items
+            .map((it, i) => {
+              const cellsByCycle = showCycleCols
+                ? cycleCols
+                    .map(
+                      (c) =>
+                        `<td style="text-align:right">${
+                          it.byCycle && it.byCycle[c.id] ? fmt(it.byCycle[c.id]) : ""
+                        }</td>`,
+                    )
+                    .join("")
+                : "";
+              const bankTag = isCashBank(it.bankCode) ? "Efectivo" : "Transferencia";
+              return `
+                <tr style="background:${itemFill}">
+                  <td>${i + 1}</td>
+                  <td>${it.name}</td>
+                  <td class="mono">${fmtRut(it.rut)}</td>
+                  <td style="font-size:10px;color:#555">${bankTag}</td>
+                  ${cellsByCycle}
+                  <td style="text-align:right"><b>${fmt(it.amount)}</b></td>
+                </tr>`;
+            })
+            .join("")
+        : rows;
+
       const overviewPage = (copyLabel) => `
     <section class="receipt">
       <header>
         <div class="hd">
           <div>
-            <h1>Comprobante de pago en efectivo
-              <span class="copy-tag">${copyLabel}</span>
-            </h1>
+            <h1>${overviewTitle}${copyLabel ? `<span class="copy-tag">${copyLabel}</span>` : ""}</h1>
             <div class="sub">${payroll.name} · ${cyclesLine}</div>
           </div>
           <div class="meta">
@@ -1359,34 +1830,36 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
             <th style="width:30px">#</th>
             <th>Nombre</th>
             <th style="width:110px">RUT</th>
+            ${isDetail ? '<th style="width:90px">Forma pago</th>' : ""}
             ${cycleHeaders}
             <th style="width:120px;text-align:right">TOTAL</th>
-            <th style="width:200px">Firma</th>
+            ${isDetail ? "" : '<th style="width:200px">Firma</th>'}
           </tr>
         </thead>
         <tbody>
-          ${rows}
+          ${isDetail ? rowsNoSign : rows}
         </tbody>
         <tfoot>
           <tr style="background:${leaderFill}">
-            <td colspan="${totalColSpan}" style="text-align:right"><b>Subtotal ${g.leader}</b></td>
+            <td colspan="${isDetail ? totalColSpan + 1 : totalColSpan}" style="text-align:right"><b>Subtotal ${g.leader}</b></td>
             ${subtotalCells}
             <td style="text-align:right"><b>${fmt(g.total)}</b></td>
-            <td></td>
+            ${isDetail ? "" : "<td></td>"}
           </tr>
         </tfoot>
       </table>
+      ${isDetail ? "" : `
       <div class="signs">
         <div class="sign sign-right">
           <div class="line"></div>
           <div>Firma líder (${g.leader})</div>
         </div>
-      </div>
+      </div>`}
     </section>`;
 
       return `
-    ${overviewPage("ORIGINAL — Líder")}
-    ${overviewPage("COPIA — Empresa")}
+    ${isDetail ? overviewPage("") : overviewPage("ORIGINAL — Líder")}
+    ${isDetail ? "" : overviewPage("COPIA — Empresa")}
     ${
       detailHtml
         ? `<section class="receipt detail-page">
@@ -1404,7 +1877,36 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
     })
     .join("");
 
-  return `<!doctype html><html><head><meta charset="utf-8"><title>${payroll.name} — Efectivo</title>
+  const summariesHtml = (isDetail && summaries.length > 0)
+    ? `<section class="receipt summary-page">
+        <div class="hd">
+          <div>
+            <h1>Resumen por grupo</h1>
+            <div class="sub">${payroll.name} · ${cyclesLine}</div>
+          </div>
+          <div class="meta"><div><b>Fecha:</b> ${today}</div></div>
+        </div>
+        ${summaries.map((s) => `
+          <div class="summary-block">
+            <h3>${s.title}</h3>
+            <table class="summary">
+              <tbody>
+                ${s.rows.map((r) => `
+                  <tr>
+                    <td>${r.leader}</td>
+                    <td style="text-align:right">${fmt(r.total)}</td>
+                  </tr>`).join("")}
+                <tr class="summary-total">
+                  <td><b>Total</b></td>
+                  <td style="text-align:right"><b>${fmt(s.total)}</b></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>`).join("")}
+      </section>`
+    : "";
+
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${docTitle}</title>
 <style>
   * { box-sizing: border-box; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
   body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; margin: 0; color: #222; }
@@ -1435,12 +1937,65 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
   table.prod .prod-day { text-align: center; min-width: 60px; }
   table.prod .prod-cell { text-align: center; }
   table.prod .prod-cell .muted { color: #555; font-size: 9px; }
+  table.prod .prod-day .prod-price { color: #555; font-size: 9px; font-weight: normal; margin-top: 1px; }
+  table.prod .prod-breakdown { font-size: 9px; color: #555; line-height: 1.2; }
+  .summary-block { margin: 16px 0; }
+  .summary-block h3 { font-size: 13px; margin: 0 0 6px; padding: 4px 8px; background: #F2F2F2; border: 1px solid #999; }
+  table.summary { width: 60%; min-width: 320px; }
+  table.summary .summary-total td { background: #FFE699; }
   table.prod .prod-total { text-align: right; min-width: 70px; }
   @media print { @page { margin: 14mm landscape; } .receipt { padding: 0; } }
 </style>
-</head><body>${groupsHtml}
+</head><body>${summariesHtml}${groupsHtml}
 <script>window.onload = () => { window.focus(); window.print(); };</script>
 </body></html>`;
+}
+
+async function printPaymentDetails(payroll, allGroups, titleOverrides = {}, summaries = []) {
+  if (allGroups.length === 0) return;
+  const cycleIds = payroll.cycleIds || (payroll.cycleDetails || []).map((c) => c.id);
+  const cycles = await Promise.all(cycleIds.map((id) => cyclesService.getById(id)));
+  const cyclesById = {};
+  for (const c of cycles) if (c) cyclesById[c.id] = c;
+
+  const allItems = allGroups.flatMap((g) => g.items);
+  const wdIdSet = new Set(allItems.flatMap((it) => it.workdayIds || []));
+  const workdays = [];
+  for (let i = 0; i < cycleIds.length; i += 10) {
+    const chunk = cycleIds.slice(i, i + 10);
+    if (chunk.length === 0) continue;
+    const wds = await workdaysService.list({ wheres: [["cycleId", "in", chunk]] });
+    for (const w of wds) if (wdIdSet.has(w.id)) workdays.push(w);
+  }
+
+  const nameByRut = new Map(allItems.map((it) => [it.rut, it.name]));
+  const workdaysByGroup = {};
+  for (const g of allGroups) {
+    const groupRuts = g.items.map((it) => it.rut);
+    const byCycle = {};
+    for (const cid of cycleIds) {
+      const cycle = cyclesById[cid];
+      if (!cycle) continue;
+      byCycle[cid] = buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut);
+    }
+    workdaysByGroup[g.leader] = byCycle;
+  }
+
+  const html = buildCashReceiptHtml(payroll, allGroups, {
+    titleOverrides,
+    workdaysByGroup,
+    cyclesById,
+    mode: "detail",
+    summaries,
+  });
+  const w = window.open("", "_blank", "width=900,height=700");
+  if (!w) {
+    alert("Permite las ventanas emergentes para imprimir.");
+    return;
+  }
+  w.document.open();
+  w.document.write(html);
+  w.document.close();
 }
 
 async function printCashReceipts(payroll, cashGroups, titleOverrides = {}) {
@@ -1496,6 +2051,36 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
   const items = payroll.items || [];
   const { bank, cash } = splitBankAndCash(items);
   const cashGroups = groupCashByLeader(cash);
+  const allGroups = groupCashByLeader(items); // groups everyone (bank + cash) by leader
+
+  // Two leader-total summary tables shown at the top of "Detalle pago":
+  //   1) "Con cuenta RUT": CHILENOS + EXTRANJEROSCONCUENTARUT (each row separate).
+  //   2) "Otros grupos": every other leader (each row separate).
+  const detailSummaries = (() => {
+    const CRUT_LEADERS = new Set(["CHILENOS", "EXTRANJEROSCONCUENTARUT"]);
+    const compact = (s) => normalizeLeader(s).replace(/\s+/g, "");
+    const inCrut = (g) => CRUT_LEADERS.has(compact(g.leader));
+    const crut = allGroups.filter(inCrut);
+    const others = allGroups.filter((g) => !inCrut(g));
+    const sumOf = (arr) => arr.reduce((s, g) => s + (Number(g.total) || 0), 0);
+    const out = [];
+    if (crut.length) {
+      out.push({
+        title: "Con cuenta RUT",
+        rows: crut.map((g) => ({ leader: g.leader, total: g.total })),
+        total: sumOf(crut),
+      });
+    }
+    if (others.length) {
+      out.push({
+        title: "Otros grupos",
+        rows: others.map((g) => ({ leader: g.leader, total: g.total })),
+        total: sumOf(others),
+      });
+    }
+    return out;
+  })();
+
   const cycleDetails = payroll.cycleDetails || [];
 
   // Aggregate breakdowns for the summary header.
@@ -1515,6 +2100,7 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
   });
   const [showTitleEditor, setShowTitleEditor] = useState(false);
   const [printing, setPrinting] = useState(false);
+  const [printingDetail, setPrintingDetail] = useState(false);
 
   const setCycleTitle = (cid, val) => {
     setCycleTitleOverrides((prev) => {
@@ -1530,6 +2116,15 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
       await printCashReceipts(payroll, cashGroups, cycleTitleOverrides);
     } finally {
       setPrinting(false);
+    }
+  };
+
+  const handlePrintDetail = async () => {
+    setPrintingDetail(true);
+    try {
+      await printPaymentDetails(payroll, allGroups, cycleTitleOverrides, detailSummaries);
+    } finally {
+      setPrintingDetail(false);
     }
   };
 
@@ -1578,9 +2173,9 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
             </div>
 
             {totalsByCycle.length > 1 && (
-              <div className="mt-4 overflow-x-auto rounded border border-[var(--color-border)]">
+              <div className="mt-4 overflow-x-auto rounded-md border border-[var(--color-border)]">
                 <table className="w-full text-xs">
-                  <thead className="bg-[var(--color-surface)] text-left text-[var(--color-muted)]">
+                  <thead className="bg-[var(--color-surface-2)] text-left text-[var(--color-muted)]">
                     <tr>
                       <th className="px-2 py-1.5">Ciclo</th>
                       <th className="px-2 py-1.5 text-right">🏦 Banco</th>
@@ -1599,9 +2194,9 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
                             </span>
                           )}
                         </td>
-                        <td className="px-2 py-1 text-right">{fmtCurrency(b)}</td>
-                        <td className="px-2 py-1 text-right">{fmtCurrency(c)}</td>
-                        <td className="px-2 py-1 text-right font-semibold">{fmtCurrency(total)}</td>
+                        <td className="px-2 py-1 text-right tabular-nums">{fmtCurrency(b)}</td>
+                        <td className="px-2 py-1 text-right tabular-nums">{fmtCurrency(c)}</td>
+                        <td className="px-2 py-1 text-right font-semibold tabular-nums">{fmtCurrency(total)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -1632,7 +2227,7 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
             <section>
               <h3 className="mb-2 text-sm font-semibold">🏦 Banco ({bank.length})</h3>
               <table className="w-full text-sm">
-                <thead className="text-left text-[var(--color-muted)]">
+                <thead className="bg-[var(--color-surface-2)] text-left text-[var(--color-muted)]">
                   <tr>
                     <th className="px-2 py-1">RUT</th>
                     <th className="px-2 py-1">Nombre</th>
@@ -1650,14 +2245,14 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
                       <td className="px-2 py-1 text-xs">{bankName(it.bankCode)}</td>
                       <td className="px-2 py-1 font-mono text-xs">{it.accountNumber}</td>
                       <td className="px-2 py-1 text-xs">{accountTypeShort(it.accountType)}</td>
-                      <td className="px-2 py-1 text-right">{fmtCurrency(it.amount)}</td>
+                      <td className="px-2 py-1 text-right tabular-nums">{fmtCurrency(it.amount)}</td>
                     </tr>
                   ))}
                 </tbody>
                 <tfoot>
                   <tr className="border-t-2 border-[var(--color-border)] font-semibold">
                     <td colSpan={5} className="px-2 py-2 text-right">Subtotal banco</td>
-                    <td className="px-2 py-2 text-right">{fmtCurrency(bank.reduce((s, x) => s + x.amount, 0))}</td>
+                    <td className="px-2 py-2 text-right tabular-nums">{fmtCurrency(bank.reduce((s, x) => s + x.amount, 0))}</td>
                   </tr>
                 </tfoot>
               </table>
@@ -1686,7 +2281,7 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
                       <input
                         value={cycleTitleOverrides[c.id] ?? c.label}
                         onChange={(e) => setCycleTitle(c.id, e.target.value)}
-                        className="flex-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-xs"
+                        className="flex-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-xs outline-none focus:border-[var(--color-accent)]"
                       />
                       {cycleTitleOverrides[c.id] != null && cycleTitleOverrides[c.id] !== c.label && (
                         <button
@@ -1714,7 +2309,7 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
                           <tr key={it.rut} className="border-t border-[var(--color-border)]">
                             <td className="px-2 py-1 font-mono text-xs">{formatRutForDisplay(it.rut)}</td>
                             <td className="px-2 py-1">{it.name}</td>
-                            <td className="px-2 py-1 text-right">{fmtCurrency(it.amount)}</td>
+                            <td className="px-2 py-1 text-right tabular-nums">{fmtCurrency(it.amount)}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -1737,6 +2332,16 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
               className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-4 py-2 text-sm font-medium hover:bg-[var(--color-accent-soft)] disabled:opacity-50"
             >
               {printing ? "Cargando..." : "🖨 Comprobantes efectivo"}
+            </button>
+          )}
+          {allGroups.length > 0 && (
+            <button
+              onClick={handlePrintDetail}
+              disabled={printingDetail}
+              title="Detalle de pago de todos los trabajadores (efectivo + transferencia), sin firma ni copia"
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-4 py-2 text-sm font-medium hover:bg-[var(--color-accent-soft)] disabled:opacity-50"
+            >
+              {printingDetail ? "Cargando..." : "📄 Detalle pago"}
             </button>
           )}
           <button

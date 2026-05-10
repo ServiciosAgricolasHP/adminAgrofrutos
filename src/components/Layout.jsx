@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 import { useTheme } from "../contexts/ThemeContext";
 
@@ -32,9 +32,9 @@ function ThemePicker() {
     <div ref={ref} className="relative">
       <button
         onClick={() => setOpen((o) => !o)}
-        className="flex items-center gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)]"
+        className="flex items-center gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1.5 text-sm hover:bg-[var(--color-accent-soft)] sm:px-3"
       >
-        🎨 <span>{current.label}</span>
+        🎨 <span className="hidden sm:inline">{current.label}</span>
         <span className="text-[var(--color-muted)]">▾</span>
       </button>
       {open && (
@@ -65,6 +65,13 @@ function ThemePicker() {
 export default function Layout() {
   const { user, logout, isAdmin } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+  const [drawerOpen, setDrawerOpen] = useState(false);
+
+  // Auto-close drawer on route change
+  useEffect(() => {
+    setDrawerOpen(false);
+  }, [location.pathname]);
 
   const handleLogout = async () => {
     await logout();
@@ -78,48 +85,90 @@ export default function Layout() {
         : "text-[var(--color-muted)] hover:bg-[var(--color-surface-2)] hover:text-[var(--color-text)]"
     }`;
 
+  const sidebarContent = (
+    <>
+      <div className="flex h-14 items-center gap-2 border-b border-[var(--color-border)] px-4 font-semibold">
+        <span>🌾</span>
+        <span>Agrofrutos</span>
+      </div>
+      <nav className="flex-1 space-y-1 overflow-y-auto p-2">
+        {navItems.map((item) => (
+          <NavLink key={item.to} to={item.to} end={item.end} className={linkClass}>
+            <span>{item.icon}</span>
+            <span>{item.label}</span>
+          </NavLink>
+        ))}
+        {isAdmin && (
+          <NavLink to="/audit" className={linkClass}>
+            <span>🛡️</span>
+            <span>Auditoría</span>
+          </NavLink>
+        )}
+        {isAdmin && (
+          <>
+            <NavLink to="/admin/migrate-workers" className={linkClass}>
+              <span>📥</span>
+              <span>Migrar CSV</span>
+            </NavLink>
+            <NavLink to="/admin/cleanup-paid-workdays" className={linkClass}>
+              <span>🧹</span>
+              <span>Limpiar pagados</span>
+            </NavLink>
+          </>
+        )}
+      </nav>
+    </>
+  );
+
   return (
     <div className="flex h-screen bg-[var(--color-bg)] text-[var(--color-text)]">
-      <aside className="flex w-60 flex-col border-r border-[var(--color-border)] bg-[var(--color-surface)]">
-        <div className="flex h-14 items-center gap-2 border-b border-[var(--color-border)] px-4 font-semibold">
-          <span>🌾</span>
-          <span>Agrofrutos</span>
-        </div>
-        <nav className="flex-1 space-y-1 p-2">
-          {navItems.map((item) => (
-            <NavLink key={item.to} to={item.to} end={item.end} className={linkClass}>
-              <span>{item.icon}</span>
-              <span>{item.label}</span>
-            </NavLink>
-          ))}
-          {isAdmin && (
-            <NavLink to="/audit" className={linkClass}>
-              <span>🛡️</span>
-              <span>Auditoría</span>
-            </NavLink>
-          )}
-        </nav>
+      {/* Desktop sidebar */}
+      <aside className="hidden w-60 flex-col border-r border-[var(--color-border)] bg-[var(--color-surface)] md:flex">
+        {sidebarContent}
       </aside>
 
+      {/* Mobile drawer */}
+      {drawerOpen && (
+        <div className="fixed inset-0 z-40 md:hidden">
+          <div
+            className="absolute inset-0 bg-black/40"
+            onClick={() => setDrawerOpen(false)}
+            aria-label="Cerrar menú"
+          />
+          <aside className="absolute inset-y-0 left-0 flex w-60 flex-col border-r border-[var(--color-border)] bg-[var(--color-surface)] shadow-xl">
+            {sidebarContent}
+          </aside>
+        </div>
+      )}
+
       <div className="flex flex-1 flex-col overflow-hidden">
-        <header className="flex h-14 items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-surface)] px-4">
-          <div className="text-sm text-[var(--color-muted)]">
-            {user?.email}
-            <span className="ml-2 rounded bg-[var(--color-accent-soft)] px-2 py-0.5 text-xs text-[var(--color-accent)]">
-              {user?.role}
-            </span>
+        <header className="flex h-14 items-center justify-between gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3 sm:px-4">
+          <div className="flex items-center gap-2 min-w-0">
+            <button
+              onClick={() => setDrawerOpen(true)}
+              aria-label="Abrir menú"
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1.5 text-sm hover:bg-[var(--color-accent-soft)] md:hidden"
+            >
+              ☰
+            </button>
+            <div className="truncate text-xs text-[var(--color-muted)] sm:text-sm">
+              <span className="truncate">{user?.email}</span>
+              <span className="ml-2 rounded bg-[var(--color-accent-soft)] px-2 py-0.5 text-[10px] text-[var(--color-accent)] sm:text-xs">
+                {user?.role}
+              </span>
+            </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-1 sm:gap-2">
             <ThemePicker />
             <button
               onClick={handleLogout}
-              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)]"
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1.5 text-sm hover:bg-[var(--color-accent-soft)] sm:px-3"
             >
               Salir
             </button>
           </div>
         </header>
-        <main className="flex-1 overflow-auto p-6">
+        <main className="flex-1 overflow-auto p-3 sm:p-6">
           <Outlet />
         </main>
       </div>

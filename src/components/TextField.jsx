@@ -1,4 +1,9 @@
 export default function TextField({ label, value, onChange, type = "text", required = false, placeholder, autoFocus = false }) {
+  // For numeric inputs, render 0 / null / undefined as empty so the placeholder
+  // shows and the user can type without having to delete a leading "0" first.
+  const display = type === "number"
+    ? (value === 0 || value === "0" || value == null ? "" : value)
+    : (value ?? "");
   return (
     <label className="block">
       <span className="mb-1 block text-sm text-[var(--color-muted)]">
@@ -7,7 +12,7 @@ export default function TextField({ label, value, onChange, type = "text", requi
       </span>
       <input
         type={type}
-        value={value ?? ""}
+        value={display}
         onChange={(e) => onChange(e.target.value)}
         required={required}
         placeholder={placeholder}
