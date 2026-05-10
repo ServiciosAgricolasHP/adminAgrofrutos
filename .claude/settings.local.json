@@ -12,7 +12,9 @@
       "Bash(git mv *)",
       "Bash(npm run *)",
       "Bash(node -e ' *)",
-      "PowerShell($line = \\(Get-Content 'src/services/workersService.js' -Encoding UTF8\\)[25]; [System.BitConverter]::ToString\\([System.Text.Encoding]::UTF8.GetBytes\\($line\\)\\))"
+      "PowerShell($line = \\(Get-Content 'src/services/workersService.js' -Encoding UTF8\\)[25]; [System.BitConverter]::ToString\\([System.Text.Encoding]::UTF8.GetBytes\\($line\\)\\))",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)"
     ]
   }
 }

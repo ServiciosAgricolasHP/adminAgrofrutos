@@ -179,13 +179,19 @@ export default function Payroll() {
         }
       }
 
-      // Load workdays for each cycle, excluding ones already tagged in another payroll.
+      // Load workdays for each cycle, excluding ones already tagged in another
+      // payroll and ones belonging to TEMP-* (temporary) workers, which never
+      // make it into a payroll until their RUT is assigned in CycleDetail.
       const allWorkdays = [];
       const chunkSize = 10;
       for (let i = 0; i < cycleIds.length; i += chunkSize) {
         const chunk = cycleIds.slice(i, i + chunkSize);
         const wds = await workdaysService.list({ wheres: [["cycleId", "in", chunk]] });
-        for (const wd of wds) if (!wd.payrollId) allWorkdays.push(wd);
+        for (const wd of wds) {
+          if (wd.payrollId) continue;
+          if (String(wd.workerRut || "").startsWith("TEMP-")) continue;
+          allWorkdays.push(wd);
+        }
       }
 
       const aggregates = aggregateWorkerAmounts(allWorkdays, laborTypeById);

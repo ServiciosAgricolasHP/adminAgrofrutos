@@ -33,11 +33,13 @@ function emptyNewWorker() {
   };
 }
 
-export default function WorkerPickerModal({ open, onClose, onPick, excludeRuts = [] }) {
+export default function WorkerPickerModal({ open, onClose, onPick, excludeRuts = [], allowTemp = false, title = "Agregar trabajador" }) {
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
   const [creating, setCreating] = useState(false);
+  const [creatingTemp, setCreatingTemp] = useState(false);
+  const [tempName, setTempName] = useState("");
   const [newWorker, setNewWorker] = useState(emptyNewWorker());
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -49,6 +51,8 @@ export default function WorkerPickerModal({ open, onClose, onPick, excludeRuts =
     setSearch("");
     setResults([]);
     setCreating(false);
+    setCreatingTemp(false);
+    setTempName("");
     setNewWorker(emptyNewWorker());
     setError("");
     cacheRef.current = new Map();
@@ -188,9 +192,41 @@ export default function WorkerPickerModal({ open, onClose, onPick, excludeRuts =
     }
   };
 
+  const submitTemp = (e) => {
+    e.preventDefault();
+    setError("");
+    const name = tempName.trim();
+    if (!name) return setError("Ingresa el nombre");
+    const tempRut = `TEMP-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+    onPick({ rut: tempRut, name, isTemp: true });
+  };
+
   return (
-    <Modal open={open} onClose={onClose} title="Agregar trabajador" size={creating ? "lg" : "md"}>
-      {!creating ? (
+    <Modal open={open} onClose={onClose} title={title} size={creating ? "lg" : "md"}>
+      {creatingTemp ? (
+        <form onSubmit={submitTemp} className="space-y-3">
+          <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+            Trabajador <b>temporal</b>: solo vive en este ciclo y se ignora al pagar nóminas. Cuando llegue el RUT real, usa <b>Asignar RUT</b> en su fila para convertirlo.
+          </div>
+          <TextField label="Nombre" required autoFocus value={tempName} onChange={setTempName} />
+          {error && <div className="rounded-md bg-red-500/10 px-3 py-2 text-sm text-[var(--color-danger)]">{error}</div>}
+          <div className="flex justify-end gap-2 pt-1">
+            <button
+              type="button"
+              onClick={() => { setCreatingTemp(false); setError(""); }}
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)]"
+            >
+              Volver
+            </button>
+            <button
+              type="submit"
+              className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-white hover:bg-[var(--color-accent-hover)]"
+            >
+              Crear temporal
+            </button>
+          </div>
+        </form>
+      ) : !creating ? (
         <div className="space-y-3">
           <TextField label="Buscar por RUT o nombre" value={search} onChange={setSearch} autoFocus />
           <div className="max-h-72 overflow-y-auto rounded-md border border-[var(--color-border)]">
@@ -218,12 +254,23 @@ export default function WorkerPickerModal({ open, onClose, onPick, excludeRuts =
               </ul>
             )}
           </div>
-          <button
-            onClick={() => setCreating(true)}
-            className="w-full rounded-md border border-dashed border-[var(--color-border)] px-3 py-2 text-sm text-[var(--color-accent)] hover:bg-[var(--color-accent-soft)]"
-          >
-            + Crear nuevo trabajador
-          </button>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <button
+              onClick={() => setCreating(true)}
+              className="rounded-md border border-dashed border-[var(--color-border)] px-3 py-2 text-sm text-[var(--color-accent)] hover:bg-[var(--color-accent-soft)]"
+            >
+              + Crear nuevo trabajador
+            </button>
+            {allowTemp && (
+              <button
+                onClick={() => { setCreatingTemp(true); setTempName(""); setError(""); }}
+                className="rounded-md border border-dashed border-amber-500/60 px-3 py-2 text-sm text-amber-600 hover:bg-amber-500/10 dark:text-amber-400"
+                title="Crear un trabajador solo para este ciclo, sin RUT, mientras llega la información"
+              >
+                + Crear trabajador temporal
+              </button>
+            )}
+          </div>
         </div>
       ) : (
         <form onSubmit={submitNew} className="space-y-4">

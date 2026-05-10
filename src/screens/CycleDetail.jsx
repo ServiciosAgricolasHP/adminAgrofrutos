@@ -164,7 +164,7 @@ function GroupHeaderRowRenderer(props) {
 
 function buildRowsCosecha(workers, days, wdMap, dayCombosByDate) {
   return workers.map((w) => {
-    const row = { rut: w.rut, name: w.name };
+    const row = { rut: w.rut, name: w.name, _isTemp: !!w.isTemp };
     let total = 0;
     for (const d of days) {
       const combos = dayCombosByDate[d] || [];
@@ -187,7 +187,7 @@ function buildRowsCosecha(workers, days, wdMap, dayCombosByDate) {
 
 function buildRowsTratoHE(workers, days, wdMap) {
   return workers.map((w) => {
-    const row = { rut: w.rut, name: w.name };
+    const row = { rut: w.rut, name: w.name, _isTemp: !!w.isTemp };
     let total = 0;
     for (const d of days) {
       const wd = wdMap[workdayMapKey(w.rut, d, SINGLE_COMBO)];
@@ -212,7 +212,7 @@ function buildRowsTratoHE(workers, days, wdMap) {
 
 function buildRowsTrato(workers, days, wdMap, dayTiersByDate) {
   return workers.map((w) => {
-    const row = { rut: w.rut, name: w.name };
+    const row = { rut: w.rut, name: w.name, _isTemp: !!w.isTemp };
     let total = 0;
     for (const d of days) {
       const tiers = dayTiersByDate[d] || [];
@@ -235,7 +235,7 @@ function buildRowsTrato(workers, days, wdMap, dayTiersByDate) {
 
 function buildRowsNormal(workers, days, wdMap) {
   return workers.map((w) => {
-    const row = { rut: w.rut, name: w.name };
+    const row = { rut: w.rut, name: w.name, _isTemp: !!w.isTemp };
     let total = 0;
     for (const d of days) {
       const wd = wdMap[workdayMapKey(w.rut, d, SINGLE_COMBO)];
@@ -280,6 +280,11 @@ export default function CycleDetail() {
     return { year: d.getFullYear(), month: d.getMonth() };
   });
   const [pickerOpen, setPickerOpen] = useState(false);
+  // Holds the synthetic TEMP-* rut of the worker currently being converted
+  // to a real RUT. When set, opens a second picker that replaces this temp
+  // entry (and rewrites all of its workday docs) with the chosen real worker.
+  const [assignTempRut, setAssignTempRut] = useState(null);
+  const [assignBusy, setAssignBusy] = useState(false);
 
   const [removeWorker, setRemoveWorker] = useState(null);
   const [removeBusy, setRemoveBusy] = useState(false);
@@ -319,6 +324,13 @@ export default function CycleDetail() {
 
   const gridRef = useRef(null);
   const photoRef = useRef(null);
+  // Undo stack: each entry is a batch (array) of { rut, field, oldValue }.
+  // Ctrl+Z pops one batch and replays the old values. Single edits push a
+  // 1-item batch; fillDown/paste push N-item batches so they undo in one step.
+  const undoStackRef = useRef([]);
+  const isUndoingRef = useRef(false);
+  const pendingBatchRef = useRef(null);
+  const UNDO_LIMIT = 50;
 
   useEffect(() => {
     (async () => {
@@ -995,10 +1007,12 @@ export default function CycleDetail() {
   const dispatchCellChange = async (node, colDef, newValue) => {
     if (!node || !colDef) return;
     if (!isEditableField(colDef.field)) return;
+    const oldValue = node.data?.[colDef.field];
     await onCellValueChanged({
       colDef,
       data: node.data,
       newValue,
+      oldValue,
       node,
     });
   };
@@ -1024,12 +1038,18 @@ export default function CycleDetail() {
       setTimeout(() => setCopyToast(""), 2200);
       return;
     }
+    pendingBatchRef.current = [];
     let count = 0;
     for (const node of selected) {
       if (node.id === params.node?.id) continue;
       await dispatchCellChange(node, colDef, sourceValue);
       count++;
     }
+    if (pendingBatchRef.current.length) {
+      undoStackRef.current.push(pendingBatchRef.current);
+      if (undoStackRef.current.length > UNDO_LIMIT) undoStackRef.current.shift();
+    }
+    pendingBatchRef.current = null;
     setCopyToast(`✓ Copiado a ${count} fila(s)`);
     setTimeout(() => setCopyToast(""), 1500);
   };
@@ -1057,6 +1077,7 @@ export default function CycleDetail() {
     if (lines.length === 0) return;
     const startIdx = params.node?.rowIndex;
     if (startIdx == null) return;
+    pendingBatchRef.current = [];
     let count = 0;
     let lineIdx = 0;
     let targetIdx = startIdx;
@@ -1072,8 +1093,42 @@ export default function CycleDetail() {
       targetIdx++;
       count++;
     }
+    if (pendingBatchRef.current.length) {
+      undoStackRef.current.push(pendingBatchRef.current);
+      if (undoStackRef.current.length > UNDO_LIMIT) undoStackRef.current.shift();
+    }
+    pendingBatchRef.current = null;
     setCopyToast(`✓ Pegadas ${count} celda(s)`);
     setTimeout(() => setCopyToast(""), 1500);
+  };
+
+  // Ctrl+Z undo: pop the most recent batch off the stack and replay each
+  // entry's old value. While replaying we set isUndoingRef so onCellValueChanged
+  // does not push the revert itself onto the stack.
+  const undoLast = async () => {
+    if (readOnly || photoMode) return;
+    const batch = undoStackRef.current.pop();
+    if (!batch || batch.length === 0) {
+      setCopyToast("Nada que deshacer");
+      setTimeout(() => setCopyToast(""), 1500);
+      return;
+    }
+    const api = gridRef.current?.api;
+    if (!api) return;
+    isUndoingRef.current = true;
+    try {
+      for (let i = batch.length - 1; i >= 0; i--) {
+        const { rut, field, oldValue } = batch[i];
+        let target = null;
+        api.forEachNode((n) => { if (n.data?.rut === rut) target = n; });
+        if (!target) continue;
+        await dispatchCellChange(target, { field }, oldValue);
+      }
+      setCopyToast(`↶ Deshecho (${batch.length} celda${batch.length === 1 ? "" : "s"})`);
+      setTimeout(() => setCopyToast(""), 1500);
+    } finally {
+      isUndoingRef.current = false;
+    }
   };
 
   const onCellKeyDown = async (params) => {
@@ -1090,12 +1145,28 @@ export default function CycleDetail() {
       e.preventDefault();
       e.stopPropagation();
       await pasteFromClipboard(params);
+    } else if (key === "z" && !e.shiftKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      await undoLast();
     }
   };
 
   const onCellValueChanged = async (params) => {
     const field = params.colDef.field;
     if (!field || field === "total" || field === "rut" || field === "name" || field.endsWith("__amt") || field.endsWith("__total")) return;
+
+    // Push to undo stack before mutating. Skip when we are replaying an undo.
+    if (!isUndoingRef.current) {
+      const oldValue = params.oldValue !== undefined ? params.oldValue : params.data?.[field];
+      const entry = { rut: params.data?.rut, field, oldValue };
+      if (pendingBatchRef.current) {
+        pendingBatchRef.current.push(entry);
+      } else {
+        undoStackRef.current.push([entry]);
+        if (undoStackRef.current.length > UNDO_LIMIT) undoStackRef.current.shift();
+      }
+    }
 
     if (isCosechaLabor) {
       const [date, ...rest] = field.split("__");
@@ -1291,7 +1362,9 @@ export default function CycleDetail() {
 
   const pickWorker = async (worker) => {
     if (workers.find((w) => w.rut === worker.rut)) { setPickerOpen(false); return; }
-    await persistLabor({ ...activeLabor, workers: [...workers, { rut: worker.rut, name: worker.name }] });
+    const entry = { rut: worker.rut, name: worker.name };
+    if (worker.isTemp) entry.isTemp = true;
+    await persistLabor({ ...activeLabor, workers: [...workers, entry] });
     setPickerOpen(false);
   };
 
@@ -1304,6 +1377,28 @@ export default function CycleDetail() {
     if (!removeWorker) return;
     setRemoveBusy(true);
     try {
+      // Temp workers: borrar también todas sus workdays en este ciclo. Son
+      // datos descartables y no deben quedar huérfanos en Firestore.
+      if (removeWorker.isTemp) {
+        const all = await workdaysService.list({
+          wheres: [["cycleId", "==", id], ["workerRut", "==", removeWorker.rut]],
+        });
+        for (const wd of all) await workdaysService.remove(wd.id);
+        setWorkdaysByLabor((prev) => {
+          const next = {};
+          for (const [lid, m] of Object.entries(prev)) {
+            const filtered = {};
+            for (const [k, v] of Object.entries(m)) {
+              if (v?.workerRut !== removeWorker.rut) filtered[k] = v;
+            }
+            next[lid] = filtered;
+          }
+          return next;
+        });
+        await persistLabor({ ...activeLabor, workers: workers.filter((w) => w.rut !== removeWorker.rut) });
+        setRemoveWorker(null);
+        return;
+      }
       const existing = await workdaysService.list({
         wheres: [["cycleId", "==", id], ["laborId", "==", activeLabor.id], ["workerRut", "==", removeWorker.rut]],
         take: 1,
@@ -1317,6 +1412,64 @@ export default function CycleDetail() {
       setRemoveWorker(null);
     } finally {
       setRemoveBusy(false);
+    }
+  };
+
+  // Convert a temporary worker (TEMP-...) into a real one. Replaces the entry
+  // in the labor's workers array and rewrites every workday doc that used the
+  // temp rut. The doc id embeds the rut, so we copy each doc to a new id and
+  // delete the old one — there is no rename in Firestore.
+  const convertTempToReal = async (real) => {
+    const tempRut = assignTempRut;
+    if (!tempRut || !real?.rut) { setAssignTempRut(null); return; }
+    if (real.isTemp) { setAssignTempRut(null); return; }
+    if (real.rut === tempRut) { setAssignTempRut(null); return; }
+    if (workers.some((w) => w.rut === real.rut)) {
+      alert("Ese trabajador ya existe en este ciclo. Quita primero la fila duplicada antes de asignar.");
+      return;
+    }
+    setAssignBusy(true);
+    try {
+      const wds = await workdaysService.list({
+        wheres: [["cycleId", "==", id], ["workerRut", "==", tempRut]],
+      });
+      for (const wd of wds) {
+        const parts = String(wd.id).split("__");
+        if (parts.length < 4) continue;
+        parts[2] = real.rut;
+        const newDocId = parts.join("__");
+        const { id: _omit, ...rest } = wd;
+        await workdaysService.upsert(newDocId, { ...rest, workerRut: real.rut });
+        await workdaysService.remove(wd.id);
+      }
+      // Update labor.workers in place — preserve order.
+      const nextWorkers = workers.map((w) =>
+        w.rut === tempRut ? { rut: real.rut, name: real.name } : w,
+      );
+      await persistLabor({ ...activeLabor, workers: nextWorkers });
+      // Rebuild local wdMap for this labor: re-key entries that pointed at temp.
+      setWorkdaysByLabor((prev) => {
+        const next = { ...prev };
+        for (const [lid, m] of Object.entries(prev)) {
+          const newMap = {};
+          for (const [k, v] of Object.entries(m)) {
+            if (v?.workerRut === tempRut) {
+              const newKey = workdayMapKey(real.rut, v.date, k.split("__")[2] || SINGLE_COMBO);
+              newMap[newKey] = { ...v, workerRut: real.rut };
+            } else {
+              newMap[k] = v;
+            }
+          }
+          next[lid] = newMap;
+        }
+        return next;
+      });
+      setAssignTempRut(null);
+    } catch (err) {
+      console.error(err);
+      alert("No se pudo asignar el RUT: " + (err.message || err));
+    } finally {
+      setAssignBusy(false);
     }
   };
 
@@ -1590,11 +1743,46 @@ export default function CycleDetail() {
   const columnDefs = useMemo(() => {
     const baseLeft = [
       {
-        headerName: "RUT", field: "rut", editable: false, width: 130, pinned: "left",
-        valueFormatter: (p) => formatRutForDisplay(p.value),
+        headerName: "RUT", field: "rut", editable: false, width: 140, pinned: "left",
         checkboxSelection: !photoMode, headerCheckboxSelection: !photoMode,
+        cellRenderer: (p) => {
+          if (p.data?._isHeader) return null;
+          if (p.data?._isTemp) {
+            if (readOnly) {
+              return <span className="text-xs italic text-[var(--color-muted)]">sin RUT</span>;
+            }
+            return (
+              <button
+                type="button"
+                onClick={() => setAssignTempRut(p.data.rut)}
+                className="rounded border border-amber-500/60 bg-amber-500/10 px-1.5 py-0.5 text-[11px] font-medium text-amber-700 hover:bg-amber-500/20 dark:text-amber-300"
+                title="Asignar un RUT real a este trabajador temporal"
+              >
+                Asignar RUT
+              </button>
+            );
+          }
+          return formatRutForDisplay(p.value);
+        },
       },
-      { headerName: "Nombre", field: "name", editable: false, width: 200, pinned: "left" },
+      {
+        headerName: "Nombre", field: "name", editable: false, width: 220, pinned: "left",
+        cellRenderer: (p) => {
+          if (p.data?._isHeader) return p.value;
+          if (!p.data?._isTemp) return p.value;
+          return (
+            <span className="inline-flex items-center gap-1.5">
+              <span>{p.value}</span>
+              <span
+                className="rounded border border-amber-500/50 bg-amber-500/15 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-300"
+                title="Trabajador temporal: solo vive en este ciclo y se ignora al pagar"
+              >
+                Temporal
+              </span>
+            </span>
+          );
+        },
+      },
     ];
     const totalCol = {
       headerName: isQtyLabor ? "TOTAL ($)" : "TOTAL",
@@ -1608,7 +1796,8 @@ export default function CycleDetail() {
       cellRenderer: (p) => {
         const rut = p.data?.rut;
         if (!rut || p.data?._isHeader) return null;
-        const showAssign = useGrouped && !rutToLeader.has(rut) && !readOnly;
+        const isTemp = !!p.data?._isTemp;
+        const showAssign = useGrouped && !rutToLeader.has(rut) && !readOnly && !isTemp;
         return (
           <div className="flex items-center gap-1.5">
             {showAssign && (
@@ -2062,7 +2251,8 @@ export default function CycleDetail() {
               "  Esc → salir de edición\n" +
               "  Shift+Click en filas → seleccionar rango\n" +
               "  Ctrl+D → copiar valor de la celda focuseada a las filas seleccionadas\n" +
-              "  Ctrl+V → pegar columna desde portapapeles (una línea por fila)"
+              "  Ctrl+V → pegar columna desde portapapeles (una línea por fila)\n" +
+              "  Ctrl+Z → deshacer último cambio (Ctrl+D y Ctrl+V se deshacen como uno)"
             }
           >
             ⌨ Atajos
@@ -2824,12 +3014,28 @@ export default function CycleDetail() {
         onClose={() => setPickerOpen(false)}
         onPick={pickWorker}
         excludeRuts={workers.map((w) => w.rut)}
+        allowTemp
+      />
+
+      <WorkerPickerModal
+        open={!!assignTempRut}
+        onClose={() => !assignBusy && setAssignTempRut(null)}
+        onPick={convertTempToReal}
+        excludeRuts={workers.filter((w) => w.rut !== assignTempRut).map((w) => w.rut)}
+        allowTemp={false}
+        title="Asignar RUT al trabajador temporal"
       />
 
       <ConfirmDialog
         open={!!removeWorker}
         title="Quitar trabajador"
-        message={removeWorker ? `¿Quitar a ${removeWorker.name} de "${activeLabor?.name}"?` : ""}
+        message={
+          removeWorker
+            ? removeWorker.isTemp
+              ? `¿Eliminar al trabajador temporal "${removeWorker.name}"? Se borrará junto con toda la producción cargada en este ciclo.`
+              : `¿Quitar a ${removeWorker.name} de "${activeLabor?.name}"?`
+            : ""
+        }
         confirmLabel="Quitar"
         danger busy={removeBusy}
         onCancel={() => !removeBusy && setRemoveWorker(null)}
