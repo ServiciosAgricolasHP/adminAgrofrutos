@@ -75,3 +75,85 @@ export function subscribe(scopePrefix, fn) {
   SUBS.get(scopePrefix).add(fn);
   return () => SUBS.get(scopePrefix)?.delete(fn);
 }
+
+// Parse the cacheKey suffix back to its params object so we can check filters
+// without re-running the full key derivation. Only used inside additive merge.
+function parseKeyParams(key, scopePrefix) {
+  const prefix = `${scopePrefix}::`;
+  if (!key.startsWith(prefix)) return null;
+  const suffix = key.slice(prefix.length);
+  if (!suffix) return null;
+  try { return JSON.parse(suffix); } catch { return null; }
+}
+
+// Returns true if the cache entry was built from a "list all" query (no
+// where clauses). We refuse to merge into filtered lists because we can't
+// know whether the new/changed doc satisfies their predicate.
+function isUnfilteredListKey(key, scopePrefix) {
+  const p = parseKeyParams(key, scopePrefix);
+  if (!p) return false;
+  return !p.wheres || p.wheres.length === 0;
+}
+
+// Additive cache update: insert (or replace) an item in every cached "list
+// all" result for this scope. Used by services that opt into additive
+// mutations to avoid re-fetching the entire collection after one write.
+// Filtered lists (with `wheres`) are left alone — they will repopulate from
+// Firestore on next access.
+export function mergeListItem(scopePrefix, item, { idKey = "id" } = {}) {
+  if (!item || !item[idKey]) return;
+  // mem
+  for (const [key, entry] of mem) {
+    if (!isUnfilteredListKey(key, scopePrefix)) continue;
+    if (!Array.isArray(entry.data)) continue;
+    const idx = entry.data.findIndex((x) => x?.[idKey] === item[idKey]);
+    const nextData = idx >= 0
+      ? entry.data.map((x, i) => (i === idx ? item : x))
+      : [...entry.data, item];
+    mem.set(key, { ...entry, data: nextData });
+  }
+  // localStorage
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k || !k.startsWith(LS_PREFIX)) continue;
+      const baseKey = k.slice(LS_PREFIX.length);
+      if (!isUnfilteredListKey(baseKey, scopePrefix)) continue;
+      const raw = localStorage.getItem(k);
+      if (!raw) continue;
+      let parsed;
+      try { parsed = JSON.parse(raw); } catch { continue; }
+      if (!parsed || !Array.isArray(parsed.data)) continue;
+      if (parsed.expires <= now()) continue;
+      const idx = parsed.data.findIndex((x) => x?.[idKey] === item[idKey]);
+      const nextData = idx >= 0
+        ? parsed.data.map((x, j) => (j === idx ? item : x))
+        : [...parsed.data, item];
+      localStorage.setItem(k, JSON.stringify({ data: nextData, expires: parsed.expires }));
+    }
+  } catch { /* ignore */ }
+}
+
+export function removeListItem(scopePrefix, id, { idKey = "id" } = {}) {
+  for (const [key, entry] of mem) {
+    if (!isUnfilteredListKey(key, scopePrefix)) continue;
+    if (!Array.isArray(entry.data)) continue;
+    mem.set(key, { ...entry, data: entry.data.filter((x) => x?.[idKey] !== id) });
+  }
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k || !k.startsWith(LS_PREFIX)) continue;
+      const baseKey = k.slice(LS_PREFIX.length);
+      if (!isUnfilteredListKey(baseKey, scopePrefix)) continue;
+      const raw = localStorage.getItem(k);
+      if (!raw) continue;
+      let parsed;
+      try { parsed = JSON.parse(raw); } catch { continue; }
+      if (!parsed || !Array.isArray(parsed.data)) continue;
+      if (parsed.expires <= now()) continue;
+      const filtered = parsed.data.filter((x) => x?.[idKey] !== id);
+      localStorage.setItem(k, JSON.stringify({ data: filtered, expires: parsed.expires }));
+    }
+  } catch { /* ignore */ }
+}

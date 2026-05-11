@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   faenasService,
   subfaenasService,
   cyclesService,
   workersService,
   workdaysService,
+  payrollSnapshotsService,
 } from "../services";
 import {
   payrollsService,
@@ -34,6 +35,7 @@ import {
 } from "../utils/payroll";
 import ConfirmDialog from "../components/ConfirmDialog";
 import Modal from "../components/Modal";
+import ResizableArea from "../components/ResizableArea";
 import { useIsMobile } from "../hooks/useIsMobile";
 
 const fmtCurrency = (v) =>
@@ -61,6 +63,26 @@ const saveSelection = (set) => {
   try { localStorage.setItem(SELECTION_KEY, JSON.stringify([...set])); } catch {}
 };
 
+// Trigger a browser download of the snapshot object as a JSON file. The name
+// is sanitized for filesystems (any non-alphanumeric run becomes "_").
+function downloadSnapshotJson(payrollName, snapshot) {
+  try {
+    const json = JSON.stringify(snapshot, null, 2);
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const safeName = String(payrollName || "Nomina").replace(/[^a-z0-9_-]+/gi, "_");
+    a.href = url;
+    a.download = `${safeName}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  } catch (err) {
+    console.warn("No se pudo descargar el JSON del snapshot:", err);
+  }
+}
+
 export default function Payroll() {
   const [tab, setTab] = useState("create"); // create | history
   const [loading, setLoading] = useState(true);
@@ -73,6 +95,10 @@ export default function Payroll() {
   const [selectedCycleIds, setSelectedCycleIds] = useState(loadSelection);
   const [step, setStep] = useState(1); // 1 = pick cycles, 2 = preview
   const [previewItems, setPreviewItems] = useState([]); // [{rut, name, accountNumber, bankCode, accountType, email, amount, include, _missing}]
+  // Cached source data from buildPreview, used to assemble the static snapshot
+  // when generateAndSave fires. Avoids re-querying workdays and advances.
+  const previewWorkdaysRef = useRef([]);
+  const previewAdvancesRef = useRef([]);
   const [busy, setBusy] = useState(false);
   const [payrollName, setPayrollName] = useState("");
 
@@ -199,6 +225,8 @@ export default function Payroll() {
       // Pull pending advances for everyone in this preview.
       const candidateRuts = aggregates.filter((a) => a.total > 0).map((a) => a.rut);
       const pendingAdvances = await listPendingForWorkers(candidateRuts);
+      previewWorkdaysRef.current = allWorkdays;
+      previewAdvancesRef.current = pendingAdvances;
       const advancesByRut = new Map();
       for (const adv of pendingAdvances) {
         const e = advancesByRut.get(adv.workerRut) || { anticipos: [], adelantos: [] };
@@ -404,24 +432,108 @@ export default function Payroll() {
       const allApplications = cleanItems.flatMap((p) => p.advanceApplications || []);
       const { bank: bankItems, cash: cashItems } = splitBankAndCash(cleanItems);
 
+      const total = cleanItems.reduce((s, x) => s + x.amount, 0);
+      const bankTotal = bankItems.reduce((s, x) => s + x.amount, 0);
+      const cashTotal = cashItems.reduce((s, x) => s + x.amount, 0);
+      const advanceTotalSum = cleanItems.reduce((s, x) => s + (Number(x.advance) || 0), 0);
+      const finalName = payrollName || payrollSuggestedName();
+
+      // Static snapshot: stores everything needed to re-render this payroll
+      // without further Firestore reads (workday detail + advance origins +
+      // labor configuration are embedded). Renders a static viewer page in
+      // the future without depending on live data that may have changed.
+      const wdIdSet = new Set(allWorkdayIds);
+      const advIdSet = new Set(allAdvanceIds);
+      const snapshot = {
+        version: 1,
+        generatedAt: new Date().toISOString(),
+        payroll: {
+          name: finalName,
+          format: "bchile",
+          status: "pending",
+          total, bankTotal, cashTotal,
+          workerCount: cleanItems.length,
+          bankCount: bankItems.length,
+          cashCount: cashItems.length,
+          advanceTotal: advanceTotalSum,
+        },
+        cycles: cycleDetails.map((cd) => {
+          const cycle = cycles.find((c) => c.id === cd.id);
+          return {
+            ...cd,
+            dayPrices: cycle?.dayPrices || {},
+            labors: (cycle?.labors || []).map((l) => ({
+              id: l.id, name: l.name, type: l.type,
+              cosechaMode: l.cosechaMode || null,
+              cosechaPrices: l.cosechaPrices || null,
+              tratoMode: l.tratoMode || null,
+              tratoTiers: l.tratoTiers || null,
+              tratoHEDailyAmount: l.tratoHEDailyAmount ?? null,
+              tratoHEOvertimeRate: l.tratoHEOvertimeRate ?? null,
+              tratoHEManejoAmount: l.tratoHEManejoAmount ?? null,
+              tratoHESupervisionAmount: l.tratoHESupervisionAmount ?? null,
+              normalDailyAmount: l.normalDailyAmount ?? null,
+            })),
+          };
+        }),
+        workers: cleanItems,
+        workdays: (previewWorkdaysRef.current || [])
+          .filter((wd) => wdIdSet.has(wd.id))
+          .map((wd) => ({
+            id: wd.id,
+            cycleId: wd.cycleId, laborId: wd.laborId,
+            workerRut: wd.workerRut, date: wd.date,
+            qty: wd.qty ?? null, amount: wd.amount ?? 0,
+            qualityX: wd.qualityX ?? null, containerY: wd.containerY ?? null,
+            tierKey: wd.tierKey ?? null, tiers: wd.tiers ?? null,
+            overtimeHours: wd.overtimeHours ?? null,
+            hasManejo: !!wd.hasManejo, hasSupervision: !!wd.hasSupervision,
+            extras: wd.extras ?? null, isHoliday: !!wd.isHoliday,
+          })),
+        advances: (previewAdvancesRef.current || [])
+          .filter((adv) => advIdSet.has(adv.id))
+          .map((adv) => ({
+            id: adv.id, workerRut: adv.workerRut,
+            type: adv.type, amount: Number(adv.amount) || 0,
+            amountPaid: Number(adv.amountPaid) || 0,
+            date: adv.date || null, note: adv.note || "",
+            status: adv.status || null,
+          })),
+      };
+
       const created = await payrollsService.create({
-        name: payrollName || payrollSuggestedName(),
+        name: finalName,
         format: "bchile",
         status: "pending",
         cycleIds,
         cycleLabels,
         cycleDetails,
         items: cleanItems,
-        total: cleanItems.reduce((s, x) => s + x.amount, 0),
-        bankTotal: bankItems.reduce((s, x) => s + x.amount, 0),
-        cashTotal: cashItems.reduce((s, x) => s + x.amount, 0),
+        total,
+        bankTotal,
+        cashTotal,
         workerCount: cleanItems.length,
         bankCount: bankItems.length,
         cashCount: cashItems.length,
         workdayIds: allWorkdayIds,
         advanceIds: allAdvanceIds,
-        advanceTotal: cleanItems.reduce((s, x) => s + (Number(x.advance) || 0), 0),
+        advanceTotal: advanceTotalSum,
+        hasSnapshot: true,
       });
+
+      // Persist the snapshot in its own collection, keyed by payrollId. Keeps
+      // the payrolls doc light for listing and stays under the 1MB per-doc
+      // limit for big nominas.
+      const fullSnapshot = { ...snapshot, payrollId: created.id };
+      try {
+        await payrollSnapshotsService.upsert(created.id, fullSnapshot);
+      } catch (err) {
+        console.warn("No se pudo guardar el snapshot en payrollSnapshots:", err);
+      }
+
+      // Immediate local download of the JSON file. Independent of the cloud
+      // save above so the user always gets a local copy.
+      downloadSnapshotJson(finalName, fullSnapshot);
 
       await tagWorkdaysWithPayroll(allWorkdayIds, created.id);
       await applyAdvancesToPayroll(allApplications, created.id);
@@ -469,6 +581,8 @@ export default function Payroll() {
     await untagWorkdaysFromPayroll(confirmDelete.workdayIds || []);
     await restoreAdvancesFromPayroll(confirmDelete.advanceIds || [], confirmDelete.id);
     await payrollsService.remove(confirmDelete.id);
+    // Best-effort cleanup of the snapshot. Old nominas may not have one.
+    try { await payrollSnapshotsService.remove(confirmDelete.id); } catch { /* noop */ }
     setConfirmDelete(null);
     await load();
   };
@@ -482,6 +596,31 @@ export default function Payroll() {
   const onDownloadNominaOnly = async (p) => {
     const filename = `${p.name || "Nomina"}_BChile`;
     await downloadNominaOnlyXlsx(p.items || [], filename);
+  };
+  // Re-download the static snapshot JSON for an existing payroll. Reads it
+  // from the payrollSnapshots collection; falls back to a legacy embedded
+  // `p.snapshot` field if the payroll was created before the split.
+  const onDownloadSnapshot = async (p) => {
+    try {
+      let snap = null;
+      try {
+        const doc = await payrollSnapshotsService.getById(p.id);
+        if (doc) {
+          // Strip the firestore-injected `id` field from the snapshot payload.
+          const { id: _omit, ...rest } = doc;
+          snap = rest;
+        }
+      } catch { /* noop */ }
+      if (!snap && p.snapshot) snap = { ...p.snapshot, payrollId: p.id };
+      if (!snap) {
+        alert("Esta nómina no tiene snapshot guardado (creada antes de la feature).");
+        return;
+      }
+      downloadSnapshotJson(p.name || "Nomina", snap);
+    } catch (err) {
+      console.error(err);
+      alert("No se pudo descargar el JSON.");
+    }
   };
 
   return (
@@ -551,6 +690,7 @@ export default function Payroll() {
           onAskDelete={setConfirmDelete}
           onRedownload={onRedownload}
           onDownloadNominaOnly={onDownloadNominaOnly}
+          onDownloadSnapshot={onDownloadSnapshot}
           onOpen={setDetailPayroll}
         />
       )}
@@ -577,6 +717,7 @@ export default function Payroll() {
           onClose={() => setDetailPayroll(null)}
           onRedownload={onRedownload}
           onDownloadNominaOnly={onDownloadNominaOnly}
+          onDownloadSnapshot={onDownloadSnapshot}
         />
       )}
     </div>
@@ -723,7 +864,7 @@ function PreviewTable({
     }
   };
   return (
-    <div className="flex flex-1 flex-col gap-3 overflow-hidden">
+    <div className="flex flex-1 flex-col gap-3">
       <div className="flex flex-wrap items-center gap-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3">
         <button
           onClick={onBack}
@@ -822,7 +963,8 @@ function PreviewTable({
         </div>
       </div>
 
-      <div className="flex-1 overflow-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">
+      <ResizableArea storageKey="payroll-preview" defaultHeight={420} minHeight={240}>
+      <div className="h-full overflow-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">
         <table className="w-full text-sm">
           <thead className="sticky top-0 bg-[var(--color-surface-2)] text-left">
             <tr>
@@ -938,10 +1080,11 @@ function PreviewTable({
           </tbody>
         </table>
       </div>
+      </ResizableArea>
 
       {cashGroups.length > 0 && (
-        <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
-          <div className="mb-2 text-sm font-semibold">💵 Efectivo agrupado por líder</div>
+        <div className="max-h-[32vh] shrink-0 overflow-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
+          <div className="mb-2 text-sm font-semibold">💵 Efectivo agrupado por líder ({cashGroups.length})</div>
           <div className="space-y-2 text-sm">
             {cashGroups.map((g) => (
               <div key={g.leader} className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] p-2">
@@ -1032,7 +1175,7 @@ function PayConfirmModal({ info, onCancel, onConfirm }) {
   );
 }
 
-function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedownload, onDownloadNominaOnly, onOpen }) {
+function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedownload, onDownloadNominaOnly, onDownloadSnapshot, onOpen }) {
   const isMobile = useIsMobile();
   const [statusFilter, setStatusFilter] = useState("all"); // all | pending | paid
   const [monthFilter, setMonthFilter] = useState("all"); // all | YYYY-MM
@@ -1181,6 +1324,13 @@ function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedow
                 >
                   📥 Completo
                 </button>
+                <button
+                  onClick={() => onDownloadSnapshot(p)}
+                  title="Descargar el JSON estático con toda la info para reconstruir esta nómina"
+                  className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
+                >
+                  📄 JSON
+                </button>
                 {p.status === "paid" ? (
                   <button
                     onClick={() => onMarkPending(p)}
@@ -1209,7 +1359,8 @@ function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedow
         )}
       </div>
     ) : (
-    <div className="flex-1 overflow-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">
+    <ResizableArea storageKey="payroll-history" defaultHeight={440} minHeight={240}>
+    <div className="h-full overflow-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">
       <table className="w-full text-sm">
         <thead className="sticky top-0 bg-[var(--color-surface-2)] text-left">
           <tr>
@@ -1276,6 +1427,13 @@ function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedow
                   >
                     📥 Completo
                   </button>
+                  <button
+                    onClick={() => onDownloadSnapshot(p)}
+                    title="Descargar el JSON estático con toda la info para reconstruir esta nómina"
+                    className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
+                  >
+                    📄 JSON
+                  </button>
                   {p.status === "paid" ? (
                     <button
                       onClick={() => onMarkPending(p)}
@@ -1305,6 +1463,7 @@ function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedow
         </tbody>
       </table>
     </div>
+    </ResizableArea>
     )}
     </div>
   );
@@ -2053,7 +2212,7 @@ async function printCashReceipts(payroll, cashGroups, titleOverrides = {}) {
   w.document.close();
 }
 
-function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOnly }) {
+function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOnly, onDownloadSnapshot }) {
   const items = payroll.items || [];
   const { bank, cash } = splitBankAndCash(items);
   const cashGroups = groupCashByLeader(cash);
@@ -2356,6 +2515,13 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
             className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-4 py-2 text-sm font-medium hover:bg-[var(--color-accent-soft)]"
           >
             🏦 Sólo Nómina
+          </button>
+          <button
+            onClick={() => onDownloadSnapshot(payroll)}
+            title="Descargar el JSON estático con toda la info para reconstruir esta nómina"
+            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-4 py-2 text-sm font-medium hover:bg-[var(--color-accent-soft)]"
+          >
+            📄 JSON
           </button>
           <button
             onClick={() => onRedownload(payroll)}

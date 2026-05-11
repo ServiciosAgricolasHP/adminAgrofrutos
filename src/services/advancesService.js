@@ -25,24 +25,26 @@ export const ADVANCE_TYPES = [
 export const advancesService = createService("advance", "advances");
 
 export async function listPendingForWorkers(workerRuts) {
-  // Firestore "in" supports up to 30 elements per query.
-  // Includes both "pending" and "partial" — both still have remaining balance.
+  // Firestore caps disjunctive normal form at 30. Two compound `in` filters
+  // multiply: 30 ruts × 2 statuses = 60 → too many disjunctions. We keep the
+  // workerRut chunk at 15 and filter status client-side to stay under the
+  // limit even if the status set grows in the future.
   const out = [];
   const seen = new Set();
   const ruts = [...new Set(workerRuts)].filter(Boolean);
-  for (let i = 0; i < ruts.length; i += 30) {
-    const chunk = ruts.slice(i, i + 30);
+  const PENDING_STATUSES = new Set(["pending", "partial"]);
+  for (let i = 0; i < ruts.length; i += 15) {
+    const chunk = ruts.slice(i, i + 15);
     const list = await advancesService.list({
-      wheres: [
-        ["workerRut", "in", chunk],
-        ["status", "in", ["pending", "partial"]],
-      ],
+      wheres: [["workerRut", "in", chunk]],
     });
     for (const a of list) {
-      if (!seen.has(a.id)) {
-        seen.add(a.id);
-        out.push(a);
-      }
+      if (seen.has(a.id)) continue;
+      // Legacy docs without a `status` field are treated as pending.
+      const st = a.status || "pending";
+      if (!PENDING_STATUSES.has(st)) continue;
+      seen.add(a.id);
+      out.push(a);
     }
   }
   return out;

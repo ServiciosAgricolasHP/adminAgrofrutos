@@ -17,6 +17,7 @@ import {
 import WorkerEditModal from "../components/WorkerEditModal";
 import WorkerSummaryModal from "../components/WorkerSummaryModal";
 import ConfirmDialog from "../components/ConfirmDialog";
+import ResizableArea from "../components/ResizableArea";
 import { useIsMobile } from "../hooks/useIsMobile";
 
 ModuleRegistry.registerModules([AllCommunityModule]);
@@ -277,9 +278,9 @@ export default function Workers() {
         </div>
       </div>
 
+      <ResizableArea storageKey="workers-grid" defaultHeight={460} minHeight={280}>
       <div
-        className={`flex-1 ${isMobile ? "" : "ag-theme-quartz ag-theme-app"}`}
-        style={{ minHeight: 400 }}
+        className={`h-full ${isMobile ? "" : "ag-theme-quartz ag-theme-app"}`}
       >
         {!queryReady ? (
           <div className="flex h-full items-center justify-center rounded-lg border border-dashed border-[var(--color-border)] text-sm text-[var(--color-muted)]">
@@ -383,6 +384,7 @@ export default function Workers() {
           />
         )}
       </div>
+      </ResizableArea>
 
       <WorkerEditModal
         open={!!edit}

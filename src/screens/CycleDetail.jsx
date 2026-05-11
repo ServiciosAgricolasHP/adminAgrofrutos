@@ -43,6 +43,7 @@ import Modal from "../components/Modal";
 import TextField from "../components/TextField";
 import Select from "../components/Select";
 import ConfirmDialog from "../components/ConfirmDialog";
+import ResizableArea from "../components/ResizableArea";
 import WorkerPickerModal from "../components/WorkerPickerModal";
 import TransportsModal from "../components/TransportsModal";
 import CycleSummaryModal from "../components/CycleSummaryModal";
@@ -371,11 +372,29 @@ export default function CycleDetail() {
 
       const wds = await workdaysService.list({ wheres: [["cycleId", "==", id]] });
       const byLabor = {};
+      const labors = normalized.labors || [];
       for (const w of wds) {
-        const lid = w.laborId || normalized.labors[0]?.id;
-        const x = Number(w.qualityX) || 0;
-        const y = Number(w.containerY) || 0;
-        const ck = makeComboKey(x, y);
+        const lid = w.laborId || labors[0]?.id;
+        // Derive the combo/tier key (ck) for the in-memory map. The docId
+        // encodes it as the optional 5th segment ("...__rut__date__ck"); when
+        // absent the doc was written with the implicit "0_0". Trato docs need
+        // their tier key (e.g. "t0", "t1") because the row builder looks them
+        // up that way — using qualityX/Y here yields "0_0" and silently hides
+        // every value in the grid. Legacy trato docs (no __tN suffix) are
+        // treated as tier 0.
+        const parts = String(w.id || "").split("__");
+        const laborForDoc = labors.find((l) => l.id === lid);
+        const isTrato = laborForDoc?.type === "trato";
+        let ck;
+        if (parts.length >= 5) {
+          ck = parts.slice(4).join("__");
+        } else if (isTrato) {
+          ck = "t0";
+        } else {
+          const x = Number(w.qualityX) || 0;
+          const y = Number(w.containerY) || 0;
+          ck = makeComboKey(x, y);
+        }
         if (!byLabor[lid]) byLabor[lid] = {};
         const normalizedWd = normalizeTratoWorkday(w);
         byLabor[lid][workdayMapKey(w.workerRut, w.date, ck)] = normalizedWd;
@@ -427,8 +446,19 @@ export default function CycleDetail() {
       const l = String(w.groupLeader?.[0] || "").trim().toUpperCase();
       if (l) m.set(w.id, l);
     }
+    // Temp workers live only inside labor.workers; their leader (if any) is
+    // stored as a plain string field on that entry rather than the array form
+    // used on the canonical worker doc. We walk every labor so the map is
+    // valid even if the active labor changes later.
+    for (const labor of cycle?.labors || []) {
+      for (const w of labor.workers || []) {
+        if (!w?.isTemp) continue;
+        const l = String(w.groupLeader || "").trim().toUpperCase();
+        if (l) m.set(w.rut, l);
+      }
+    }
     return m;
-  }, [allWorkers]);
+  }, [allWorkers, cycle]);
 
   const LEADER_LOCAL = "CHILENOS";
   const LEADER_FOREIGN = "EXTRANJEROS";
@@ -1363,7 +1393,13 @@ export default function CycleDetail() {
   const pickWorker = async (worker) => {
     if (workers.find((w) => w.rut === worker.rut)) { setPickerOpen(false); return; }
     const entry = { rut: worker.rut, name: worker.name };
-    if (worker.isTemp) entry.isTemp = true;
+    if (worker.isTemp) {
+      entry.isTemp = true;
+      // Temp workers don't have a row in the `worker` collection, so their
+      // leader is stored alongside the entry inside labor.workers and read
+      // back when building the per-leader group view.
+      if (worker.groupLeader) entry.groupLeader = String(worker.groupLeader).toUpperCase();
+    }
     await persistLabor({ ...activeLabor, workers: [...workers, entry] });
     setPickerOpen(false);
   };
@@ -2879,7 +2915,9 @@ export default function CycleDetail() {
             </div>
           )}
 
-          <div className="flex-1">{grid}</div>
+          <ResizableArea storageKey="cycle-detail-grid" defaultHeight={460} minHeight={280}>
+            {grid}
+          </ResizableArea>
         </>
       )}
 
@@ -3015,6 +3053,7 @@ export default function CycleDetail() {
         onPick={pickWorker}
         excludeRuts={workers.map((w) => w.rut)}
         allowTemp
+        availableLeaders={enabledLeaders}
       />
 
       <WorkerPickerModal
@@ -3024,6 +3063,7 @@ export default function CycleDetail() {
         excludeRuts={workers.filter((w) => w.rut !== assignTempRut).map((w) => w.rut)}
         allowTemp={false}
         title="Asignar RUT al trabajador temporal"
+        availableLeaders={enabledLeaders}
       />
 
       <ConfirmDialog
