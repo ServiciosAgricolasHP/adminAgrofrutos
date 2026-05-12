@@ -2,8 +2,10 @@ import { forwardRef, useEffect, useMemo, useRef, useState } from "react";
 import { toPng, toBlob } from "html-to-image";
 import Modal from "./Modal";
 import { workdayMapKey, getTratoTierTotals, containerLabel } from "../utils/cosechaCombos";
+import { DEFAULT_OVERTIME_RATE } from "../utils/tratoHE";
 import { cyclesService, faenasService, subfaenasService, workdaysService } from "../services";
 import { useCatalogs } from "../contexts/CatalogsContext";
+import { formatRutForDisplay } from "../utils/rutUtils";
 
 const fmtCurrency = (v) =>
   new Intl.NumberFormat("es-CL", { style: "currency", currency: "CLP", minimumFractionDigits: 0 }).format(
@@ -27,14 +29,33 @@ const titlesKey = (rut) => `worker_summary_titles_${rut}`;
 const loadTitles = (rut, defaultSubtitle) => {
   try {
     const raw = localStorage.getItem(titlesKey(rut));
-    if (raw) return { main: "DETALLE DE JORNADA", subtitle: defaultSubtitle, ...JSON.parse(raw) };
-  } catch {}
-  return { main: "DETALLE DE JORNADA", subtitle: defaultSubtitle };
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      return {
+        main: "DETALLE DE JORNADA",
+        subtitle: defaultSubtitle,
+        cycles: {},
+        ...parsed,
+        cycles: parsed.cycles || {},
+      };
+    }
+  } catch {
+    /* noop */
+  }
+  return { main: "DETALLE DE JORNADA", subtitle: defaultSubtitle, cycles: {} };
 };
 const saveTitles = (rut, titles) => {
-  try { localStorage.setItem(titlesKey(rut), JSON.stringify(titles)); } catch {}
+  try { localStorage.setItem(titlesKey(rut), JSON.stringify(titles)); } catch {
+    /* noop */
+  }
 };
 
+// Título por defecto de un ciclo (lo que se muestra si el usuario no editó nada).
+const defaultCycleTitle = ({ faena, subfaena, cycle }) =>
+  [faena?.name, subfaena?.name, cycle.label].filter(Boolean).join(" · ");
+
+// Mapea cada tipo de labor a los acumuladores que tiene sentido reportar.
+// El resto se deja en 0 y la tabla esconde la columna si nadie aportó.
 function buildCycleRows(workerRut, cycle, workdaysByLabor, catalogs) {
   const rows = [];
   for (const labor of cycle.labors || []) {
@@ -47,8 +68,14 @@ function buildCycleRows(workerRut, cycle, workdaysByLabor, catalogs) {
       if (!byDate.has(d)) byDate.set(d, []);
       byDate.get(d).push(wd);
     }
+    const heRate = Number(labor.overtimeRate) || DEFAULT_OVERTIME_RATE;
     for (const [d, wds] of [...byDate.entries()].sort(([a], [b]) => (a < b ? -1 : 1))) {
-      let kilos = 0, jornadas = 0, amount = 0;
+      let kilos = 0;
+      let jornadas = 0;
+      let tratoQty = 0;
+      let overtimeHours = 0;
+      let heAmount = 0;
+      let amount = 0;
       const containers = new Set();
       for (const wd of wds) {
         if (labor.type === "cosecha") {
@@ -57,12 +84,16 @@ function buildCycleRows(workerRut, cycle, workdaysByLabor, catalogs) {
           if (wd.containerY != null) containers.add(Number(wd.containerY));
         } else if (labor.type === "trato") {
           const t = getTratoTierTotals(wd);
-          jornadas += t.qty;
+          tratoQty += t.qty;
           amount += t.amount;
         } else if (labor.type === "tratoHE") {
           jornadas += Number(wd.qty) || 0;
+          const oh = Number(wd.overtimeHours) || 0;
+          overtimeHours += oh;
+          heAmount += oh * heRate;
           amount += Number(wd.amount) || 0;
         } else {
+          // main, supervision, extra → pago al día (1 jornada)
           jornadas += 1;
           amount += Number(wd.amount) || 0;
         }
@@ -75,6 +106,9 @@ function buildCycleRows(workerRut, cycle, workdaysByLabor, catalogs) {
         date: d,
         kilos,
         jornadas,
+        tratoQty,
+        overtimeHours,
+        heAmount,
         amount,
       });
     }
@@ -126,18 +160,31 @@ export default function WorkerSummaryModal({ open, onClose, worker }) {
             wdMap[wd.laborId][k] = wd;
           }
           const rows = buildCycleRows(worker.id, c, wdMap, catalogs);
-          let kilos = 0, jornadas = 0, amount = 0;
-          for (const r of rows) {
-            kilos += r.kilos;
-            jornadas += r.jornadas;
-            amount += r.amount;
-          }
+          const totals = rows.reduce(
+            (acc, r) => ({
+              kilos: acc.kilos + r.kilos,
+              jornadas: acc.jornadas + r.jornadas,
+              tratoQty: acc.tratoQty + r.tratoQty,
+              overtimeHours: acc.overtimeHours + r.overtimeHours,
+              heAmount: acc.heAmount + r.heAmount,
+              amount: acc.amount + r.amount,
+            }),
+            { kilos: 0, jornadas: 0, tratoQty: 0, overtimeHours: 0, heAmount: 0, amount: 0 },
+          );
+          // Columnas a mostrar: solo las que tienen al menos un valor > 0.
+          const cols = {
+            kilos: rows.some((r) => r.kilos > 0),
+            jornadas: rows.some((r) => r.jornadas > 0),
+            he: rows.some((r) => r.overtimeHours > 0),
+            trato: rows.some((r) => r.tratoQty > 0),
+          };
           return {
             cycle: c,
             faena: faenaById.get(c.faenaId),
             subfaena: subById.get(c.subfaenaId),
             rows,
-            totals: { kilos, jornadas, amount },
+            totals,
+            cols,
           };
         });
         result.sort((a, b) => (a.cycle.label || "").localeCompare(b.cycle.label || ""));
@@ -248,23 +295,55 @@ export default function WorkerSummaryModal({ open, onClose, worker }) {
       </div>
 
       {showTitleEditor && (
-        <div className="mb-3 grid gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] p-3 md:grid-cols-2">
-          <label className="block">
-            <span className="block text-[10px] text-[var(--color-muted)]">Título principal</span>
-            <input
-              value={titles.main || ""}
-              onChange={(e) => updateTitles({ main: e.target.value })}
-              className="w-full rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-sm outline-none focus:border-[var(--color-accent)]"
-            />
-          </label>
-          <label className="block">
-            <span className="block text-[10px] text-[var(--color-muted)]">Subtítulo (nombre formal)</span>
-            <input
-              value={titles.subtitle || ""}
-              onChange={(e) => updateTitles({ subtitle: e.target.value })}
-              className="w-full rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-sm outline-none focus:border-[var(--color-accent)]"
-            />
-          </label>
+        <div className="mb-3 space-y-2 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] p-3">
+          <div className="grid gap-2 md:grid-cols-2">
+            <label className="block">
+              <span className="block text-[10px] text-[var(--color-muted)]">Título principal</span>
+              <input
+                value={titles.main || ""}
+                onChange={(e) => updateTitles({ main: e.target.value })}
+                className="w-full rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-sm outline-none focus:border-[var(--color-accent)]"
+              />
+            </label>
+            <label className="block">
+              <span className="block text-[10px] text-[var(--color-muted)]">Subtítulo (nombre formal)</span>
+              <input
+                value={titles.subtitle || ""}
+                onChange={(e) => updateTitles({ subtitle: e.target.value })}
+                className="w-full rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-sm outline-none focus:border-[var(--color-accent)]"
+              />
+            </label>
+          </div>
+          {data.length > 0 && (
+            <div className="space-y-1.5 border-t border-[var(--color-border)] pt-2">
+              <div className="text-[10px] uppercase tracking-wide text-[var(--color-muted)]">
+                Encabezado por ciclo
+              </div>
+              {data.map(({ cycle, faena, subfaena }) => {
+                const fallback = defaultCycleTitle({ faena, subfaena, cycle });
+                const current = titles.cycles?.[cycle.id] ?? "";
+                return (
+                  <label key={cycle.id} className="block">
+                    <input
+                      value={current}
+                      placeholder={fallback}
+                      onChange={(e) => {
+                        const next = { ...(titles.cycles || {}) };
+                        const v = e.target.value;
+                        if (v) next[cycle.id] = v;
+                        else delete next[cycle.id];
+                        updateTitles({ cycles: next });
+                      }}
+                      className="w-full rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-sm outline-none focus:border-[var(--color-accent)]"
+                    />
+                  </label>
+                );
+              })}
+              <p className="text-[10px] text-[var(--color-muted)]">
+                Dejar vacío para usar el encabezado por defecto (faena · subfaena · ciclo).
+              </p>
+            </div>
+          )}
         </div>
       )}
 
@@ -288,71 +367,128 @@ const PrintableWorkerSummary = forwardRef(function PrintableWorkerSummary({ work
         <div style={{ textAlign: "center" }}>
           <div style={{ fontWeight: 700, fontSize: 18, letterSpacing: 1 }}>{titles?.main || "DETALLE DE JORNADA"}</div>
           {titles?.subtitle && <div style={{ marginTop: 6, fontSize: 14 }}>{titles.subtitle}</div>}
+          {worker?.id && (
+            <div style={{ marginTop: 2, fontSize: 12, color: "#444", fontFamily: "ui-monospace, monospace" }}>
+              RUT {formatRutForDisplay(worker.id)}
+            </div>
+          )}
           <div style={{ marginTop: 4, fontSize: 11, color: "#666" }}>Ciclos activos</div>
         </div>
         <div style={{ width: 90 }} />
       </div>
 
-      {data.map(({ cycle, faena, subfaena, rows, totals }) => (
-        <div key={cycle.id} style={{ marginBottom: 16 }}>
-          <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 4 }}>
-            {[faena?.name, subfaena?.name, cycle.label].filter(Boolean).join(" · ")}
-          </div>
-          <table style={{ borderCollapse: "collapse", width: "100%" }}>
-            <thead>
-              <tr style={{ background: "#9dc3e6" }}>
-                <th style={cellH}>Detalle Jornada</th>
-                <th style={cellH}>Fecha</th>
-                <th style={{ ...cellH, textAlign: "right" }}>Kilos</th>
-                <th style={{ ...cellH, textAlign: "right" }}>Jornadas</th>
-                <th style={{ ...cellH, textAlign: "right" }}>Precio</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.length === 0 ? (
-                <tr><td style={{ ...cell, color: "#666", textAlign: "center" }} colSpan={5}>Sin movimientos</td></tr>
-              ) : rows.map((r, i) => (
-                <tr key={i}>
-                  <td style={cell}>{r.laborName}</td>
-                  <td style={cell}>{dateLabel(r.date)}</td>
-                  <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{r.kilos > 0 ? fmtNumber(r.kilos) : ""}</td>
-                  <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{r.jornadas > 0 ? fmtNumber(r.jornadas) : ""}</td>
-                  <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(r.amount)}</td>
+      {data.map(({ cycle, faena, subfaena, rows, totals, cols }) => {
+        // Helper local para que los totales caigan en la columna correcta.
+        // valueCol = "kilos" | "jornadas" | "he" | "trato" | "amount"
+        const renderTotalRow = (label, value, valueCol, bg) => (
+          <tr style={bg ? { background: bg } : undefined}>
+            <td style={cell}></td>
+            <td style={{ ...cell, fontWeight: 700 }}>{label}</td>
+            {cols.kilos && (
+              <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
+                {valueCol === "kilos" ? value : ""}
+              </td>
+            )}
+            {cols.jornadas && (
+              <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
+                {valueCol === "jornadas" ? value : ""}
+              </td>
+            )}
+            {cols.he && (
+              <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
+                {valueCol === "he" ? value : ""}
+              </td>
+            )}
+            {cols.trato && (
+              <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
+                {valueCol === "trato" ? value : ""}
+              </td>
+            )}
+            <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
+              {valueCol === "amount" ? value : ""}
+            </td>
+          </tr>
+        );
+        const totalColSpan =
+          2 + (cols.kilos ? 1 : 0) + (cols.jornadas ? 1 : 0) + (cols.he ? 1 : 0) + (cols.trato ? 1 : 0) + 1;
+
+        const cycleTitle =
+          (titles?.cycles && titles.cycles[cycle.id]) ||
+          defaultCycleTitle({ faena, subfaena, cycle });
+        return (
+          <div key={cycle.id} style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 4 }}>{cycleTitle}</div>
+            <table style={{ borderCollapse: "collapse", width: "100%" }}>
+              <thead>
+                <tr style={{ background: "#9dc3e6" }}>
+                  <th style={cellH}>Detalle Jornada</th>
+                  <th style={cellH}>Fecha</th>
+                  {cols.kilos && <th style={{ ...cellH, textAlign: "right" }}>Kilos</th>}
+                  {cols.jornadas && <th style={{ ...cellH, textAlign: "right" }}>Jornadas</th>}
+                  {cols.he && <th style={{ ...cellH, textAlign: "right" }}>HE</th>}
+                  {cols.trato && <th style={{ ...cellH, textAlign: "right" }}>Trato</th>}
+                  <th style={{ ...cellH, textAlign: "right" }}>Precio</th>
                 </tr>
-              ))}
-              {rows.length > 0 && (
-                <>
-                  {totals.kilos > 0 && (
-                    <tr>
-                      <td style={cell}></td>
-                      <td style={{ ...cell, fontWeight: 700 }}>Total Kilos</td>
-                      <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtNumber(totals.kilos)}</td>
-                      <td style={cell}></td>
-                      <td style={cell}></td>
-                    </tr>
-                  )}
-                  {totals.jornadas > 0 && (
-                    <tr>
-                      <td style={cell}></td>
-                      <td style={{ ...cell, fontWeight: 700 }}>Total Jornadas</td>
-                      <td style={cell}></td>
-                      <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtNumber(totals.jornadas)}</td>
-                      <td style={cell}></td>
-                    </tr>
-                  )}
-                  <tr style={{ background: "#c6efce" }}>
-                    <td style={cell}></td>
-                    <td style={{ ...cell, fontWeight: 700 }}>Subtotal ciclo</td>
-                    <td style={cell}></td>
-                    <td style={cell}></td>
-                    <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(totals.amount)}</td>
+              </thead>
+              <tbody>
+                {rows.length === 0 ? (
+                  <tr>
+                    <td style={{ ...cell, color: "#666", textAlign: "center" }} colSpan={totalColSpan}>
+                      Sin movimientos
+                    </td>
                   </tr>
-                </>
-              )}
-            </tbody>
-          </table>
-        </div>
-      ))}
+                ) : (
+                  rows.map((r, i) => (
+                    <tr key={i}>
+                      <td style={cell}>{r.laborName}</td>
+                      <td style={cell}>{dateLabel(r.date)}</td>
+                      {cols.kilos && (
+                        <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                          {r.kilos > 0 ? fmtNumber(r.kilos) : ""}
+                        </td>
+                      )}
+                      {cols.jornadas && (
+                        <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                          {r.jornadas > 0 ? fmtNumber(r.jornadas) : ""}
+                        </td>
+                      )}
+                      {cols.he && (
+                        <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                          {r.overtimeHours > 0
+                            ? `${fmtNumber(r.overtimeHours)}h · ${fmtCurrency(r.heAmount)}`
+                            : ""}
+                        </td>
+                      )}
+                      {cols.trato && (
+                        <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                          {r.tratoQty > 0 ? fmtNumber(r.tratoQty) : ""}
+                        </td>
+                      )}
+                      <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                        {fmtCurrency(r.amount)}
+                      </td>
+                    </tr>
+                  ))
+                )}
+                {rows.length > 0 && (
+                  <>
+                    {cols.kilos && renderTotalRow("Total Kilos", fmtNumber(totals.kilos), "kilos")}
+                    {cols.jornadas && renderTotalRow("Total Jornadas", fmtNumber(totals.jornadas), "jornadas")}
+                    {cols.he &&
+                      renderTotalRow(
+                        "Total HE",
+                        `${fmtNumber(totals.overtimeHours)}h · ${fmtCurrency(totals.heAmount)}`,
+                        "he",
+                      )}
+                    {cols.trato && renderTotalRow("Total Trato", fmtNumber(totals.tratoQty), "trato")}
+                    {renderTotalRow("Subtotal ciclo", fmtCurrency(totals.amount), "amount", "#c6efce")}
+                  </>
+                )}
+              </tbody>
+            </table>
+          </div>
+        );
+      })}
 
       {data.length > 1 && (
         <table style={{ borderCollapse: "collapse", width: "100%", marginTop: 8 }}>
