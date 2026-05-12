@@ -41,10 +41,15 @@ Período de trabajo en una subfaena. Contiene labores anidadas y la matriz de pr
 | `days` | string[] | fechas YYYY-MM-DD |
 | `labors` | `Labor[]` | embebido (ver abajo) |
 | `dayPrices` | `{ [laborId]: { [date]: PriceEntry } }` | combos/tiers |
+| `dayNotes` | `{ [date]: string }` | anotación compartida del día (click sobre el header) |
 
 `Labor` (embebido en `cycles.labors`):
 - `id`, `name`, `type` (`cosecha` \| `trato` \| `tratoHE` \| `main` \| `supervision` \| `extra`)
-- `workers: string[]` — RUTs
+- `workers: WorkerEntry[]` — referencias al trabajador, no solo RUT:
+  - `rut`, `name`
+  - `isTemp?: bool` — trabajador temporal (sin RUT real); convertirlo via "Asignar RUT"
+  - `groupLeader?: string` — solo para temps (los reales lo tienen en `worker.groupLeader`)
+  - `monthly?: bool` — sueldo mensual: las celdas pasan a checkbox de asistencia, workdays con `amount: 0` y `attendanceOnly: true`, excluidos de la nómina, badge "M"
 - `baseDayDefault?`, `bonusManejo?`, `bonusSupervision?`, `overtimeRate?`
 
 ### `worker` (singular en Firestore)
@@ -73,6 +78,9 @@ Una fila por (cycleId × laborId × workerRut × date). Es la tabla "transaccion
 | `payrollId` | ref→`payrolls` \| null | tag al liquidar |
 | `payrollTaggedAt`, `payrollTaggedBy` | ts, string? | |
 | `paidAt`, `paidBy` | ts?, string? | sello al marcar pagado |
+| `attendanceOnly` | bool? | `true` para asistencia de trabajador mensual (amount = 0, no entra al payroll) |
+| `tiers` | `{ [tierKey]: { qty, amount } }` | trato multi-precio; suma con `getTratoTierTotals(wd)` |
+| `overtimeHours`, `hasManejo`, `hasSupervision`, `extras` | number? / bool? | solo `tratoHE` |
 
 ### `payrolls`
 Nómina = lote de pago. Agrupa `workdayIds` y `advanceIds`.
@@ -97,6 +105,30 @@ Nómina = lote de pago. Agrupa `workdayIds` y `advanceIds`.
 - `amount`, `advance`, `anticiposTotal`, `adelantosTotal`
 - `byCycle: { [cycleId]: {...} }`
 - `workdayIds: string[]`, `advanceIds: string[]`
+
+### `payrollSnapshots`
+Snapshot JSON inmutable de cada nómina, separado del documento de `payrolls` para no engordar la lista. Lo escribe la app al generar la nómina y lo consume el **portal de trabajadores** (read-only) para construir su resumen.
+| Campo | Tipo | Notas |
+|---|---|---|
+| `id` (docId) | string | mismo id de la `payroll` (1:1) |
+| `payrollId` | ref→`payrolls` | |
+| `generatedAt` | string (ISO) | |
+| `name`, `format`, `status` | string | snapshot de la payroll |
+| `cycleIds`, `cycleLabels`, `cycleDetails` | snapshot | |
+| `items` | `PayrollItem[]` | trabajadores + amounts (mismo shape que `payrolls.items`) |
+| `total`, `bankTotal`, `cashTotal`, `advanceTotal` | number | |
+| `workerCount`, `bankCount`, `cashCount` | number | |
+
+> Se descarga como `.json` al generar y se puede volver a bajar desde la fila del historial ("📥 JSON").
+
+### `interestLinks`
+Atajos a herramientas externas mostrados en `/links`. CRUD con reordenamiento drag-and-drop.
+| Campo | Tipo | Notas |
+|---|---|---|
+| `id` (docId) | string | autoId |
+| `text` | string | etiqueta visible |
+| `url` | string | URL normalizada (`https://...`) |
+| `order` | number? | índice ascendente; sin valor → ordena al final alfabéticamente |
 
 ### `advances`
 Anticipos / adelantos. Se aplican contra una nómina.

@@ -62,6 +62,12 @@ src/
 - Para batched updates usar `writeBatch(db)` directo (chunks de 450 — el límite Firestore es 500).
 - Nuevos servicios: agregar a `services/index.js` exports si son consumidos transversalmente.
 
+### Caché aditiva
+
+- `firestoreBase` soporta `additive: true` en `create`/`update`/`upsert`/`remove` — en vez de invalidar la entrada de caché correspondiente, la **muta in-place** (append / patch / filter). Útil cuando una colección se lista entera (sin `wheres`) y la queremos mantener fresca sin pagar el costo de re-leer todos los docs.
+- `workersService` (en `services/index.js`) está envuelto para usar `additive: true` por defecto en todas las mutaciones — alta de trabajador no invalida la lista en caché.
+- Helpers internos: `mergeListItem`, `removeListItem` (sólo tocan claves de caché con `wheres` vacío).
+
 ### Contexts
 
 - Orden en `App.jsx`: `ThemeProvider` → `AuthProvider` → `CatalogsProvider` → `CarriersProvider` → `BrowserRouter`.
@@ -116,6 +122,19 @@ El tag `main` se renderiza como **"al día"** en métricas y tabs.
 - Estados: `open` | `closed`. Solo un ciclo abierto por (faena, subfaena).
 - `CycleRow` permite **✏ Renombrar**, abrir, cerrar y eliminar.
 
+### CycleDetail — grid
+
+- **Undo (Ctrl+Z)**: stack en memoria (`undoStackRef`), pushea cada edición de celda, revierte y re-graba en Firestore.
+- **Navegación tipo Excel**: `singleClickEdit: false`. Flechas mueven el foco entre celdas; **Enter** entra a editar; al confirmar, salta a la fila siguiente (`enterNavigatesVertically*: true`).
+- **Resize del grid**: barra arrastrable (`useResizableHeight` + `<ResizeHandle>`) persistida en `localStorage`. Implementado con **Pointer Events + `setPointerCapture`** sobre el handle (no listeners en window — sino ag-grid se traga los eventos). Hijos decorativos usan `pointer-events-none`.
+- **Secciones colapsables** persistidas en `localStorage` para liberar espacio vertical: métricas (`cycleDetail.metricsCollapsed`), precios (`cycleDetail.pricesCollapsed`), sidebar global (`layout.sidebarOpen`).
+- **Anotación por día**: click sobre el header de la fecha → modal que edita `cycle.dayNotes[date]`. Hover sobre el header muestra el texto. Compartida entre todas las labores del ciclo.
+- **Trabajadores temporales**: alta sin RUT (`isTemp: true` dentro de `labor.workers`). Aparecen con badge "T" y botón "Asignar RUT" que los reemplaza por el RUT real preservando los workdays.
+- **Sueldo mensual por trabajador-ciclo**: toggle "M" en la fila de la labor → guarda `monthly: true` en `labor.workers[i]`. Las celdas pasan a checkbox de asistencia (`amount: 0`, `attendanceOnly: true`); excluidos de la nómina; badge verde "M".
+- **`rutToName`**: las celdas del grid muestran el nombre desde un map derivado del cache de workers, no desde el snapshot del ciclo — editar el nombre en `/workers` se refleja sin recargar.
+- **Loader de workdays trato**: `ck` se deriva del docId, no del payload. 5 segmentos → `ck = parts.slice(4).join("__")`; 4 segmentos + labor trato → `"t0"`; resto → `makeComboKey(qualityX, qualityY)`.
+- **Diálogos**: nunca usar `window.prompt/confirm/alert` dentro del grid — usar `<Modal>` + `<ConfirmDialog>` para mantener el estilo.
+
 ## Transports / Transporte
 
 - Pantalla: `src/screens/Transports.jsx` — 4 pestañas:
@@ -144,7 +163,8 @@ El tag `main` se renderiza como **"al día"** en métricas y tabs.
 ### Líder de grupo — estricto
 
 - `worker.groupLeader` es un array (historial); `groupLeader[0]` es el líder actual.
-- Edición del trabajador: el campo es **dropdown** con líderes existentes + opción "+ Crear nuevo líder" que requiere acción explícita.
+- Lista curada en la colección **`groupLeader`** (`groupLeadersService`) — `{ name, habilitado }`. La idea es no dejar que la lista crezca con valores ad-hoc.
+- Edición del trabajador: el campo es **dropdown** con líderes existentes (filtrados por `habilitado: true`) + opción "+ Crear nuevo líder" que requiere acción explícita.
 - Al guardar: si el valor no está en la lista de líderes existentes y no se eligió "crear nuevo", error.
 - En Payroll preview el líder es **read-only** (estrictamente lo del worker).
 
@@ -161,7 +181,22 @@ El tag `main` se renderiza como **"al día"** en métricas y tabs.
    - Filtros: 🏦 Banco, 💵 Efectivo, ⚠ Datos faltantes, ⚠ Cuenta sospechosa, 👥 \<líder\>.
    - Bulk actions sobre el subset visible: incluir/excluir, → Efectivo / → Banco.
    - Columnas: Bruto (read-only), Anticipo (editable), A pagar (= bruto − anticipo, override manual), Pago (toggle banco/efectivo).
-3. **Generar y guardar** — crea la nómina, etiqueta workdays con `payrollId`, marca anticipos como `applied`.
+3. **Generar y guardar** — crea la nómina, etiqueta workdays con `payrollId`, marca anticipos como `applied`, y escribe un **snapshot JSON** inmutable en `payrollSnapshots/{payrollId}` que se auto-descarga.
+
+### Snapshot JSON (`payrollSnapshots`)
+
+- Colección separada de `payrolls` para no inflar los docs del historial.
+- Lo escribe `payrollSnapshotsService` en el mismo flujo de "Generar y guardar".
+- Botón **📥 JSON** en la fila del historial vuelve a bajar el archivo.
+- Es la fuente que va a consumir el **portal público de trabajadores** (otra app, monorepo futuro). El schema debe considerarse contrato externo — cambiarlo coordinadamente.
+
+### Anticipos en comprobantes
+
+- En el resumen **individual** del comprobante (no en el resumen por grupo), si **algún** trabajador del grupo trae `advance > 0`, se renderiza una columna **Anticipo** entre los ciclos y el TOTAL.
+- Filas: monto en color tierra `#b45309` con signo "−" o "—" cuando es 0.
+- Subtotal: suma de anticipos del grupo, mismo formato.
+- Gate: `groupHasAdvance = g.items.some((it) => Number(it.advance) > 0)` — si nadie del grupo descontó, la columna no se renderiza.
+- Aplica tanto en modo "cash" (`rows`) como en modo "detail" (`rowsNoSign`).
 
 ### Anti doble pago
 
@@ -220,6 +255,18 @@ Botones de descarga:
 - `Components/WorkerSummaryModal.jsx` — multi-ciclo activo, day-by-day, títulos editables (`worker_summary_titles_${rut}`).
 - Ambos: logo desde `${import.meta.env.BASE_URL}logo.png`, modo foto (copiar imagen, descargar PNG, imprimir con `print-color-adjust: exact`).
 
+## Links útiles
+
+- Pantalla: `src/screens/InterestLinks.jsx`. Ruta `/links`.
+- Servicio: `interestLinksService` (colección `interestLinks`).
+- CRUD simple con drag-and-drop nativo (HTML5) para reordenar. El orden se persiste en el campo `order` por documento.
+- Helper `normalizeUrl` agrega `https://` si falta; `safeHost` extrae el host para mostrar como subtítulo.
+
+## Layout
+
+- **Sidebar colapsable** (`layout.sidebarOpen` en `localStorage`): un solo botón ☰ funciona como toggle en desktop y abre drawer en mobile (decidido por `matchMedia("(min-width: 768px)")`).
+- Nav incluye: Dashboard, Faenas, Trabajadores, Transportes, Anticipos, Nómina, Links útiles. Items admin (Auditoría, Migrar CSV, Limpiar pagados) se ven solo con `isAdmin`.
+
 ## Env
 
 - `.env` ignorado en git pero necesita credenciales de Firebase.
@@ -228,13 +275,16 @@ Botones de descarga:
 ## Rutas / Routes
 
 ```
-/                     Dashboard
-/login                Login (Email/Password)
-/faenas               Faenas / Subfaenas / Ciclos
-/cycles/:id           CycleDetail
-/workers              Trabajadores
-/transports           Transportes
-/advances             Anticipos / Adelantos
-/payroll              Nómina
-/audit                Auditoría (admin only)
+/                              Dashboard
+/login                         Login (Email/Password)
+/faenas                        Faenas / Subfaenas / Ciclos
+/cycles/:id                    CycleDetail
+/workers                       Trabajadores
+/transports                    Transportes
+/advances                      Anticipos / Adelantos
+/payroll                       Nómina
+/links                         Links útiles
+/audit                         Auditoría (admin only)
+/admin/migrate-workers         Importar trabajadores desde CSV (admin)
+/admin/cleanup-paid-workdays   Limpieza de workdays ya pagados (admin)
 ```

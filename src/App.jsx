@@ -16,6 +16,7 @@ import Payroll from "./screens/Payroll";
 import Advances from "./screens/Advances";
 import MigrateWorkers from "./screens/MigrateWorkers";
 import CleanupPaidWorkdays from "./screens/CleanupPaidWorkdays";
+import InterestLinks from "./screens/InterestLinks";
 
 export default function App() {
   return (
@@ -40,6 +41,7 @@ export default function App() {
                 <Route path="transports" element={<Transports />} />
                 <Route path="payroll" element={<Payroll />} />
                 <Route path="advances" element={<Advances />} />
+                <Route path="links" element={<InterestLinks />} />
                 <Route
                   path="audit"
                   element={

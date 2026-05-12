@@ -10,6 +10,7 @@ const navItems = [
   { to: "/transports", label: "Transportes", icon: "🚛" },
   { to: "/advances", label: "Anticipos", icon: "🪙" },
   { to: "/payroll", label: "Nómina", icon: "💰" },
+  { to: "/links", label: "Links útiles", icon: "🔗" },
 ];
 
 function ThemePicker() {
@@ -67,11 +68,29 @@ export default function Layout() {
   const navigate = useNavigate();
   const location = useLocation();
   const [drawerOpen, setDrawerOpen] = useState(false);
+  // Desktop sidebar collapsed state, persisted between sessions. Hidden
+  // entirely when collapsed to give the main content the full viewport width.
+  const [sidebarOpen, setSidebarOpen] = useState(() => {
+    try { return localStorage.getItem("layout.sidebarOpen") !== "false"; } catch { return true; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("layout.sidebarOpen", String(sidebarOpen)); } catch { /* noop */ }
+  }, [sidebarOpen]);
 
   // Auto-close drawer on route change
   useEffect(() => {
     setDrawerOpen(false);
   }, [location.pathname]);
+
+  // Single button handles both mobile drawer and desktop collapse depending
+  // on viewport width so the user only has to learn one control.
+  const onMenuClick = () => {
+    if (typeof window !== "undefined" && window.matchMedia("(min-width: 768px)").matches) {
+      setSidebarOpen((o) => !o);
+    } else {
+      setDrawerOpen(true);
+    }
+  };
 
   const handleLogout = async () => {
     await logout();
@@ -123,7 +142,7 @@ export default function Layout() {
   return (
     <div className="flex h-screen bg-[var(--color-bg)] text-[var(--color-text)]">
       {/* Desktop sidebar */}
-      <aside className="hidden w-60 flex-col border-r border-[var(--color-border)] bg-[var(--color-surface)] md:flex">
+      <aside className={`hidden w-60 flex-col border-r border-[var(--color-border)] bg-[var(--color-surface)] ${sidebarOpen ? "md:flex" : ""}`}>
         {sidebarContent}
       </aside>
 
@@ -145,9 +164,10 @@ export default function Layout() {
         <header className="flex h-14 items-center justify-between gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3 sm:px-4">
           <div className="flex items-center gap-2 min-w-0">
             <button
-              onClick={() => setDrawerOpen(true)}
-              aria-label="Abrir menú"
-              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1.5 text-sm hover:bg-[var(--color-accent-soft)] md:hidden"
+              onClick={onMenuClick}
+              aria-label={sidebarOpen ? "Ocultar barra lateral" : "Mostrar barra lateral"}
+              title={sidebarOpen ? "Ocultar barra lateral" : "Mostrar barra lateral"}
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1.5 text-sm hover:bg-[var(--color-accent-soft)]"
             >
               ☰
             </button>

@@ -2,17 +2,10 @@ import { useEffect, useRef, useState } from "react";
 
 const STORAGE_PREFIX = "af.gridHeight.";
 
-// Wraps a grid/table area in a fixed-height container with a drag handle
-// below it. The user can drag the handle vertically to grow or shrink the
-// area; the chosen height is persisted in localStorage keyed by `storageKey`
-// so it sticks between sessions. Heights are clamped to [minHeight,
-// (viewport - 120px)] to keep the page usable.
-export default function ResizableArea({
-  storageKey,
-  defaultHeight = 500,
-  minHeight = 240,
-  children,
-}) {
+// Headless hook for components that need to expose the resize control somewhere
+// other than directly under the grid (e.g. a toolbar). Returns the current
+// height, a drag-start handler and a reset helper; pair it with <ResizeHandle>.
+export function useResizableHeight(storageKey, defaultHeight = 500, minHeight = 240) {
   const computeMax = () => Math.max(minHeight + 100, window.innerHeight - 120);
 
   const [height, setHeight] = useState(() => {
@@ -30,50 +23,102 @@ export default function ResizableArea({
     try { localStorage.setItem(STORAGE_PREFIX + storageKey, String(height)); } catch { /* noop */ }
   }, [height, storageKey]);
 
+  // Mutable drag state. Kept in a ref so the pointermove/pointerup listeners
+  // (attached imperatively in onPointerDown) always see fresh values even if
+  // React re-renders mid-drag.
+  const dragRef = useRef(null);
+
+  // Pointer Events with setPointerCapture: the most reliable cross-device
+  // approach. We capture the pointer on the handle DOM node itself, which
+  // routes every subsequent pointermove/pointerup to that node regardless of
+  // what the cursor is hovering over (ag-grid, popovers, iframes, etc.). No
+  // window listeners means nothing else on the page can swallow the events.
   const onPointerDown = (e) => {
-    e.preventDefault();
+    // Only react to primary button on mouse; touch/pen have button === 0 too
+    if (e.button !== undefined && e.button !== 0) return;
+    const target = e.currentTarget;
+    if (!target) return;
+
     const startY = e.clientY;
     const startH = heightRef.current;
     const max = computeMax();
-    const onMove = (ev) => {
+
+    try { target.setPointerCapture(e.pointerId); } catch { /* noop */ }
+
+    const move = (ev) => {
       const next = Math.max(minHeight, Math.min(max, startH + (ev.clientY - startY)));
       setHeight(next);
     };
-    const stop = () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", stop);
-      window.removeEventListener("pointercancel", stop);
+    const stop = (ev) => {
+      try { target.releasePointerCapture(ev.pointerId); } catch { /* noop */ }
+      target.removeEventListener("pointermove", move);
+      target.removeEventListener("pointerup", stop);
+      target.removeEventListener("pointercancel", stop);
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
+      dragRef.current = null;
     };
+
     document.body.style.cursor = "ns-resize";
     document.body.style.userSelect = "none";
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", stop);
-    window.addEventListener("pointercancel", stop);
+    target.addEventListener("pointermove", move);
+    target.addEventListener("pointerup", stop);
+    target.addEventListener("pointercancel", stop);
+    dragRef.current = { target, move, stop };
+
+    // Prevent text selection on the surrounding page during drag. We do NOT
+    // stopPropagation here: leaving the event to bubble lets other listeners
+    // (e.g. dropdown close-on-outside) see the click as normal.
+    e.preventDefault();
   };
 
-  const onDoubleClick = () => setHeight(defaultHeight);
+  const reset = () => setHeight(defaultHeight);
 
+  return { height, setHeight, onPointerDown, reset };
+}
+
+// Visible drag bar styled like a UI splitter. Spans the full width of its
+// parent and shows a clear grip. Drag vertically to resize, double-click to
+// reset. Mouse, pen and touch are all handled via Pointer Events.
+export function ResizeHandle({ onPointerDown, onDoubleClick, label = "Arrastrar para cambiar el alto del grid · Doble click para reiniciar" }) {
+  return (
+    <div
+      role="separator"
+      aria-orientation="horizontal"
+      aria-label="Arrastrar para cambiar el alto. Doble click para reiniciar."
+      title={label}
+      onPointerDown={onPointerDown}
+      onDoubleClick={onDoubleClick}
+      className="group relative my-1 flex h-3 w-full shrink-0 cursor-ns-resize select-none items-center justify-center rounded bg-[var(--color-surface-2)] hover:bg-[var(--color-accent-soft)]"
+      style={{ touchAction: "none" }}
+    >
+      <div className="pointer-events-none absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-[var(--color-border)] group-hover:bg-[var(--color-accent)]" />
+      <div className="pointer-events-none relative z-10 flex h-2 w-12 items-center justify-center gap-1 rounded-full border border-[var(--color-border)] bg-[var(--color-surface)] px-2 group-hover:border-[var(--color-accent)]">
+        <span className="block h-0.5 w-1 rounded-full bg-[var(--color-muted)] group-hover:bg-[var(--color-accent)]" />
+        <span className="block h-0.5 w-1 rounded-full bg-[var(--color-muted)] group-hover:bg-[var(--color-accent)]" />
+        <span className="block h-0.5 w-1 rounded-full bg-[var(--color-muted)] group-hover:bg-[var(--color-accent)]" />
+      </div>
+    </div>
+  );
+}
+
+// Convenience wrapper: a fixed-height area with the drag handle rendered
+// directly underneath. Used by screens that want everything self-contained.
+// For screens that need the handle somewhere else (e.g. in a toolbar), use
+// useResizableHeight + ResizeHandle directly.
+export default function ResizableArea({
+  storageKey,
+  defaultHeight = 500,
+  minHeight = 240,
+  children,
+}) {
+  const { height, onPointerDown, reset } = useResizableHeight(storageKey, defaultHeight, minHeight);
   return (
     <>
       <div style={{ height: `${height}px` }} className="flex min-h-0 flex-col">
         {children}
       </div>
-      <div
-        role="separator"
-        aria-orientation="horizontal"
-        aria-label="Arrastrar para cambiar el alto. Doble click para reiniciar."
-        title="Arrastrar para cambiar el alto · Doble click para reiniciar"
-        onPointerDown={onPointerDown}
-        onDoubleClick={onDoubleClick}
-        className="group mt-1 mb-1 flex h-5 shrink-0 cursor-ns-resize select-none items-center justify-center gap-2 rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] text-[10px] font-medium text-[var(--color-muted)] hover:border-[var(--color-accent)] hover:bg-[var(--color-accent-soft)] hover:text-[var(--color-accent)]"
-      >
-        <span aria-hidden className="tracking-widest">⋮⋮⋮</span>
-        <span className="hidden sm:inline">Arrastrar para cambiar el alto · Doble click para reiniciar</span>
-        <span className="sm:hidden">Arrastrar para ajustar</span>
-        <span aria-hidden className="tracking-widest">⋮⋮⋮</span>
-      </div>
+      <ResizeHandle onPointerDown={onPointerDown} onDoubleClick={reset} />
     </>
   );
 }

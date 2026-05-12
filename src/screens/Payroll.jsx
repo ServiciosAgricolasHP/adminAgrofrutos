@@ -1835,6 +1835,13 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
         ? cycleCols.map((c) => `<th style="text-align:right">${cycleLabel(c.id)}</th>`).join("")
         : "";
 
+      // Show the Anticipo column whenever ANY worker in this group has an
+      // advance deduction. Otherwise hide it to keep the layout clean.
+      const groupHasAdvance = g.items.some((it) => (Number(it.advance) || 0) > 0);
+      const advanceHeader = groupHasAdvance
+        ? `<th style="width:110px;text-align:right">Anticipo</th>`
+        : "";
+
       const rows = g.items
         .map((it, i) => {
           const cellsByCycle = showCycleCols
@@ -1847,12 +1854,18 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
                 )
                 .join("")
             : "";
+          const advanceCell = groupHasAdvance
+            ? `<td style="text-align:right;color:#b45309">${
+                Number(it.advance) > 0 ? `− ${fmt(it.advance)}` : "—"
+              }</td>`
+            : "";
           return `
             <tr style="background:${itemFill}">
               <td>${i + 1}</td>
               <td>${it.name}</td>
               <td class="mono">${fmtRut(it.rut)}</td>
               ${cellsByCycle}
+              ${advanceCell}
               <td style="text-align:right"><b>${fmt(it.amount)}</b></td>
               <td></td>
             </tr>`;
@@ -1866,6 +1879,14 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
               return `<td style="text-align:right;background:${leaderFill}"><b>${fmt(sum)}</b></td>`;
             })
             .join("")
+        : "";
+      const advanceSubtotalCell = groupHasAdvance
+        ? `<td style="text-align:right;background:${leaderFill};color:#b45309"><b>${
+            (() => {
+              const sum = g.items.reduce((s, it) => s + (Number(it.advance) || 0), 0);
+              return sum > 0 ? `− ${fmt(sum)}` : "—";
+            })()
+          }</b></td>`
         : "";
 
       const totalColSpan = 3; // # + Nombre + RUT
@@ -1961,6 +1982,11 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
                     .join("")
                 : "";
               const bankTag = isCashBank(it.bankCode) ? "Efectivo" : "Transferencia";
+              const advanceCell = groupHasAdvance
+                ? `<td style="text-align:right;color:#b45309">${
+                    Number(it.advance) > 0 ? `− ${fmt(it.advance)}` : "—"
+                  }</td>`
+                : "";
               return `
                 <tr style="background:${itemFill}">
                   <td>${i + 1}</td>
@@ -1968,6 +1994,7 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
                   <td class="mono">${fmtRut(it.rut)}</td>
                   <td style="font-size:10px;color:#555">${bankTag}</td>
                   ${cellsByCycle}
+                  ${advanceCell}
                   <td style="text-align:right"><b>${fmt(it.amount)}</b></td>
                 </tr>`;
             })
@@ -1997,6 +2024,7 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
             <th style="width:110px">RUT</th>
             ${isDetail ? '<th style="width:90px">Forma pago</th>' : ""}
             ${cycleHeaders}
+            ${advanceHeader}
             <th style="width:120px;text-align:right">TOTAL</th>
             ${isDetail ? "" : '<th style="width:200px">Firma</th>'}
           </tr>
@@ -2008,6 +2036,7 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
           <tr style="background:${leaderFill}">
             <td colspan="${isDetail ? totalColSpan + 1 : totalColSpan}" style="text-align:right"><b>Subtotal ${g.leader}</b></td>
             ${subtotalCells}
+            ${advanceSubtotalCell}
             <td style="text-align:right"><b>${fmt(g.total)}</b></td>
             ${isDetail ? "" : "<td></td>"}
           </tr>

@@ -43,7 +43,7 @@ import Modal from "../components/Modal";
 import TextField from "../components/TextField";
 import Select from "../components/Select";
 import ConfirmDialog from "../components/ConfirmDialog";
-import ResizableArea from "../components/ResizableArea";
+import { useResizableHeight, ResizeHandle } from "../components/ResizableArea";
 import WorkerPickerModal from "../components/WorkerPickerModal";
 import TransportsModal from "../components/TransportsModal";
 import CycleSummaryModal from "../components/CycleSummaryModal";
@@ -134,6 +134,39 @@ function LeaderPickerModal({ open, onClose, leaders, workerName, busy, onPick })
         </div>
       </div>
     </Modal>
+  );
+}
+
+// Header component for day columns / column groups. Renders the date plus a
+// 📝 indicator that highlights when an annotation exists for that day. Click
+// anywhere on the header opens the day-note modal. When a note exists, the
+// browser tooltip shows the note text itself (so the user can read it on
+// hover without opening the modal).
+function DayHeader(props) {
+  const { date, note, onClickNote, displayName } = props;
+  const hasNote = !!String(note || "").trim();
+  return (
+    <span
+      onClick={(e) => { e.stopPropagation(); onClickNote?.(date); }}
+      title={hasNote ? note : "Agregar anotación del día"}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        cursor: "pointer",
+        width: "100%",
+        height: "100%",
+        userSelect: "none",
+        padding: "0 4px",
+      }}
+    >
+      <span>{displayName || date}</span>
+      <span style={{
+        fontSize: 12,
+        color: hasNote ? "var(--color-accent)" : "var(--color-muted)",
+        opacity: hasNote ? 1 : 0.55,
+      }}>📝</span>
+    </span>
   );
 }
 
@@ -236,12 +269,14 @@ function buildRowsTrato(workers, days, wdMap, dayTiersByDate) {
 
 function buildRowsNormal(workers, days, wdMap) {
   return workers.map((w) => {
-    const row = { rut: w.rut, name: w.name, _isTemp: !!w.isTemp };
+    const row = { rut: w.rut, name: w.name, _isTemp: !!w.isTemp, _monthly: !!w.monthly };
     let total = 0;
     for (const d of days) {
       const wd = wdMap[workdayMapKey(w.rut, d, SINGLE_COMBO)];
       const amount = Number(wd?.amount) || 0;
       row[d] = amount;
+      // Presence flag so monthly cells can render ✓ without re-reading wdMap.
+      row[`${d}__present`] = !!wd;
       total += amount;
     }
     row.total = total;
@@ -280,6 +315,40 @@ export default function CycleDetail() {
     const d = new Date();
     return { year: d.getFullYear(), month: d.getMonth() };
   });
+  // Grid height + drag handle: handle is rendered as a full-width splitter
+  // right above the grid so it is always visible. The wrapping div uses this
+  // height directly.
+  const { height: gridHeight, onPointerDown: onGridResizeStart, reset: resetGridHeight } =
+    useResizableHeight("cycle-detail-grid", 460, 280);
+
+  // Day notes: one annotation per day, shared across all labors of the cycle.
+  // Stored at cycle.dayNotes = { "YYYY-MM-DD": "text" }. Edited via a modal
+  // that opens when the user clicks the date header (DayHeader component).
+  const [editingDayNote, setEditingDayNote] = useState(null); // date string or null
+  const [editingDayNoteText, setEditingDayNoteText] = useState("");
+  const [dayNoteBusy, setDayNoteBusy] = useState(false);
+
+  // Modal para agregar un nuevo precio (tier) en un trato. Reemplaza al
+  // prompt() nativo que rompía el estilo de la app.
+  const [addPriceModal, setAddPriceModal] = useState(null);
+  // shape: { laborId, date, nextKey, defaultMode, value }
+  const [addPriceBusy, setAddPriceBusy] = useState(false);
+
+  // Collapsible sections (metrics + prices). Persisted so the user only has
+  // to hide them once per device. Helps reclaim vertical space for the grid.
+  const [metricsCollapsed, setMetricsCollapsed] = useState(() => {
+    try { return localStorage.getItem("cycleDetail.metricsCollapsed") === "true"; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("cycleDetail.metricsCollapsed", String(metricsCollapsed)); } catch { /* noop */ }
+  }, [metricsCollapsed]);
+  const [pricesCollapsed, setPricesCollapsed] = useState(() => {
+    try { return localStorage.getItem("cycleDetail.pricesCollapsed") === "true"; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("cycleDetail.pricesCollapsed", String(pricesCollapsed)); } catch { /* noop */ }
+  }, [pricesCollapsed]);
+
   const [pickerOpen, setPickerOpen] = useState(false);
   // Holds the synthetic TEMP-* rut of the worker currently being converted
   // to a real RUT. When set, opens a second picker that replaces this temp
@@ -460,6 +529,17 @@ export default function CycleDetail() {
     return m;
   }, [allWorkers, cycle]);
 
+  // Lookup table for the current canonical name of each worker. Used at row
+  // build time so name edits in the Workers screen propagate to open cycles
+  // without rewriting the (denormalized) `labor.workers[i].name` snapshot.
+  const rutToName = useMemo(() => {
+    const m = new Map();
+    for (const w of allWorkers) {
+      if (w?.name) m.set(w.id, w.name);
+    }
+    return m;
+  }, [allWorkers]);
+
   const LEADER_LOCAL = "CHILENOS";
   const LEADER_FOREIGN = "EXTRANJEROS";
   const LEADER_NONE = "__NONE__";
@@ -544,13 +624,51 @@ export default function CycleDetail() {
     return out;
   }, [isTratoLabor, activeLabor, days, dayPrices, defaultMode, workdaysByLabor]);
 
+  const dayNotes = cycle?.dayNotes || {};
+
+  const openDayNote = (date) => {
+    setEditingDayNote(date);
+    setEditingDayNoteText(String(dayNotes?.[date] || ""));
+  };
+
+  const closeDayNote = () => {
+    if (dayNoteBusy) return;
+    setEditingDayNote(null);
+    setEditingDayNoteText("");
+  };
+
+  const saveDayNote = async () => {
+    if (!editingDayNote) return;
+    setDayNoteBusy(true);
+    try {
+      const text = String(editingDayNoteText || "").trim();
+      const nextNotes = { ...(cycle?.dayNotes || {}) };
+      if (text) nextNotes[editingDayNote] = text;
+      else delete nextNotes[editingDayNote];
+      await cyclesService.update(id, { dayNotes: nextNotes });
+      setCycle((c) => (c ? { ...c, dayNotes: nextNotes } : c));
+      setEditingDayNote(null);
+      setEditingDayNoteText("");
+    } finally {
+      setDayNoteBusy(false);
+    }
+  };
+
+  // Resolve each worker's current canonical name from the workers cache.
+  // Falls back to the snapshot stored in labor.workers (used for temp workers
+  // and as a safety net while the cache loads).
+  const resolvedWorkers = useMemo(
+    () => workers.map((w) => (w?.isTemp ? w : { ...w, name: rutToName.get(w.rut) || w.name })),
+    [workers, rutToName],
+  );
+
   const rowDataRaw = useMemo(() => {
-    if (isCosechaLabor) return buildRowsCosecha(workers, days, wdMap, dayCombosByDate);
-    if (isTratoLabor) return buildRowsTrato(workers, days, wdMap, dayTiersByDate);
-    if (isTratoHELabor) return buildRowsTratoHE(workers, days, wdMap);
-    return buildRowsNormal(workers, days, wdMap);
+    if (isCosechaLabor) return buildRowsCosecha(resolvedWorkers, days, wdMap, dayCombosByDate);
+    if (isTratoLabor) return buildRowsTrato(resolvedWorkers, days, wdMap, dayTiersByDate);
+    if (isTratoHELabor) return buildRowsTratoHE(resolvedWorkers, days, wdMap);
+    return buildRowsNormal(resolvedWorkers, days, wdMap);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workers, days, wdMap, isCosechaLabor, isTratoLabor, isTratoHELabor, dayCombosByDate, dayTiersByDate]);
+  }, [resolvedWorkers, days, wdMap, isCosechaLabor, isTratoLabor, isTratoHELabor, dayCombosByDate, dayTiersByDate]);
 
   const groupBuckets = useMemo(() => {
     const buckets = new Map();
@@ -1404,6 +1522,48 @@ export default function CycleDetail() {
     setPickerOpen(false);
   };
 
+  // Toggle the "pago mensual" flag for a worker inside the current labor.
+  // Stored as `monthly: true` on the labor.workers entry. Used only for
+  // "normal" labors (supervisión, etc.) — when set, the day cells switch to
+  // a presence checkbox and the workday is saved with amount=0 so it never
+  // makes it into the payroll transfer.
+  const toggleMonthly = async (rut) => {
+    if (readOnly || !activeLabor) return;
+    const nextWorkers = workers.map((w) =>
+      w.rut === rut ? { ...w, monthly: !w.monthly } : w,
+    );
+    await persistLabor({ ...activeLabor, workers: nextWorkers });
+  };
+
+  // Create / remove a 0-amount workday for monthly workers — used as the
+  // "presente sin pago" toggle from the day cell. Reusing the existing
+  // workday infrastructure keeps metrics + jornada counters consistent. The
+  // caller passes `currentlyPresent` from the rendered row data so we never
+  // depend on a possibly-stale closure of wdMap.
+  const toggleAttendance = async (rut, date, currentlyPresent) => {
+    if (readOnly || !activeLabor) return;
+    const mapKey = workdayMapKey(rut, date, SINGLE_COMBO);
+    const docId = workdayDocId(id, activeLabor.id, rut, date, SINGLE_COMBO);
+    if (currentlyPresent) {
+      await workdaysService.remove(docId);
+      setWorkdaysByLabor((prev) => {
+        const lab = { ...(prev[activeLabor.id] || {}) };
+        delete lab[mapKey];
+        return { ...prev, [activeLabor.id]: lab };
+      });
+    } else {
+      await workdaysService.upsert(docId, {
+        cycleId: id, laborId: activeLabor.id, workerRut: rut, date,
+        amount: 0, attendanceOnly: true,
+      });
+      setWorkdaysByLabor((prev) => {
+        const lab = { ...(prev[activeLabor.id] || {}) };
+        lab[mapKey] = { cycleId: id, laborId: activeLabor.id, workerRut: rut, date, amount: 0, attendanceOnly: true };
+        return { ...prev, [activeLabor.id]: lab };
+      });
+    }
+  };
+
   const askRemoveWorker = (rut) => {
     const w = workers.find((x) => x.rut === rut);
     if (w) setRemoveWorker(w);
@@ -1805,16 +1965,34 @@ export default function CycleDetail() {
         headerName: "Nombre", field: "name", editable: false, width: 220, pinned: "left",
         cellRenderer: (p) => {
           if (p.data?._isHeader) return p.value;
-          if (!p.data?._isTemp) return p.value;
-          return (
-            <span className="inline-flex items-center gap-1.5">
-              <span>{p.value}</span>
+          const badges = [];
+          if (p.data?._isTemp) {
+            badges.push(
               <span
+                key="temp"
                 className="rounded border border-amber-500/50 bg-amber-500/15 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-300"
                 title="Trabajador temporal: solo vive en este ciclo y se ignora al pagar"
               >
                 Temporal
               </span>
+            );
+          }
+          if (p.data?._monthly) {
+            badges.push(
+              <span
+                key="monthly"
+                className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-emerald-500/20 text-[10px] font-bold text-emerald-700 dark:text-emerald-300"
+                title="Pago mensual: las jornadas se registran como asistencia pero no entran al payroll"
+              >
+                M
+              </span>
+            );
+          }
+          if (badges.length === 0) return p.value;
+          return (
+            <span className="inline-flex items-center gap-1.5">
+              <span>{p.value}</span>
+              {badges}
             </span>
           );
         },
@@ -1826,16 +2004,35 @@ export default function CycleDetail() {
       valueFormatter: (p) => fmtCurrency(p.value),
       cellStyle: { fontWeight: 600, color: "var(--color-accent)" },
     };
+    const isNormalLaborForCol = !isCosechaLabor && !isTratoLabor && !isTratoHELabor;
     const actionsCol = photoMode ? [] : [{
       headerName: "", field: "_actions", editable: false,
-      width: useGrouped ? 220 : 90, pinned: "right",
+      width: useGrouped ? 240 : (isNormalLaborForCol ? 130 : 90), pinned: "right",
       cellRenderer: (p) => {
         const rut = p.data?.rut;
         if (!rut || p.data?._isHeader) return null;
         const isTemp = !!p.data?._isTemp;
+        const isMonthly = !!p.data?._monthly;
+        const isNormalLabor = !isCosechaLabor && !isTratoLabor && !isTratoHELabor;
         const showAssign = useGrouped && !rutToLeader.has(rut) && !readOnly && !isTemp;
         return (
           <div className="flex items-center gap-1.5">
+            {isNormalLabor && !readOnly && (
+              <button
+                type="button"
+                onClick={() => toggleMonthly(rut)}
+                className={`flex h-5 w-5 items-center justify-center rounded-full border text-[10px] font-bold ${
+                  isMonthly
+                    ? "border-emerald-500/60 bg-emerald-500/20 text-emerald-700 hover:bg-emerald-500/30 dark:text-emerald-300"
+                    : "border-[var(--color-border)] bg-[var(--color-surface-2)] text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)] hover:text-[var(--color-accent)]"
+                }`}
+                title={isMonthly
+                  ? "Pago mensual activo. Click para volver a pago por día."
+                  : "Marcar como pago mensual (no entra al payroll)."}
+              >
+                M
+              </button>
+            )}
             {showAssign && (
               <>
                 <button
@@ -1870,6 +2067,21 @@ export default function CycleDetail() {
       },
     }];
 
+    // Click-to-edit annotation header. Shared across single columns and
+    // column groups. Each day either gets `headerComponent` (single column)
+    // or `headerGroupComponent` (group with children).
+    const dayHdrParams = (d) => ({
+      date: d, note: dayNotes[d] || "", onClickNote: openDayNote,
+    });
+    const dayCellHdr = (d) => ({
+      headerComponent: DayHeader,
+      headerComponentParams: dayHdrParams(d),
+    });
+    const dayGroupHdr = (d) => ({
+      headerGroupComponent: DayHeader,
+      headerGroupComponentParams: dayHdrParams(d),
+    });
+
     if (isCosechaLabor) {
       if (cosechaView === "resumen") {
         const dayCols = days.map((d) => ({
@@ -1877,6 +2089,7 @@ export default function CycleDetail() {
           field: `${d}__total`,
           editable: false,
           width: 110,
+          ...dayCellHdr(d),
           valueFormatter: (p) => (p.value ? fmtCurrency(p.value) : ""),
           cellRenderer: (p) => {
             const amt = Number(p.value) || 0;
@@ -1914,6 +2127,7 @@ export default function CycleDetail() {
         }));
         return {
           headerName: d, groupId: `g_${d}`,
+          ...dayGroupHdr(d),
           children: children.length ? children : [{
             headerName: "—", field: `${d}__placeholder`, editable: false, width: 80, valueGetter: () => "",
           }],
@@ -1929,6 +2143,7 @@ export default function CycleDetail() {
           field: `${d}__total`,
           editable: false,
           width: 110,
+          ...dayCellHdr(d),
           valueFormatter: (p) => (p.value ? fmtCurrency(p.value) : ""),
           cellRenderer: (p) => {
             const amt = Number(p.value) || 0;
@@ -1964,6 +2179,7 @@ export default function CycleDetail() {
         }));
         return {
           headerName: d, groupId: `g_${d}`,
+          ...dayGroupHdr(d),
           children: children.length ? children : [{
             headerName: "—", field: `${d}__placeholder`, editable: false, width: 80, valueGetter: () => "",
           }],
@@ -2014,6 +2230,7 @@ export default function CycleDetail() {
             field: `${d}__amt`,
             editable: false,
             width: 110,
+            ...dayCellHdr(d),
             headerClass: red ? "ag-header-red-day" : undefined,
             valueFormatter: (p) => p.value ? fmtCurrency(p.value) : "",
             cellRenderer: (p) => {
@@ -2044,6 +2261,7 @@ export default function CycleDetail() {
         return {
           headerName: headerLabel,
           groupId: `g_${d}`,
+          ...dayGroupHdr(d),
           headerClass: red ? "ag-header-red-day" : undefined,
           children: [
             {
@@ -2129,15 +2347,49 @@ export default function CycleDetail() {
 
     const dayCols = days.map((d) => ({
       headerName: d, field: d,
-      editable: !readOnly && !photoMode,
+      ...dayCellHdr(d),
+      // Monthly workers don't edit a number per day — they only mark presence
+      // via a click. Block the editor for those rows.
+      editable: (p) => !readOnly && !photoMode && !p.data?._monthly,
       width: 110,
       type: "numericColumn",
       valueParser: (p) => parseAmount(p.newValue),
       valueFormatter: (p) => fmtCurrency(p.value),
+      cellRenderer: (p) => {
+        if (p.data?._monthly) {
+          const present = !!p.data?.[`${d}__present`];
+          if (readOnly || photoMode) {
+            return (
+              <span className={present ? "font-semibold text-emerald-600 dark:text-emerald-400" : "text-[var(--color-muted)]"}>
+                {present ? "✓" : ""}
+              </span>
+            );
+          }
+          return (
+            <div
+              role="button"
+              onClick={(e) => { e.stopPropagation(); toggleAttendance(p.data.rut, d, present); }}
+              className={`flex h-full w-full cursor-pointer items-center justify-center text-base font-bold transition-colors ${
+                present
+                  ? "bg-emerald-500/15 text-emerald-700 hover:bg-emerald-500/25 dark:text-emerald-300"
+                  : "text-transparent hover:bg-[var(--color-accent-soft)] hover:text-[var(--color-accent)]"
+              }`}
+              title={present ? "Asistencia registrada (sin pago). Click para borrar." : "Marcar asistencia sin pago."}
+            >
+              {present ? "✓" : "+"}
+            </div>
+          );
+        }
+        const amt = Number(p.value) || 0;
+        return amt ? fmtCurrency(amt) : "";
+      },
+      cellStyle: (p) => p.data?._monthly
+        ? { textAlign: "center", padding: 0 }
+        : { textAlign: "right" },
     }));
     return [...baseLeft, ...dayCols, totalCol, ...actionsCol];
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [days, readOnly, photoMode, isCosechaLabor, isTratoLabor, isTratoHELabor, dayCombosByDate, dayTiersByDate, catalogs, dayPrices, activeLabor, tratoHEView, cosechaView, tratoView]);
+  }, [days, readOnly, photoMode, isCosechaLabor, isTratoLabor, isTratoHELabor, dayCombosByDate, dayTiersByDate, catalogs, dayPrices, activeLabor, tratoHEView, cosechaView, tratoView, dayNotes]);
 
   if (loading) return <div className="text-[var(--color-muted)]">Cargando...</div>;
   if (!cycle) return <div className="text-[var(--color-muted)]">Ciclo no encontrado.</div>;
@@ -2155,7 +2407,9 @@ export default function CycleDetail() {
           columnDefs={columnDefs}
           onCellValueChanged={onCellValueChanged}
           onCellKeyDown={onCellKeyDown}
-          singleClickEdit={!photoMode}
+          singleClickEdit={false}
+          enterNavigatesVertically
+          enterNavigatesVerticallyAfterEdit
           stopEditingWhenCellsLoseFocus
           getRowId={(p) => p.data.rut}
           rowSelection={photoMode ? undefined : "multiple"}
@@ -2297,6 +2551,16 @@ export default function CycleDetail() {
       </div>
 
       {/* Metrics */}
+      <button
+        type="button"
+        onClick={() => setMetricsCollapsed((v) => !v)}
+        className="mb-1 flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-[var(--color-muted)] hover:text-[var(--color-accent)]"
+        title={metricsCollapsed ? "Mostrar métricas" : "Ocultar métricas"}
+      >
+        <span>{metricsCollapsed ? "▶" : "▼"}</span>
+        <span>Métricas</span>
+      </button>
+      {!metricsCollapsed && (
       <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {cycle.labors.map((l) => {
           const isCo = l.type === "cosecha";
@@ -2415,6 +2679,7 @@ export default function CycleDetail() {
           <div className="mt-1 text-lg font-bold tabular-nums text-[var(--color-accent)]">{fmtCurrency(grandTotal)}</div>
         </div>
       </div>
+      )}
 
       {/* Labor tabs */}
       <div className="mb-3 flex flex-wrap items-center gap-1 border-b border-[var(--color-border)]">
@@ -2590,13 +2855,20 @@ export default function CycleDetail() {
 
           {/* Cosecha price bar */}
           {isCosechaLabor && days.length > 0 && (
-            <div className="mb-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
-              <div className="mb-2 flex items-center gap-2 text-xs font-medium text-[var(--color-muted)] uppercase tracking-wider">
+            <div className={`mb-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] ${pricesCollapsed ? "px-3 py-1.5" : "p-3"}`}>
+              <button
+                type="button"
+                onClick={() => setPricesCollapsed((v) => !v)}
+                className="flex w-full items-center gap-2 text-left text-xs font-medium text-[var(--color-muted)] uppercase tracking-wider hover:text-[var(--color-accent)]"
+                title={pricesCollapsed ? "Mostrar precios" : "Ocultar precios"}
+              >
+                <span>{pricesCollapsed ? "▶" : "▼"}</span>
                 <span>🌾</span>
                 <span>Precios por día y tipo</span>
                 {readOnly && <span className="text-[var(--color-warning)]">solo lectura</span>}
-              </div>
-              <div className="flex flex-wrap gap-2">
+              </button>
+              {!pricesCollapsed && (
+              <div className="mt-2 flex flex-wrap gap-2">
                 {days.map((d) => {
                   const combos = dayCombosByDate[d] || [];
                   return (
@@ -2701,18 +2973,26 @@ export default function CycleDetail() {
                   );
                 })}
               </div>
+              )}
             </div>
           )}
 
           {/* TratoHE price bar */}
           {isTratoHELabor && days.length > 0 && (
-            <div className="mb-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
-              <div className="mb-2 flex items-center gap-2 text-xs font-medium text-[var(--color-muted)] uppercase tracking-wider">
+            <div className={`mb-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] ${pricesCollapsed ? "px-3 py-1.5" : "p-3"}`}>
+              <button
+                type="button"
+                onClick={() => setPricesCollapsed((v) => !v)}
+                className="flex w-full items-center gap-2 text-left text-xs font-medium text-[var(--color-muted)] uppercase tracking-wider hover:text-[var(--color-accent)]"
+                title={pricesCollapsed ? "Mostrar precios" : "Ocultar precios"}
+              >
+                <span>{pricesCollapsed ? "▶" : "▼"}</span>
                 <span>🛠</span>
                 <span>Configuración por día</span>
                 {readOnly && <span className="text-[var(--color-warning)]">solo lectura</span>}
-              </div>
-              <div className="flex flex-wrap gap-2">
+              </button>
+              {!pricesCollapsed && (
+              <div className="mt-2 flex flex-wrap gap-2">
                 {days.map((d) => {
                   const cfg = getDaySingle(dayPrices, activeLabor.id, d, "normal");
                   const red = isRedDay(d, cfg);
@@ -2751,18 +3031,26 @@ export default function CycleDetail() {
                   );
                 })}
               </div>
+              )}
             </div>
           )}
 
           {/* Trato price bar */}
           {isTratoLabor && days.length > 0 && (
-            <div className="mb-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
-              <div className="mb-2 flex items-center gap-2 text-xs font-medium text-[var(--color-muted)] uppercase tracking-wider">
+            <div className={`mb-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] ${pricesCollapsed ? "px-3 py-1.5" : "p-3"}`}>
+              <button
+                type="button"
+                onClick={() => setPricesCollapsed((v) => !v)}
+                className="flex w-full items-center gap-2 text-left text-xs font-medium text-[var(--color-muted)] uppercase tracking-wider hover:text-[var(--color-accent)]"
+                title={pricesCollapsed ? "Mostrar precios" : "Ocultar precios"}
+              >
+                <span>{pricesCollapsed ? "▶" : "▼"}</span>
                 <span>🛠</span>
                 <span>Precios por día · {tratoTypeLabel(catalogs, activeLabor.tratoType ?? 0)}</span>
                 {readOnly && <span className="text-[var(--color-warning)]">solo lectura</span>}
-              </div>
-              <div className="flex flex-wrap gap-2">
+              </button>
+              {!pricesCollapsed && (
+              <div className="mt-2 flex flex-wrap gap-2">
                 {days.map((d) => {
                   const tiers = dayTiersByDate[d] || [];
                   // Calculate total qty and amount from workday records
@@ -2850,14 +3138,15 @@ export default function CycleDetail() {
                       ))}
                       {!readOnly && (
                         <button
-                          onClick={async () => {
-                            const newPrice = prompt("Precio:");
-                            if (newPrice === null) return;
-                            const price = parseAmount(newPrice) || 0;
-                            if (price === 0) return;
-                            const nextIndex = tiers.length;
-                            await persistComboConfig(activeLabor.id, d, `t${nextIndex}`, { price, mode: defaultMode }, true);
-                          }}
+                          onClick={() =>
+                            setAddPriceModal({
+                              laborId: activeLabor.id,
+                              date: d,
+                              nextKey: `t${tiers.length}`,
+                              defaultMode,
+                              value: "",
+                            })
+                          }
                           className="text-[var(--color-accent)] text-[10px] hover:underline"
                         >
                           + Agregar precio
@@ -2872,6 +3161,7 @@ export default function CycleDetail() {
                   );
                 })}
               </div>
+              )}
             </div>
           )}
 
@@ -2915,13 +3205,138 @@ export default function CycleDetail() {
             </div>
           )}
 
-          <ResizableArea storageKey="cycle-detail-grid" defaultHeight={460} minHeight={280}>
+          <ResizeHandle
+            onPointerDown={onGridResizeStart}
+            onDoubleClick={resetGridHeight}
+          />
+          <div style={{ height: `${gridHeight}px` }} className="flex min-h-0 flex-col">
             {grid}
-          </ResizableArea>
+          </div>
         </>
       )}
 
       {/* Modals */}
+      <Modal
+        open={!!editingDayNote}
+        onClose={closeDayNote}
+        title={editingDayNote ? `Anotación del ${editingDayNote}` : "Anotación"}
+        footer={(
+          <>
+            <button
+              type="button"
+              onClick={closeDayNote}
+              disabled={dayNoteBusy}
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)] disabled:opacity-60"
+            >
+              Cancelar
+            </button>
+            <button
+              type="button"
+              onClick={saveDayNote}
+              disabled={dayNoteBusy || readOnly}
+              className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-[var(--color-accent-fg)] hover:bg-[var(--color-accent-hover)] disabled:opacity-60"
+            >
+              {dayNoteBusy ? "..." : "Guardar"}
+            </button>
+          </>
+        )}
+      >
+        <textarea
+          value={editingDayNoteText}
+          onChange={(e) => setEditingDayNoteText(e.target.value)}
+          disabled={readOnly}
+          autoFocus
+          placeholder="Ej: día con lluvia leve, solo media jornada, etc."
+          rows={5}
+          className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)] disabled:opacity-70"
+        />
+        <p className="mt-1 text-[11px] text-[var(--color-muted)]">
+          La anotación es compartida entre todas las labores de este día. Dejar el campo vacío y guardar la elimina.
+        </p>
+      </Modal>
+
+      <Modal
+        open={!!addPriceModal}
+        onClose={() => !addPriceBusy && setAddPriceModal(null)}
+        title={addPriceModal ? `Nuevo precio · ${addPriceModal.date}` : "Nuevo precio"}
+        size="sm"
+        footer={(
+          <>
+            <button
+              type="button"
+              onClick={() => setAddPriceModal(null)}
+              disabled={addPriceBusy}
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)] disabled:opacity-60"
+            >
+              Cancelar
+            </button>
+            <button
+              type="button"
+              onClick={async () => {
+                if (!addPriceModal) return;
+                const price = parseAmount(addPriceModal.value) || 0;
+                if (price === 0) return;
+                setAddPriceBusy(true);
+                try {
+                  await persistComboConfig(
+                    addPriceModal.laborId,
+                    addPriceModal.date,
+                    addPriceModal.nextKey,
+                    { price, mode: addPriceModal.defaultMode },
+                    true,
+                  );
+                  setAddPriceModal(null);
+                } finally {
+                  setAddPriceBusy(false);
+                }
+              }}
+              disabled={addPriceBusy || !(parseAmount(addPriceModal?.value) > 0)}
+              className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-[var(--color-accent-fg)] hover:bg-[var(--color-accent-hover)] disabled:opacity-60"
+            >
+              {addPriceBusy ? "..." : "Agregar"}
+            </button>
+          </>
+        )}
+      >
+        {addPriceModal && (
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              const price = parseAmount(addPriceModal.value) || 0;
+              if (price === 0 || addPriceBusy) return;
+              (async () => {
+                setAddPriceBusy(true);
+                try {
+                  await persistComboConfig(
+                    addPriceModal.laborId,
+                    addPriceModal.date,
+                    addPriceModal.nextKey,
+                    { price, mode: addPriceModal.defaultMode },
+                    true,
+                  );
+                  setAddPriceModal(null);
+                } finally {
+                  setAddPriceBusy(false);
+                }
+              })();
+            }}
+            className="space-y-2"
+          >
+            <TextField
+              label="Precio"
+              required
+              autoFocus
+              placeholder="Ej: 1500"
+              value={addPriceModal.value}
+              onChange={(v) => setAddPriceModal((s) => (s ? { ...s, value: v } : s))}
+            />
+            <p className="text-[11px] text-[var(--color-muted)]">
+              Se agrega como un nuevo tramo de precio para este día. Modo por defecto: {addPriceModal.defaultMode === "flat" ? "pago al día" : "por unidad"}.
+            </p>
+          </form>
+        )}
+      </Modal>
+
       <LeaderPickerModal
         open={!!leaderPickerFor}
         onClose={() => setLeaderPickerFor(null)}

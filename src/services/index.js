@@ -20,6 +20,7 @@ export const workersService = {
 export const workdaysService = createService("workday", "workdays");
 export const groupLeadersService = createService("groupLeader", "groupLeader");
 export const payrollSnapshotsService = createService("payrollSnapshot", "payrollSnapshots");
+export const interestLinksService = createService("interestLink", "interestLinks");
 export { tripsService as transportsService, paymentsService as transportPaymentsService } from "./transportsService";
 export const logsService = createService("log", "logs");
 

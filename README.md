@@ -92,9 +92,14 @@ Selector de ciclos activos con monto pendiente por ciclo. Preview con anticipos 
 3. **Transferencias** — desglose por trabajador y ciclo.
 4. **Efectivo** — agrupado por líder con paletas de color y subtotales.
 
-Hay descarga **sólo Nómina** (la hoja BChile pura) o XLSX completo. Comprobantes imprimibles del efectivo (uno por líder, con líneas de firma).
+Hay descarga **sólo Nómina** (la hoja BChile pura) o XLSX completo. Comprobantes imprimibles del efectivo (uno por líder, con líneas de firma) e incluyen una columna **Anticipo** explícita cuando algún trabajador del grupo trae descuento.
 
 Anti doble pago: cada workday se etiqueta con `payrollId`. Al eliminar una nómina, los workdays y anticipos vuelven a estar disponibles.
+
+Cada generación de nómina escribe además un **snapshot JSON** inmutable (colección `payrollSnapshots`, 1:1 con `payrolls`) que se autodescarga y queda disponible para re-bajar desde el historial. Es la fuente que va a consumir el **portal de trabajadores** (read-only).
+
+### Links útiles
+`/links` — listado de atajos a herramientas externas frecuentes. CRUD simple con reordenamiento drag-and-drop persistido en la colección `interestLinks`.
 
 ## Servicios de datos
 
@@ -106,13 +111,16 @@ Anti doble pago: cada workday se etiqueta con `payrollId`. Al eliminar una nómi
 ## Rutas
 
 ```
-/             Dashboard
-/login        Login
-/faenas       Faenas / Subfaenas / Ciclos
-/cycles/:id   Detalle de ciclo
-/workers      Trabajadores
-/transports   Transportes
-/advances     Anticipos y Adelantos
-/payroll      Nómina
-/audit        Auditoría (admin)
+/                              Dashboard
+/login                         Login
+/faenas                        Faenas / Subfaenas / Ciclos
+/cycles/:id                    Detalle de ciclo
+/workers                       Trabajadores
+/transports                    Transportes
+/advances                      Anticipos y Adelantos
+/payroll                       Nómina
+/links                         Links útiles
+/audit                         Auditoría (admin)
+/admin/migrate-workers         Importar trabajadores desde CSV (admin)
+/admin/cleanup-paid-workdays   Limpieza de workdays ya pagados (admin)
 ```
