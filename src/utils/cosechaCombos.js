@@ -32,6 +32,22 @@ export const cosechaUnit = (catalogs, containersSet) => {
   return "Unid.";
 };
 
+// Piso = bono fijo asignable a un trabajador en un día cuando la producción
+// fue baja. Vive como un workday separado con `comboKey: "_piso"` y
+// `pisoOnly: true`. Opt-in por día: se configura solo en los días que
+// realmente lo necesitan (boton "+ piso" en el panel de Precios).
+export const PISO_COMBO_KEY = "_piso";
+
+export const getDayPiso = (dayPrices, laborId, date) => {
+  const entry = dayPrices?.[laborId]?.[date];
+  if (!entry || typeof entry !== "object") return null;
+  const raw = entry.piso;
+  return raw == null ? null : Number(raw) || 0;
+};
+
+export const effectivePiso = (labor, dayPrices, date) =>
+  Number(getDayPiso(dayPrices, labor?.id, date)) || 0;
+
 export const tratoTypeLabel = (catalogs, t) => {
   const cat = catalogs?.tratoTypes || [];
   return cat.find((e) => e.value === t)?.label || `Trato ${t}`;

@@ -70,6 +70,9 @@ function formatTotalsMetric(totals, type) {
 }
 
 // Returns { rows: [...], containers: Set<number> }
+// Cada row trae además `pisoAmount` (suma de workdays pisoOnly del día) y
+// `pisoCount` (cuántas personas tuvieron piso). El `amount` total incluye
+// la producción + piso.
 function buildDailyRows(labor, wdMap) {
   const byDate = new Map();
   const containers = new Set();
@@ -77,10 +80,14 @@ function buildDailyRows(labor, wdMap) {
     const wd = wdMap[k];
     const d = wd.date;
     if (!byDate.has(d)) {
-      byDate.set(d, { date: d, qty: 0, overtimeHours: 0, amount: 0, workersSet: new Set() });
+      byDate.set(d, { date: d, qty: 0, overtimeHours: 0, amount: 0, pisoAmount: 0, pisoCount: 0, workersSet: new Set(), pisoWorkersSet: new Set() });
     }
     const g = byDate.get(d);
-    if (labor.type === "cosecha") {
+    if (wd.pisoOnly) {
+      const pa = Number(wd.amount) || 0;
+      g.pisoAmount += pa;
+      if (wd.workerRut) g.pisoWorkersSet.add(wd.workerRut);
+    } else if (labor.type === "cosecha") {
       g.qty += Number(wd.qty) || 0;
       g.amount += Number(wd.amount) || 0;
       containers.add(Number(wd.containerY) || 0);
@@ -97,22 +104,24 @@ function buildDailyRows(labor, wdMap) {
       g.qty += 1;
       g.amount += Number(wd.amount) || 0;
     }
-    g.workersSet.add(wd.workerRut);
+    if (wd.workerRut) g.workersSet.add(wd.workerRut);
   }
   const rows = [...byDate.values()]
-    .map((g) => ({ ...g, workerCount: g.workersSet.size }))
+    .map((g) => ({ ...g, workerCount: g.workersSet.size, pisoCount: g.pisoWorkersSet.size }))
     .sort((a, b) => (a.date < b.date ? -1 : 1));
   return { rows, containers };
 }
 
 function laborTotals(rows) {
-  let qty = 0, overtimeHours = 0, amount = 0;
+  let qty = 0, overtimeHours = 0, amount = 0, pisoAmount = 0, pisoCount = 0;
   for (const r of rows) {
     qty += r.qty;
     overtimeHours += r.overtimeHours || 0;
     amount += r.amount;
+    pisoAmount += r.pisoAmount || 0;
+    pisoCount += r.pisoCount || 0;
   }
-  return { qty, overtimeHours, amount };
+  return { qty, overtimeHours, amount, pisoAmount, pisoCount };
 }
 
 // ============================================================
@@ -250,7 +259,7 @@ export default function CycleSummaryModal({
 
   const grandTotalPagar = useMemo(() => {
     let sum = 0;
-    for (const ld of laborsData) sum += ld.totals.amount;
+    for (const ld of laborsData) sum += ld.totals.amount + (ld.totals.pisoAmount || 0);
     for (const tg of transportData) sum += tg.totalAmount;
     return sum;
   }, [laborsData, transportData]);
@@ -658,6 +667,8 @@ const PrintableSummary = forwardRef(function PrintableSummary(
 
 function LaborTable({ displayName, unit, laborType, rows, totals, mode, chargeRate }) {
   if (rows.length === 0) return null;
+  const showPiso = (totals.pisoAmount || 0) > 0;
+  const colSpanForUnit = 1;
   return (
     <div style={{ marginBottom: 14 }}>
       <table style={{ borderCollapse: "collapse", width: "100%" }}>
@@ -668,16 +679,22 @@ function LaborTable({ displayName, unit, laborType, rows, totals, mode, chargeRa
             <th style={{ ...cellH, textAlign: "right" }}>{unit}</th>
             <th style={{ ...cellH, textAlign: "right" }}>Valor</th>
             <th style={{ ...cellH, textAlign: "right" }}>Valor total</th>
+            {showPiso && <th style={{ ...cellH, textAlign: "right" }}>Piso</th>}
             <th style={cellH}>Transporte</th>
             <th style={{ ...cellH, textAlign: "right" }}>Total</th>
           </tr>
         </thead>
         <tbody>
           {rows.map((r) => {
+            const piso = Number(r.pisoAmount) || 0;
             const rate = mode === "cobrar"
               ? chargeRate
               : (r.qty > 0 ? Math.round(r.amount / r.qty) : 0);
             const valorTotal = mode === "cobrar" ? r.qty * chargeRate : r.amount;
+            // En cobrar el piso no se factura al cliente (es un bono al
+            // trabajador), pero igual lo mostramos en la fila para tener
+            // visibilidad del costo real.
+            const totalCol = mode === "cobrar" ? valorTotal : valorTotal + piso;
             return (
               <tr key={r.date}>
                 <td style={cell}>{displayName}</td>
@@ -687,21 +704,33 @@ function LaborTable({ displayName, unit, laborType, rows, totals, mode, chargeRa
                 </td>
                 <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{rate > 0 ? fmtCurrency(rate) : ""}</td>
                 <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(valorTotal)}</td>
+                {showPiso && (
+                  <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums", color: piso > 0 ? "#b45309" : "#999" }}>
+                    {piso > 0 ? `${r.pisoCount > 1 ? `${r.pisoCount}× ` : ""}${fmtCurrency(piso)}` : "—"}
+                  </td>
+                )}
                 <td style={{ ...cell, textAlign: "right", color: "#999" }}>$ -</td>
-                <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(valorTotal)}</td>
+                <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(totalCol)}</td>
               </tr>
             );
           })}
           <tr style={{ background: "#c6efce" }}>
             <td style={{ ...cell, fontWeight: 700 }} colSpan={2}>Subtotal {displayName}</td>
-            <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
+            <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }} colSpan={colSpanForUnit}>
               {formatTotalsMetric(totals, laborType)}
             </td>
             <td style={cell}></td>
-            <td style={cell}></td>
+            <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(totals.amount)}</td>
+            {showPiso && (
+              <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums", color: "#b45309" }}>
+                {fmtCurrency(totals.pisoAmount || 0)}
+              </td>
+            )}
             <td style={cell}></td>
             <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
-              {fmtCurrency(mode === "cobrar" ? totals.qty * chargeRate : totals.amount)}
+              {fmtCurrency(mode === "cobrar"
+                ? totals.qty * chargeRate
+                : totals.amount + (totals.pisoAmount || 0))}
             </td>
           </tr>
         </tbody>

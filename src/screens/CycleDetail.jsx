@@ -25,6 +25,9 @@ import {
   getTratoTiers,
   normalizeTratoWorkday,
   getTratoTierTotals,
+  PISO_COMBO_KEY,
+  effectivePiso,
+  getDayPiso,
 } from "../utils/cosechaCombos";
 import {
   TRATO_HE_MODES,
@@ -197,6 +200,53 @@ function GroupHeaderRowRenderer(props) {
   );
 }
 
+// Columna "P" que se anexa al final de cada día en cosecha/trato. Toggle del
+// piso del trabajador en ese día: click crea/borra el workday `_piso`. Solo
+// es clickable si ya existe alguna producción del día (sin workday previo
+// el botón queda deshabilitado).
+function buildPisoChildCol(date, labor, dayPrices, disabled, togglePiso) {
+  const eff = effectivePiso(labor, dayPrices, date);
+  return {
+    headerName: "P",
+    headerTooltip: eff > 0 ? `Piso del día: $${eff.toLocaleString("es-CL")}` : "Sin piso configurado",
+    field: `${date}__piso`,
+    editable: false,
+    width: 56,
+    cellStyle: { textAlign: "center", padding: 0 },
+    cellRenderer: (p) => {
+      const checked = (Number(p.value) || 0) > 0;
+      const hasWd = !!p.data?.[`${date}__piso_has_wd`];
+      const canToggle = !disabled && hasWd && eff > 0;
+      const title = !hasWd
+        ? "Asigna primero producción este día"
+        : eff === 0
+          ? "Configura el piso del día o el default de la labor"
+          : checked
+            ? `Quitar piso ($${eff.toLocaleString("es-CL")})`
+            : `Asignar piso ($${eff.toLocaleString("es-CL")})`;
+      return (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            if (canToggle) togglePiso(labor.id, date, p.data.rut);
+          }}
+          disabled={!canToggle}
+          title={title}
+          className={`flex h-full w-full items-center justify-center text-base transition-colors ${
+            checked
+              ? "bg-amber-500/20 text-amber-700 hover:bg-amber-500/30 dark:text-amber-300"
+              : canToggle
+                ? "text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)] hover:text-[var(--color-accent)]"
+                : "cursor-not-allowed text-[var(--color-muted)] opacity-30"
+          }`}
+        >
+          {checked ? "🪙" : "·"}
+        </button>
+      );
+    },
+  };
+}
+
 function buildRowsCosecha(workers, days, wdMap, dayCombosByDate) {
   return workers.map((w) => {
     const row = { rut: w.rut, name: w.name, _isTemp: !!w.isTemp, _isOrphan: !!w.isOrphan };
@@ -204,14 +254,21 @@ function buildRowsCosecha(workers, days, wdMap, dayCombosByDate) {
     for (const d of days) {
       const combos = dayCombosByDate[d] || [];
       let dayTotal = 0;
+      let hasProduction = false;
       for (const c of combos) {
         const wd = wdMap[workdayMapKey(w.rut, d, c.key)];
         const qty = Number(wd?.qty) || 0;
         const amt = Number(wd?.amount) || 0;
+        if (wd) hasProduction = true;
         row[`${d}__${c.key}`] = qty;
         row[`${d}__${c.key}__amt`] = amt;
         dayTotal += amt;
       }
+      const pisoWd = wdMap[workdayMapKey(w.rut, d, PISO_COMBO_KEY)];
+      const pisoAmt = pisoWd ? Number(pisoWd.amount) || 0 : 0;
+      row[`${d}__piso`] = pisoAmt;
+      row[`${d}__piso_has_wd`] = hasProduction;
+      dayTotal += pisoAmt;
       row[`${d}__total`] = dayTotal;
       total += dayTotal;
     }
@@ -252,14 +309,21 @@ function buildRowsTrato(workers, days, wdMap, dayTiersByDate) {
     for (const d of days) {
       const tiers = dayTiersByDate[d] || [];
       let dayTotal = 0;
+      let hasProduction = false;
       for (const t of tiers) {
         const wd = wdMap[workdayMapKey(w.rut, d, t.key)];
         const qty = Number(wd?.qty) || 0;
         const amt = Number(wd?.amount) || 0;
+        if (wd) hasProduction = true;
         row[`${d}__${t.key}`] = qty;
         row[`${d}__${t.key}__amt`] = amt;
         dayTotal += amt;
       }
+      const pisoWd = wdMap[workdayMapKey(w.rut, d, PISO_COMBO_KEY)];
+      const pisoAmt = pisoWd ? Number(pisoWd.amount) || 0 : 0;
+      row[`${d}__piso`] = pisoAmt;
+      row[`${d}__piso_has_wd`] = hasProduction;
+      dayTotal += pisoAmt;
       row[`${d}__total`] = dayTotal;
       total += dayTotal;
     }
@@ -459,7 +523,8 @@ export default function CycleDetail() {
           ck = makeComboKey(x, y);
         }
         if (!byLabor[lid]) byLabor[lid] = {};
-        const normalizedWd = normalizeTratoWorkday(w);
+        // Piso workdays no se normalizan como trato (no tienen tiers reales).
+        const normalizedWd = w.pisoOnly || ck === PISO_COMBO_KEY ? w : normalizeTratoWorkday(w);
         byLabor[lid][workdayMapKey(w.workerRut, w.date, ck)] = normalizedWd;
       }
       setWorkdaysByLabor(byLabor);
@@ -565,6 +630,24 @@ export default function CycleDetail() {
   const workers = activeLabor?.workers || [];
   const wdMap = (activeLabor && workdaysByLabor[activeLabor.id]) || {};
   const defaultMode = activeLabor?.cosechaMode || activeLabor?.tratoMode || "unit";
+
+  // Días de la labor activa que muestran la columna "P" en la grilla. Para
+  // no agregar ruido, la columna solo aparece en días que ya tienen piso
+  // configurado en `dayPrices` o que tienen al menos un workday pisoOnly
+  // asignado a algún trabajador.
+  const daysWithPiso = useMemo(() => {
+    if (!activeLabor || (!isCosechaLabor && !isTratoLabor)) return new Set();
+    const s = new Set();
+    const dp = dayPrices[activeLabor.id] || {};
+    for (const d in dp) {
+      if ((Number(dp[d]?.piso) || 0) > 0) s.add(d);
+    }
+    for (const k in wdMap) {
+      const wd = wdMap[k];
+      if (wd?.pisoOnly && wd.date) s.add(wd.date);
+    }
+    return s;
+  }, [activeLabor, isCosechaLabor, isTratoLabor, dayPrices, wdMap]);
 
   const dayCombosByDate = useMemo(() => {
     if (!isCosechaLabor || !activeLabor) return {};
@@ -802,6 +885,26 @@ export default function CycleDetail() {
     return out;
   }, [cycle?.labors, workdaysByLabor]);
 
+  // Pisos por labor: cuenta y suma total de los workdays pisoOnly. Solo
+  // aplica a trato/cosecha; el resto siempre será 0.
+  const pisoMetricsByLabor = useMemo(() => {
+    const out = {};
+    if (!cycle?.labors) return out;
+    for (const l of cycle.labors) {
+      const m = workdaysByLabor[l.id] || {};
+      let count = 0;
+      let amount = 0;
+      for (const k in m) {
+        const wd = m[k];
+        if (!wd?.pisoOnly) continue;
+        count += 1;
+        amount += Number(wd.amount) || 0;
+      }
+      out[l.id] = { count, amount };
+    }
+    return out;
+  }, [cycle?.labors, workdaysByLabor]);
+
   // tratoHE: jornadas (qty) y horas extras separadas por feriado/normal
   const tratoHEMetricsByLabor = useMemo(() => {
     const out = {};
@@ -959,6 +1062,55 @@ export default function CycleDetail() {
     setDayPrices(next);
     await cyclesService.update(id, { dayPrices: next });
     await recalcDayCombo(laborId, date, ck, merged.price, merged.mode, isTrato);
+  };
+
+  // Piso = monto fijo configurable por día (con fallback al pisoDefault de la
+  // labor). Conviven en el mismo doc `dayPrices[labId][date]` como campo
+  // `piso` al lado de los combos/tiers.
+  const persistDayPiso = async (laborId, date, value) => {
+    const dayEntry = normalizeDayPricesEntry(dayPrices[laborId]?.[date]);
+    const nextDay = { ...dayEntry, piso: Number(value) || 0 };
+    if (!nextDay.piso) delete nextDay.piso;
+    const next = { ...dayPrices, [laborId]: { ...(dayPrices[laborId] || {}), [date]: nextDay } };
+    setDayPrices(next);
+    await cyclesService.update(id, { dayPrices: next });
+  };
+
+  // Toggle del piso por (worker, date) para la labor activa. Crea/borra un
+  // workday separado con `comboKey: "_piso"` y `pisoOnly: true`. El monto
+  // viene del piso efectivo (día > labor.pisoDefault). Requiere que ya
+  // exista al menos un workday de producción para esa fecha.
+  const togglePiso = async (laborId, date, workerRut) => {
+    const labor = cycle.labors.find((l) => l.id === laborId);
+    if (!labor) return;
+    const mapKey = workdayMapKey(workerRut, date, PISO_COMBO_KEY);
+    const docId = workdayDocId(id, laborId, workerRut, date, PISO_COMBO_KEY);
+    const existing = (workdaysByLabor[laborId] || {})[mapKey];
+    if (existing) {
+      await workdaysService.remove(docId);
+      setWorkdaysByLabor((prev) => {
+        const lab = { ...(prev[laborId] || {}) };
+        delete lab[mapKey];
+        return { ...prev, [laborId]: lab };
+      });
+      return;
+    }
+    const amount = effectivePiso(labor, dayPrices, date);
+    if (!amount) {
+      alert("Configura primero el piso por día o el piso default en la labor.");
+      return;
+    }
+    const next = {
+      cycleId: id, laborId, workerRut, date,
+      qty: 0, amount,
+      pisoOnly: true,
+    };
+    await workdaysService.upsert(docId, next);
+    setWorkdaysByLabor((prev) => {
+      const lab = { ...(prev[laborId] || {}) };
+      lab[mapKey] = { id: docId, ...next };
+      return { ...prev, [laborId]: lab };
+    });
   };
 
   const addComboToDay = async (laborId, date, x, y) => {
@@ -2122,6 +2274,9 @@ export default function CycleDetail() {
             );
           },
         }));
+        if (daysWithPiso.has(d)) {
+          children.push(buildPisoChildCol(d, activeLabor, dayPrices, readOnly || photoMode, togglePiso));
+        }
         return {
           headerName: d, groupId: `g_${d}`,
           ...dayGroupHdr(d),
@@ -2174,6 +2329,9 @@ export default function CycleDetail() {
             );
           },
         }));
+        if (daysWithPiso.has(d)) {
+          children.push(buildPisoChildCol(d, activeLabor, dayPrices, readOnly || photoMode, togglePiso));
+        }
         return {
           headerName: d, groupId: `g_${d}`,
           ...dayGroupHdr(d),
@@ -2386,7 +2544,7 @@ export default function CycleDetail() {
     }));
     return [...baseLeft, ...dayCols, totalCol, ...actionsCol];
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [days, readOnly, photoMode, isCosechaLabor, isTratoLabor, isTratoHELabor, dayCombosByDate, dayTiersByDate, catalogs, dayPrices, activeLabor, tratoHEView, cosechaView, tratoView, dayNotes]);
+  }, [days, readOnly, photoMode, isCosechaLabor, isTratoLabor, isTratoHELabor, dayCombosByDate, dayTiersByDate, catalogs, dayPrices, activeLabor, tratoHEView, cosechaView, tratoView, dayNotes, daysWithPiso]);
 
   if (loading) return <div className="text-[var(--color-muted)]">Cargando...</div>;
   if (!cycle) return <div className="text-[var(--color-muted)]">Ciclo no encontrado.</div>;
@@ -2558,6 +2716,7 @@ export default function CycleDetail() {
           const qtyByContainer = totalQtyByContainerByLabor[l.id] || {};
           const totalQty = totalQtyByLabor[l.id] || 0;
           const heMetrics = tratoHEMetricsByLabor[l.id];
+          const pisoMetrics = pisoMetricsByLabor[l.id] || { count: 0, amount: 0 };
           const tag = isCo ? "cosecha" : isTr ? "trato" : isHE ? "jornadas+HE" : l.type === "main" ? "al día" : l.type;
           const tagClass = isCo
             ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
@@ -2607,6 +2766,16 @@ export default function CycleDetail() {
                         ))}
                     </div>
                   )}
+                </div>
+              )}
+              {(isCo || isTr) && pisoMetrics.count > 0 && (
+                <div className="mt-1 flex justify-between gap-2 text-[11px] tabular-nums">
+                  <span className="text-[var(--color-muted)]">🪙 Pisos:</span>
+                  <span>
+                    <span className="font-medium">{pisoMetrics.count}</span>
+                    <span className="text-[var(--color-muted)]"> jorn. · </span>
+                    <span className="font-medium">{fmtCurrency(pisoMetrics.amount)}</span>
+                  </span>
                 </div>
               )}
               {isHE && heMetrics && (
@@ -2957,6 +3126,13 @@ export default function CycleDetail() {
                       >
                         + tipo
                       </button>
+                      <PisoDayRow
+                        labor={activeLabor}
+                        dayPrices={dayPrices}
+                        date={d}
+                        readOnly={readOnly}
+                        onPersist={(v) => persistDayPiso(activeLabor.id, d, v)}
+                      />
                     </div>
                   );
                 })}
@@ -3145,6 +3321,13 @@ export default function CycleDetail() {
                           = {fmtCurrency(totalAmt)}
                         </div>
                       )}
+                      <PisoDayRow
+                        labor={activeLabor}
+                        dayPrices={dayPrices}
+                        date={d}
+                        readOnly={readOnly}
+                        onPersist={(v) => persistDayPiso(activeLabor.id, d, v)}
+                      />
                     </div>
                   );
                 })}
@@ -3936,6 +4119,77 @@ function BonusEditModal({ open, onClose, labor, wd, workerName, date, readOnly, 
         </div>
       </div>
     </Modal>
+  );
+}
+
+// Piso opt-in por día. Mientras el día no tenga piso configurado, solo se
+// muestra un botón "+ piso". Al click pasa a modo edición. Si ya hay un
+// piso guardado, se muestra inline con su monto + acciones editar/quitar.
+function PisoDayRow({ labor, dayPrices, date, readOnly, onPersist }) {
+  const dayPiso = getDayPiso(dayPrices, labor.id, date);
+  const hasPiso = dayPiso != null && dayPiso > 0;
+  const [editing, setEditing] = useState(false);
+  const [local, setLocal] = useState("");
+  useEffect(() => {
+    if (!editing) setLocal(hasPiso ? String(dayPiso) : "");
+  }, [editing, dayPiso, hasPiso]);
+
+  if (!hasPiso && !editing) {
+    if (readOnly) return null;
+    return (
+      <button
+        onClick={() => { setLocal(""); setEditing(true); }}
+        className="self-start text-[var(--color-muted)] text-[10px] hover:text-[var(--color-accent)] hover:underline"
+        title="Agregar bono piso para este día"
+      >
+        + piso
+      </button>
+    );
+  }
+
+  if (editing) {
+    const commit = () => {
+      const next = local === "" ? 0 : Number(local) || 0;
+      onPersist(next);
+      setEditing(false);
+    };
+    return (
+      <div className="mt-1 flex items-center gap-1 rounded-md border border-[var(--color-accent)] bg-[var(--color-accent-soft)] px-2 py-1 text-[10px]">
+        <span className="font-medium text-[var(--color-muted)]">🪙 Piso $</span>
+        <input
+          type="number" min="0" autoFocus disabled={readOnly}
+          value={local}
+          onChange={(e) => setLocal(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => { if (e.key === "Enter") commit(); if (e.key === "Escape") setEditing(false); }}
+          className="w-20 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-1 py-0.5 text-right tabular-nums outline-none focus:border-[var(--color-accent)] disabled:opacity-50"
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-1 flex items-center gap-1 rounded-md border border-[var(--color-accent)] bg-[var(--color-accent-soft)] px-2 py-1 text-[10px]">
+      <span className="font-medium text-[var(--color-text)]">🪙 Piso {fmtCurrency(dayPiso)}</span>
+      {!readOnly && (
+        <>
+          <button
+            onClick={() => { setLocal(String(dayPiso)); setEditing(true); }}
+            className="ml-auto text-[var(--color-muted)] hover:text-[var(--color-accent)] hover:underline"
+            title="Editar"
+          >
+            ✎
+          </button>
+          <button
+            onClick={() => onPersist(0)}
+            className="text-[var(--color-danger)] hover:underline"
+            title="Quitar piso del día"
+          >
+            ✕
+          </button>
+        </>
+      )}
+    </div>
   );
 }
 

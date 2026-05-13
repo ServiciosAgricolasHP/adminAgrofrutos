@@ -1499,6 +1499,7 @@ function buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut) {
     const dates = new Set();
     const workersInLabor = new Set();
     const containers = new Set(); // envases vistos en cosecha — define la unidad
+    let anyPiso = false;
     for (const wd of wdsLabor) {
       const key = `${wd.workerRut}|${wd.date}`;
       dates.add(wd.date);
@@ -1510,6 +1511,7 @@ function buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut) {
           jornadas: 0,
           overtimeHours: 0,
           extras: 0,
+          piso: 0,
           hasManejo: false,
           hasSupervision: false,
           isHoliday: false,
@@ -1518,6 +1520,13 @@ function buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut) {
         });
       }
       const c = cellByWorkerDay.get(key);
+      if (wd.pisoOnly) {
+        const pa = Number(wd.amount) || 0;
+        c.piso += pa;
+        c.amount += pa;
+        anyPiso = true;
+        continue;
+      }
       if (labor.type === "cosecha") {
         const x = Number(wd.qualityX) || 0;
         const y = Number(wd.containerY) || 0;
@@ -1573,6 +1582,7 @@ function buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut) {
       let totalAmount = 0;
       let totalKilos = 0;
       let totalJornadas = 0;
+      let totalPiso = 0;
       const cells = {};
       for (const d of sortedDates) {
         const c = cellByWorkerDay.get(`${rut}|${d}`);
@@ -1581,6 +1591,7 @@ function buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut) {
           totalAmount += c.amount;
           totalKilos += c.kilos;
           totalJornadas += c.jornadas;
+          totalPiso += c.piso || 0;
         }
       }
       return {
@@ -1590,6 +1601,7 @@ function buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut) {
         totalAmount,
         totalKilos,
         totalJornadas,
+        totalPiso,
       };
     });
 
@@ -1600,8 +1612,9 @@ function buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut) {
     let grandJornadas = 0;
     let grandOvertimeHours = 0;
     let grandExtras = 0;
+    let grandPiso = 0;
     for (const d of sortedDates) {
-      const agg = { amount: 0, kilos: 0, jornadas: 0, overtimeHours: 0, extras: 0, byCombo: {}, byTier: {} };
+      const agg = { amount: 0, kilos: 0, jornadas: 0, overtimeHours: 0, extras: 0, piso: 0, byCombo: {}, byTier: {} };
       for (const r of rows) {
         const c = r.cells[d];
         if (!c) continue;
@@ -1610,6 +1623,7 @@ function buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut) {
         agg.jornadas += c.jornadas || 0;
         agg.overtimeHours += c.overtimeHours || 0;
         agg.extras += c.extras || 0;
+        agg.piso += c.piso || 0;
         for (const [ck, b] of Object.entries(c.byCombo || {})) {
           if (!agg.byCombo[ck]) agg.byCombo[ck] = { x: b.x, y: b.y, kilos: 0, amount: 0 };
           agg.byCombo[ck].kilos += b.kilos;
@@ -1627,6 +1641,7 @@ function buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut) {
       grandJornadas += agg.jornadas;
       grandOvertimeHours += agg.overtimeHours;
       grandExtras += agg.extras;
+      grandPiso += agg.piso;
     }
 
     const priceByDate = {};
@@ -1640,6 +1655,7 @@ function buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut) {
       laborType: labor.type,
       tratoType: labor.tratoType ?? 0,
       cosechaContainers: [...containers],
+      anyPiso,
       dates: sortedDates,
       rows,
       dayTotals,
@@ -1648,6 +1664,7 @@ function buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut) {
       grandJornadas,
       grandOvertimeHours,
       grandExtras,
+      grandPiso,
       priceByDate,
     });
   }
@@ -1713,6 +1730,9 @@ function renderProductionCell(cell, laborType, tratoLabel, kilosUnit) {
   if (!cell) return "";
   const fmtMoney = (v) => "$" + (Number(v) || 0).toLocaleString("es-CL");
   const num = (v) => (Number(v) || 0).toLocaleString("es-CL", { maximumFractionDigits: 2 });
+  const pisoTag = (cell.piso || 0) > 0
+    ? `<div class="muted" style="color:#b45309">🪙 Piso ${fmtMoney(cell.piso)}</div>`
+    : "";
   if (laborType === "cosecha") {
     const unit = (kilosUnit || "kg").toLowerCase();
     const combos = Object.entries(cell.byCombo || {})
@@ -1722,9 +1742,9 @@ function renderProductionCell(cell, laborType, tratoLabel, kilosUnit) {
       const lines = combos
         .map(([ck, b]) => `<div class="muted prod-breakdown">${ck}: ${num(b.kilos)} ${unit}</div>`)
         .join("");
-      return `${lines}<div>${num(cell.kilos)} ${unit}</div><div class="muted">${fmtMoney(cell.amount)}</div>`;
+      return `${lines}<div>${num(cell.kilos)} ${unit}</div>${pisoTag}<div class="muted">${fmtMoney(cell.amount)}</div>`;
     }
-    return `<div>${num(cell.kilos)} ${unit}</div><div class="muted">${fmtMoney(cell.amount)}</div>`;
+    return `<div>${num(cell.kilos)} ${unit}</div>${pisoTag}<div class="muted">${fmtMoney(cell.amount)}</div>`;
   }
   if (laborType === "trato") {
     const unit = tratoLabel || "";
@@ -1735,9 +1755,9 @@ function renderProductionCell(cell, laborType, tratoLabel, kilosUnit) {
       const lines = tiers
         .map(([, b]) => `<div class="muted prod-breakdown">T${b.index + 1}: ${num(b.jornadas)}</div>`)
         .join("");
-      return `${lines}<div>${num(cell.jornadas)}${unit ? ` ${unit}` : ""}</div><div class="muted">${fmtMoney(cell.amount)}</div>`;
+      return `${lines}<div>${num(cell.jornadas)}${unit ? ` ${unit}` : ""}</div>${pisoTag}<div class="muted">${fmtMoney(cell.amount)}</div>`;
     }
-    return `<div>${num(cell.jornadas)}${unit ? ` ${unit}` : ""}</div><div class="muted">${fmtMoney(cell.amount)}</div>`;
+    return `<div>${num(cell.jornadas)}${unit ? ` ${unit}` : ""}</div>${pisoTag}<div class="muted">${fmtMoney(cell.amount)}</div>`;
   }
   if (laborType === "tratoHE") {
     const flags = [];
@@ -1761,6 +1781,10 @@ function renderProductionTotal(totals, laborType, tratoLabel, kilosUnit) {
   const fmtMoney = (v) => "$" + (Number(v) || 0).toLocaleString("es-CL");
   const num = (v) => (Number(v) || 0).toLocaleString("es-CL", { maximumFractionDigits: 2 });
   const amount = totals.amount || 0;
+  const piso = totals.piso || 0;
+  const pisoTag = piso > 0
+    ? `<div class="muted" style="color:#b45309">🪙 ${fmtMoney(piso)}</div>`
+    : "";
   if (laborType === "cosecha") {
     const kilos = totals.kilos || 0;
     const unit = (kilosUnit || "kg").toLowerCase();
@@ -1771,7 +1795,7 @@ function renderProductionTotal(totals, laborType, tratoLabel, kilosUnit) {
       ? combos.map(([ck, b]) => `<div class="muted prod-breakdown">${ck}: ${num(b.kilos)} ${unit}</div>`).join("")
       : "";
     const kHtml = kilos ? `<div>${num(kilos)} ${unit}</div>` : "";
-    return `${breakdown}${kHtml}<div><b>${fmtMoney(amount)}</b></div>`;
+    return `${breakdown}${kHtml}${pisoTag}<div><b>${fmtMoney(amount)}</b></div>`;
   }
   if (laborType === "trato") {
     const j = totals.jornadas || 0;
@@ -1783,7 +1807,7 @@ function renderProductionTotal(totals, laborType, tratoLabel, kilosUnit) {
       ? tiers.map(([, b]) => `<div class="muted prod-breakdown">T${b.index + 1}: ${num(b.jornadas)}</div>`).join("")
       : "";
     const jHtml = j ? `<div>${num(j)} ${unit}</div>` : "";
-    return `${breakdown}${jHtml}<div><b>${fmtMoney(amount)}</b></div>`;
+    return `${breakdown}${jHtml}${pisoTag}<div><b>${fmtMoney(amount)}</b></div>`;
   }
   if (laborType === "tratoHE") {
     const parts = [];
@@ -1948,6 +1972,7 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
                     amount: row.totalAmount,
                     kilos: row.totalKilos,
                     jornadas: row.totalJornadas,
+                    piso: row.totalPiso || 0,
                   };
                   return `
                     <tr>
@@ -1966,6 +1991,7 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
                 jornadas: ls.grandJornadas,
                 overtimeHours: ls.grandOvertimeHours,
                 extras: ls.grandExtras,
+                piso: ls.grandPiso || 0,
               };
               return `
                 <div class="prod-table">

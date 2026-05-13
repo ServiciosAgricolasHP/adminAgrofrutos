@@ -77,8 +77,13 @@ function buildCycleRows(workerRut, cycle, workdaysByLabor, catalogs) {
       let overtimeHours = 0;
       let heAmount = 0;
       let amount = 0;
+      let piso = 0;
       const containers = new Set();
       for (const wd of wds) {
+        if (wd.pisoOnly) {
+          piso += Number(wd.amount) || 0;
+          continue;
+        }
         if (labor.type === "cosecha") {
           kilos += Number(wd.qty) || 0;
           amount += Number(wd.amount) || 0;
@@ -115,6 +120,7 @@ function buildCycleRows(workerRut, cycle, workdaysByLabor, catalogs) {
         tratoQty,
         overtimeHours,
         heAmount,
+        piso,
         amount,
       });
     }
@@ -159,11 +165,10 @@ export default function WorkerSummaryModal({ open, onClose, worker }) {
             const labor = (c.labors || []).find((l) => l.id === wd.laborId);
             if (!labor) continue;
             if (!wdMap[wd.laborId]) wdMap[wd.laborId] = {};
-            const ck = wd.qualityX != null && wd.containerY != null
-              ? `${wd.qualityX}_${wd.containerY}`
-              : wd.tiers ? "0_0" : "0_0";
-            const k = workdayMapKey(wd.workerRut, wd.date, ck);
-            wdMap[wd.laborId][k] = wd;
+            // Usamos el id del doc como key: garantiza no-colisión entre
+            // combos/tiers distintos y entre workdays normales y `pisoOnly`
+            // del mismo (worker, date, labor).
+            wdMap[wd.laborId][wd.id || workdayMapKey(wd.workerRut, wd.date, "0_0")] = wd;
           }
           const { rows, cosechaContainers } = buildCycleRows(worker.id, c, wdMap, catalogs);
           const totals = rows.reduce(
@@ -174,8 +179,9 @@ export default function WorkerSummaryModal({ open, onClose, worker }) {
               overtimeHours: acc.overtimeHours + r.overtimeHours,
               heAmount: acc.heAmount + r.heAmount,
               amount: acc.amount + r.amount,
+              piso: acc.piso + (r.piso || 0),
             }),
-            { kilos: 0, jornadas: 0, tratoQty: 0, overtimeHours: 0, heAmount: 0, amount: 0 },
+            { kilos: 0, jornadas: 0, tratoQty: 0, overtimeHours: 0, heAmount: 0, amount: 0, piso: 0 },
           );
           // Columnas a mostrar: solo las que tienen al menos un valor > 0.
           const cols = {
@@ -183,6 +189,7 @@ export default function WorkerSummaryModal({ open, onClose, worker }) {
             jornadas: rows.some((r) => r.jornadas > 0),
             he: rows.some((r) => r.overtimeHours > 0),
             trato: rows.some((r) => r.tratoQty > 0),
+            piso: rows.some((r) => (r.piso || 0) > 0),
           };
           // Etiqueta de la columna/total de trato: si todos los tratos del ciclo
           // son del mismo tipo (ej. todos "poda"), usamos el label del catálogo.
@@ -212,7 +219,7 @@ export default function WorkerSummaryModal({ open, onClose, worker }) {
   }, [open, worker?.id, catalogs]);
 
   const grandTotal = useMemo(
-    () => data.reduce((s, d) => s + (d.totals.amount || 0), 0),
+    () => data.reduce((s, d) => s + (d.totals.amount || 0) + (d.totals.piso || 0), 0),
     [data],
   );
 
@@ -395,7 +402,7 @@ const PrintableWorkerSummary = forwardRef(function PrintableWorkerSummary({ work
 
       {data.map(({ cycle, faena, subfaena, rows, totals, cols, tratoLabel, kilosLabel }) => {
         // Helper local para que los totales caigan en la columna correcta.
-        // valueCol = "kilos" | "jornadas" | "he" | "trato" | "amount"
+        // valueCol = "kilos" | "jornadas" | "he" | "trato" | "piso" | "amount"
         const renderTotalRow = (label, value, valueCol, bg) => (
           <tr style={bg ? { background: bg } : undefined}>
             <td style={cell}></td>
@@ -420,13 +427,18 @@ const PrintableWorkerSummary = forwardRef(function PrintableWorkerSummary({ work
                 {valueCol === "trato" ? value : ""}
               </td>
             )}
+            {cols.piso && (
+              <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums", color: "#b45309" }}>
+                {valueCol === "piso" ? value : ""}
+              </td>
+            )}
             <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
               {valueCol === "amount" ? value : ""}
             </td>
           </tr>
         );
         const totalColSpan =
-          2 + (cols.kilos ? 1 : 0) + (cols.jornadas ? 1 : 0) + (cols.he ? 1 : 0) + (cols.trato ? 1 : 0) + 1;
+          2 + (cols.kilos ? 1 : 0) + (cols.jornadas ? 1 : 0) + (cols.he ? 1 : 0) + (cols.trato ? 1 : 0) + (cols.piso ? 1 : 0) + 1;
 
         const cycleTitle =
           (titles?.cycles && titles.cycles[cycle.id]) ||
@@ -443,6 +455,7 @@ const PrintableWorkerSummary = forwardRef(function PrintableWorkerSummary({ work
                   {cols.jornadas && <th style={{ ...cellH, textAlign: "right" }}>Jornadas</th>}
                   {cols.he && <th style={{ ...cellH, textAlign: "right" }}>HE</th>}
                   {cols.trato && <th style={{ ...cellH, textAlign: "right" }}>{tratoLabel}</th>}
+                  {cols.piso && <th style={{ ...cellH, textAlign: "right" }}>Piso</th>}
                   <th style={{ ...cellH, textAlign: "right" }}>Precio</th>
                 </tr>
               </thead>
@@ -480,8 +493,13 @@ const PrintableWorkerSummary = forwardRef(function PrintableWorkerSummary({ work
                           {r.tratoQty > 0 ? fmtNumber(r.tratoQty) : ""}
                         </td>
                       )}
+                      {cols.piso && (
+                        <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums", color: (r.piso || 0) > 0 ? "#b45309" : "#999" }}>
+                          {(r.piso || 0) > 0 ? fmtCurrency(r.piso) : ""}
+                        </td>
+                      )}
                       <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
-                        {fmtCurrency(r.amount)}
+                        {fmtCurrency(r.amount + (r.piso || 0))}
                       </td>
                     </tr>
                   ))
@@ -497,7 +515,8 @@ const PrintableWorkerSummary = forwardRef(function PrintableWorkerSummary({ work
                         "he",
                       )}
                     {cols.trato && renderTotalRow(`Total ${tratoLabel}`, fmtNumber(totals.tratoQty), "trato")}
-                    {renderTotalRow("Subtotal ciclo", fmtCurrency(totals.amount), "amount", "#c6efce")}
+                    {cols.piso && renderTotalRow("Total Pisos", fmtCurrency(totals.piso), "piso")}
+                    {renderTotalRow("Subtotal ciclo", fmtCurrency(totals.amount + (totals.piso || 0)), "amount", "#c6efce")}
                   </>
                 )}
               </tbody>

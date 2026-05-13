@@ -612,11 +612,18 @@ function DayDetailDrawer({ date, subfaenaId, workdays, trips, cycleById, subfaen
     let amount = 0;
     let jornadas = 0;
     let overtimeHours = 0;
+    let pisoAmount = 0;
+    let pisoCount = 0;
     const tratoTypes = new Set();
     const cosechaContainers = new Set();
     for (const wd of filteredWorkdays) {
       workers.add(wd.workerRut);
       amount += Number(wd.amount) || 0;
+      if (wd.pisoOnly) {
+        pisoAmount += Number(wd.amount) || 0;
+        pisoCount += 1;
+        continue; // ya contamos el monto, no aporta producción/jornada
+      }
       const cycle = cycleById.get(wd.cycleId);
       const labor = cycle?.labors?.find((l) => l.id === wd.laborId);
       const t = labor?.type;
@@ -651,6 +658,8 @@ function DayDetailDrawer({ date, subfaenaId, workdays, trips, cycleById, subfaen
       amount,
       jornadas,
       overtimeHours,
+      pisoAmount,
+      pisoCount,
       tripsCount: filteredTrips.length,
       tripsTotal,
     };
@@ -688,6 +697,11 @@ function DayDetailDrawer({ date, subfaenaId, workdays, trips, cycleById, subfaen
       const e = map.get(key);
       e.workers.add(wd.workerRut);
       e.amount += Number(wd.amount) || 0;
+      if (wd.pisoOnly) {
+        e.pisoAmount = (e.pisoAmount || 0) + (Number(wd.amount) || 0);
+        e.pisoCount = (e.pisoCount || 0) + 1;
+        continue;
+      }
       const t = e.laborType;
       if (t === "cosecha") {
         e.kilos += Number(wd.qty) || 0;
@@ -764,6 +778,9 @@ function DayDetailDrawer({ date, subfaenaId, workdays, trips, cycleById, subfaen
             {totals.kilos > 0 && <Stat label={totals.cosechaUnitLabel} value={fmtNumber(totals.kilos)} />}
             {totals.tratoQty > 0 && <Stat label={totals.tratoLabel} value={fmtNumber(totals.tratoQty)} />}
             {totals.overtimeHours > 0 && <Stat label="HE (horas)" value={fmtNumber(totals.overtimeHours)} />}
+            {totals.pisoAmount > 0 && (
+              <Stat label={`Pisos (${totals.pisoCount})`} value={fmtCurrency(totals.pisoAmount)} />
+            )}
             <Stat label="Producción $" value={fmtCurrency(totals.amount)} />
           </section>
 

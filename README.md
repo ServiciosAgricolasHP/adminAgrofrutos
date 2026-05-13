@@ -73,6 +73,8 @@ public/
 ### Faenas / Ciclos
 Jerarquía Faena → Subfaena → Ciclo → Labors → Workdays. El nombre del ciclo se compone de un prefijo bloqueado `Faena/Subfaena/` + sufijo editable. Cada ciclo se puede renombrar, abrir, cerrar y eliminar.
 
+**Pisos (trato / cosecha)**: opt-in por día. En el panel de Precios cada día tiene un botón **"+ piso"** discreto que solo aparece si no está configurado; al guardarlo se muestra inline con acciones editar/quitar. La grilla agrega una columna "P" 🪙 **solo** en los días que tienen piso (configurado o asignado a alguien) — el resto queda sin columna extra. Click marca/desmarca el piso del trabajador (se crea/borra un workday separado con flag `pisoOnly`). El monto se suma al pago de producción y se refleja como columna/total separado en resúmenes y nómina.
+
 ### Trabajadores
 Carga única con cache persistente (5 min). Búsqueda client-side con substring (acentos y mayúsculas insensitive) sobre RUT y nombre. Auto-detect del tipo de búsqueda. Acciones rápidas para asignar Cuenta RUT (Banco Estado) o marcar como Efectivo.
 
