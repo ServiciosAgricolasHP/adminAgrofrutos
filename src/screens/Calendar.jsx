@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { collection, query, where, getDocs } from "firebase/firestore";
 import { db } from "../firebase";
 import { faenasService, subfaenasService, cyclesService } from "../services";
@@ -6,6 +6,7 @@ import { tripsService } from "../services/transportsService";
 import { useCarriers } from "../contexts/CarriersContext";
 import { useCatalogs } from "../contexts/CatalogsContext";
 import { tratoTypeLabel, cosechaUnit } from "../utils/cosechaCombos";
+import { useIsMobile } from "../hooks/useIsMobile";
 
 // ============================================================================
 // CALENDARIO DE PRODUCCIÓN
@@ -193,6 +194,40 @@ export default function Calendar() {
 
   const [selectedDay, setSelectedDay] = useState(null); // { date, subfaenaId? }
 
+  // Filtro UI-only de subfaenas. `null` = mostrar todas. Cuando se activa el
+  // filtro guardamos el Set serializado en localStorage para que persista
+  // entre sesiones. NO afecta a la query de Firestore — solo oculta las
+  // barras en la grilla, en el modal del día y en la leyenda.
+  const [excludedSubfaenas, setExcludedSubfaenas] = useState(() => {
+    try {
+      const raw = localStorage.getItem("calendar.excludedSubfaenas");
+      return raw ? new Set(JSON.parse(raw)) : new Set();
+    } catch { return new Set(); }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("calendar.excludedSubfaenas", JSON.stringify([...excludedSubfaenas]));
+    } catch { /* noop */ }
+  }, [excludedSubfaenas]);
+  const toggleSubfaenaFilter = (id) => {
+    setExcludedSubfaenas((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+  const clearSubfaenaFilter = () => setExcludedSubfaenas(new Set());
+  // Aislar = mostrar solo esta subfaena y ocultar el resto. Requiere conocer
+  // todas las subfaenas presentes en el mes; se las pasamos a la Legend
+  // calculadas más abajo y nos las devuelve en el callback.
+  const isolateSubfaena = (idToKeep, allIds) => {
+    const next = new Set();
+    for (const id of allIds) if (id !== idToKeep) next.add(id);
+    setExcludedSubfaenas(next);
+  };
+
+  const isMobile = useIsMobile();
+
   // Carga inicial de metadata (cycles/faenas/subfaenas). Usa el cache de los
   // services. No cuenta como reads "calendario" porque es metadata estable.
   useEffect(() => {
@@ -322,6 +357,18 @@ export default function Calendar() {
     return out;
   }, [workdays, cycleById, subfaenaById, faenaById]);
 
+  // Vista filtrada del dayIndex que respeta `excludedSubfaenas`. Solo afecta
+  // a la grilla, leyenda y modal del día — los datos crudos quedan igual.
+  const visibleDayIndex = useMemo(() => {
+    if (!excludedSubfaenas || excludedSubfaenas.size === 0) return dayIndex;
+    const out = {};
+    for (const date in dayIndex) {
+      const arr = dayIndex[date].filter((it) => !excludedSubfaenas.has(it.subfaenaId));
+      if (arr.length > 0) out[date] = arr;
+    }
+    return out;
+  }, [dayIndex, excludedSubfaenas]);
+
   // ─── Navegación de mes ───────────────────────────────────────────────────
 
   const goPrev = () => {
@@ -412,13 +459,25 @@ export default function Calendar() {
       <MonthGrid
         year={year}
         month={month}
-        dayIndex={dayIndex}
+        dayIndex={visibleDayIndex}
         loading={loading}
+        // En mobile el click en la barra (que es chiquita) cae al cell click:
+        // siempre abre el modal del día y desde ahí el usuario tapea la subfaena.
         onCellClick={(date) => setSelectedDay({ date, mode: "all" })}
-        onBarClick={(date, subfaenaId) => setSelectedDay({ date, mode: "subfaena", subfaenaId })}
+        onBarClick={
+          isMobile
+            ? (date) => setSelectedDay({ date, mode: "all" })
+            : (date, subfaenaId) => setSelectedDay({ date, mode: "subfaena", subfaenaId })
+        }
       />
 
-      <Legend dayIndex={dayIndex} />
+      <Legend
+        dayIndex={dayIndex}
+        excludedSubfaenas={excludedSubfaenas}
+        onToggle={toggleSubfaenaFilter}
+        onIsolate={isolateSubfaena}
+        onClear={clearSubfaenaFilter}
+      />
 
       {selectedDay && selectedDay.mode === "subfaena" && (
         <DayDetailDrawer
@@ -447,7 +506,7 @@ export default function Calendar() {
       {selectedDay && selectedDay.mode === "all" && (
         <DayExpandedModal
           date={selectedDay.date}
-          subfaenasOfDay={dayIndex[selectedDay.date] || []}
+          subfaenasOfDay={visibleDayIndex[selectedDay.date] || []}
           subfaenaById={subfaenaById}
           faenaById={faenaById}
           onClose={() => setSelectedDay(null)}
@@ -542,13 +601,19 @@ function MonthGrid({ year, month, dayIndex, loading, onCellClick, onBarClick }) 
 // Legend de colores
 // ============================================================================
 
-function Legend({ dayIndex }) {
+// Leyenda interactiva: cada chip toggleable filtra la subfaena en la grilla y
+// el modal del día. Doble-click aísla esa subfaena (oculta el resto). Si todas
+// están visibles no aparece el botón "limpiar". Para evitar el flicker entre
+// el primer click y el dblclick, usamos un pequeño timer (~220ms) que aplaza
+// el toggle hasta confirmar que no era un doble-click.
+function Legend({ dayIndex, excludedSubfaenas, onToggle, onIsolate, onClear }) {
   const subfaenas = useMemo(() => {
     const seen = new Map();
     for (const date in dayIndex) {
       for (const it of dayIndex[date]) {
         if (!seen.has(it.subfaenaId)) {
           seen.set(it.subfaenaId, {
+            subfaenaId: it.subfaenaId,
             name: it.name,
             faenaName: it.faenaName,
             color: it.color,
@@ -559,21 +624,65 @@ function Legend({ dayIndex }) {
     return [...seen.values()].sort((a, b) => a.name.localeCompare(b.name));
   }, [dayIndex]);
 
+  const allIds = useMemo(() => subfaenas.map((s) => s.subfaenaId), [subfaenas]);
+  const clickTimer = useRef(null);
+  const cancelPendingClick = () => {
+    if (clickTimer.current) {
+      clearTimeout(clickTimer.current);
+      clickTimer.current = null;
+    }
+  };
+  const handleClick = (id) => {
+    cancelPendingClick();
+    clickTimer.current = setTimeout(() => {
+      clickTimer.current = null;
+      onToggle(id);
+    }, 220);
+  };
+  const handleDoubleClick = (id) => {
+    cancelPendingClick();
+    onIsolate(id, allIds);
+  };
+  useEffect(() => () => cancelPendingClick(), []);
+
   if (subfaenas.length === 0) return null;
+  const hasFilter = excludedSubfaenas && excludedSubfaenas.size > 0;
 
   return (
     <div className="flex flex-wrap items-center gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-2 text-[11px]">
-      <span className="text-[var(--color-muted)]">Subfaenas:</span>
-      {subfaenas.map((s) => (
-        <span
-          key={s.name + s.faenaName}
-          className="inline-flex items-center gap-1 rounded-full bg-[var(--color-surface-2)] px-2 py-0.5"
+      <span className="text-[var(--color-muted)]">
+        Subfaenas{hasFilter ? " (click para mostrar/ocultar · doble-click para aislar)" : " (doble-click para aislar)"}:
+      </span>
+      {subfaenas.map((s) => {
+        const excluded = excludedSubfaenas?.has(s.subfaenaId);
+        return (
+          <button
+            type="button"
+            key={s.subfaenaId}
+            onClick={() => handleClick(s.subfaenaId)}
+            onDoubleClick={() => handleDoubleClick(s.subfaenaId)}
+            title={excluded ? "Click: mostrar · doble-click: aislar" : "Click: ocultar · doble-click: aislar"}
+            className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 transition-opacity ${
+              excluded
+                ? "border-dashed border-[var(--color-border)] bg-transparent opacity-40"
+                : "border-transparent bg-[var(--color-surface-2)] hover:bg-[var(--color-accent-soft)]"
+            }`}
+          >
+            <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: s.color }} />
+            <span className={excluded ? "line-through" : ""}>{s.name}</span>
+            {s.faenaName && <span className="text-[var(--color-muted)]">· {s.faenaName}</span>}
+          </button>
+        );
+      })}
+      {hasFilter && (
+        <button
+          type="button"
+          onClick={onClear}
+          className="ml-auto rounded-full border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-0.5 text-[var(--color-muted)] hover:text-[var(--color-accent)]"
         >
-          <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: s.color }} />
-          <span>{s.name}</span>
-          {s.faenaName && <span className="text-[var(--color-muted)]">· {s.faenaName}</span>}
-        </span>
-      ))}
+          Mostrar todas
+        </button>
+      )}
     </div>
   );
 }
