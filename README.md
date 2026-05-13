@@ -143,3 +143,12 @@ GitHub Pages no resuelve rutas client-side; usamos el truco de [rafgraph/spa-git
 - `index.html` lee ese query, hace `history.replaceState` para devolver la URL correcta, y React Router toma el control.
 
 Resultado: `https://serviciosagricolashp.github.io/adminAgrofrutos/cycles/abc123` recargado en navegador navega bien en vez de devolver 404.
+
+### PWA (instalable en mobile/desktop)
+
+La app está configurada como **PWA** vía `vite-plugin-pwa`. Esto significa:
+- Al abrir la URL en Chrome (Android) o Safari (iOS), el navegador ofrece **"Instalar app" / "Agregar a pantalla de inicio"**. Queda ícono en el escritorio del teléfono y abre en pantalla completa, sin barra del navegador.
+- Service worker precachea los assets → la app abre instantáneamente y funciona aunque haya señal pobre (Firestore tiene su propio cache offline en IndexedDB).
+- Auto-actualización: al hacer `npm run deploy`, la próxima vez que se abre la app, el SW detecta la versión nueva y la aplica sin que nadie tenga que reinstalar.
+
+No es un APK ni se sube a Play Store / App Store — se distribuye con la **misma URL** del deploy.
