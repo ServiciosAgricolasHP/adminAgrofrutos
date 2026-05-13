@@ -45,6 +45,7 @@ import Select from "../components/Select";
 import ConfirmDialog from "../components/ConfirmDialog";
 import { useResizableHeight, ResizeHandle } from "../components/ResizableArea";
 import WorkerPickerModal from "../components/WorkerPickerModal";
+import WorkerEditModal from "../components/WorkerEditModal";
 import TransportsModal from "../components/TransportsModal";
 import CycleSummaryModal from "../components/CycleSummaryModal";
 import { tripsService } from "../services/transportsService";
@@ -198,7 +199,7 @@ function GroupHeaderRowRenderer(props) {
 
 function buildRowsCosecha(workers, days, wdMap, dayCombosByDate) {
   return workers.map((w) => {
-    const row = { rut: w.rut, name: w.name, _isTemp: !!w.isTemp };
+    const row = { rut: w.rut, name: w.name, _isTemp: !!w.isTemp, _isOrphan: !!w.isOrphan };
     let total = 0;
     for (const d of days) {
       const combos = dayCombosByDate[d] || [];
@@ -221,7 +222,7 @@ function buildRowsCosecha(workers, days, wdMap, dayCombosByDate) {
 
 function buildRowsTratoHE(workers, days, wdMap) {
   return workers.map((w) => {
-    const row = { rut: w.rut, name: w.name, _isTemp: !!w.isTemp };
+    const row = { rut: w.rut, name: w.name, _isTemp: !!w.isTemp, _isOrphan: !!w.isOrphan };
     let total = 0;
     for (const d of days) {
       const wd = wdMap[workdayMapKey(w.rut, d, SINGLE_COMBO)];
@@ -246,7 +247,7 @@ function buildRowsTratoHE(workers, days, wdMap) {
 
 function buildRowsTrato(workers, days, wdMap, dayTiersByDate) {
   return workers.map((w) => {
-    const row = { rut: w.rut, name: w.name, _isTemp: !!w.isTemp };
+    const row = { rut: w.rut, name: w.name, _isTemp: !!w.isTemp, _isOrphan: !!w.isOrphan };
     let total = 0;
     for (const d of days) {
       const tiers = dayTiersByDate[d] || [];
@@ -269,7 +270,7 @@ function buildRowsTrato(workers, days, wdMap, dayTiersByDate) {
 
 function buildRowsNormal(workers, days, wdMap) {
   return workers.map((w) => {
-    const row = { rut: w.rut, name: w.name, _isTemp: !!w.isTemp, _monthly: !!w.monthly };
+    const row = { rut: w.rut, name: w.name, _isTemp: !!w.isTemp, _isOrphan: !!w.isOrphan, _monthly: !!w.monthly };
     let total = 0;
     for (const d of days) {
       const wd = wdMap[workdayMapKey(w.rut, d, SINGLE_COMBO)];
@@ -282,18 +283,6 @@ function buildRowsNormal(workers, days, wdMap) {
     row.total = total;
     return row;
   });
-}
-
-function rowsToTSV(nodes, fields, formatters = {}) {
-  const headers = fields.map((f) => f.headerName).join("\t");
-  const lines = nodes.map((n) =>
-    fields.map((f) => {
-      const raw = n.data?.[f.field];
-      const fmt = formatters[f.field];
-      return fmt ? fmt(raw) : raw == null ? "" : String(raw);
-    }).join("\t"),
-  );
-  return [headers, ...lines].join("\n");
 }
 
 export default function CycleDetail() {
@@ -358,6 +347,11 @@ export default function CycleDetail() {
 
   const [removeWorker, setRemoveWorker] = useState(null);
   const [removeBusy, setRemoveBusy] = useState(false);
+
+  // Edición rápida del trabajador desde la grilla — doble click en la
+  // columna RUT abre el mismo modal del módulo de Trabajadores. No aplica
+  // a temporales (no existen como doc en `worker`).
+  const [editingWorkerRut, setEditingWorkerRut] = useState(null);
 
   const [laborForm, setLaborForm] = useState(null);
   const [removeLabor, setRemoveLabor] = useState(null);
@@ -662,13 +656,42 @@ export default function CycleDetail() {
     [workers, rutToName],
   );
 
+  // Trabajadores que tienen workdays en esta labor pero ya no están en
+  // labor.workers (típicamente porque alguien los quitó del listado sin
+  // limpiar la producción). Los inyectamos al grid con flag `isOrphan`
+  // para que el usuario los vea y pueda quitarlos. Sin esto, las métricas
+  // y el payroll los siguen contando pero no aparecen en el grid.
+  const orphanWorkers = useMemo(() => {
+    if (!activeLabor) return [];
+    const inLabor = new Set((workers || []).map((w) => w.rut));
+    const seen = new Set();
+    const out = [];
+    for (const k in wdMap) {
+      const wd = wdMap[k];
+      const rut = wd?.workerRut;
+      if (!rut || inLabor.has(rut) || seen.has(rut)) continue;
+      seen.add(rut);
+      out.push({
+        rut,
+        name: rutToName.get(rut) || rut,
+        isOrphan: true,
+      });
+    }
+    return out;
+  }, [activeLabor, workers, wdMap, rutToName]);
+
+  const gridWorkers = useMemo(
+    () => [...resolvedWorkers, ...orphanWorkers],
+    [resolvedWorkers, orphanWorkers],
+  );
+
   const rowDataRaw = useMemo(() => {
-    if (isCosechaLabor) return buildRowsCosecha(resolvedWorkers, days, wdMap, dayCombosByDate);
-    if (isTratoLabor) return buildRowsTrato(resolvedWorkers, days, wdMap, dayTiersByDate);
-    if (isTratoHELabor) return buildRowsTratoHE(resolvedWorkers, days, wdMap);
-    return buildRowsNormal(resolvedWorkers, days, wdMap);
+    if (isCosechaLabor) return buildRowsCosecha(gridWorkers, days, wdMap, dayCombosByDate);
+    if (isTratoLabor) return buildRowsTrato(gridWorkers, days, wdMap, dayTiersByDate);
+    if (isTratoHELabor) return buildRowsTratoHE(gridWorkers, days, wdMap);
+    return buildRowsNormal(gridWorkers, days, wdMap);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resolvedWorkers, days, wdMap, isCosechaLabor, isTratoLabor, isTratoHELabor, dayCombosByDate, dayTiersByDate]);
+  }, [gridWorkers, days, wdMap, isCosechaLabor, isTratoLabor, isTratoHELabor, dayCombosByDate, dayTiersByDate]);
 
   const groupBuckets = useMemo(() => {
     const buckets = new Map();
@@ -1883,55 +1906,6 @@ export default function CycleDetail() {
     }
   };
 
-  const buildCopyFields = () => {
-    const base = [{ headerName: "RUT", field: "rut" }, { headerName: "Nombre", field: "name" }];
-    if (isCosechaLabor) {
-      for (const d of days) {
-        for (const c of (dayCombosByDate[d] || [])) {
-          base.push({ headerName: `${d} ${comboLabel(catalogs, c.x, c.y)}`, field: `${d}__${c.key}` });
-        }
-      }
-    } else if (isTratoLabor) {
-      for (const d of days) {
-        for (const t of (dayTiersByDate[d] || [])) {
-          base.push({ headerName: `${d} · $${t.price}`, field: `${d}__${t.key}` });
-        }
-      }
-    } else {
-      for (const d of days) base.push({ headerName: d, field: d });
-    }
-    base.push({ headerName: "TOTAL", field: "total" });
-    return base;
-  };
-
-  const copyAll = async () => {
-    const api = gridRef.current?.api;
-    if (!api) return;
-    const nodes = [];
-    api.forEachNodeAfterFilterAndSort((n) => nodes.push(n));
-    const fields = buildCopyFields();
-    const formatters = { rut: (v) => formatRutForDisplay(v) };
-    const tsv = rowsToTSV(nodes, fields, formatters);
-    try {
-      await navigator.clipboard.writeText(tsv);
-      showToast(`Copiados ${nodes.length} trabajadores`);
-    } catch { showToast("No se pudo copiar"); }
-  };
-
-  const copySelected = async () => {
-    const api = gridRef.current?.api;
-    if (!api) return;
-    const selected = api.getSelectedNodes();
-    if (!selected.length) return showToast("No hay filas seleccionadas");
-    const fields = buildCopyFields();
-    const formatters = { rut: (v) => formatRutForDisplay(v) };
-    const tsv = rowsToTSV(selected, fields, formatters);
-    try {
-      await navigator.clipboard.writeText(tsv);
-      showToast(`Copiados ${selected.length} seleccionados`);
-    } catch { showToast("No se pudo copiar"); }
-  };
-
   // ============================================================
   // Column defs
   // ============================================================
@@ -1941,6 +1915,11 @@ export default function CycleDetail() {
       {
         headerName: "RUT", field: "rut", editable: false, width: 140, pinned: "left",
         checkboxSelection: !photoMode, headerCheckboxSelection: !photoMode,
+        onCellDoubleClicked: (p) => {
+          if (p.data?._isHeader || p.data?._isTemp) return;
+          const rut = p.data?.rut;
+          if (rut) setEditingWorkerRut(rut);
+        },
         cellRenderer: (p) => {
           if (p.data?._isHeader) return null;
           if (p.data?._isTemp) {
@@ -1958,7 +1937,14 @@ export default function CycleDetail() {
               </button>
             );
           }
-          return formatRutForDisplay(p.value);
+          return (
+            <span
+              className="cursor-pointer hover:underline"
+              title="Doble click para editar el trabajador"
+            >
+              {formatRutForDisplay(p.value)}
+            </span>
+          );
         },
       },
       {
@@ -1985,6 +1971,17 @@ export default function CycleDetail() {
                 title="Pago mensual: las jornadas se registran como asistencia pero no entran al payroll"
               >
                 M
+              </span>
+            );
+          }
+          if (p.data?._isOrphan) {
+            badges.push(
+              <span
+                key="orphan"
+                className="rounded border border-rose-500/50 bg-rose-500/15 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-rose-700 dark:text-rose-300"
+                title="Tiene producción registrada pero ya no está en el listado del labor. Las métricas y el payroll lo siguen contando. Eliminar sus workdays o re-agregarlo al listado."
+              >
+                Huérfano
               </span>
             );
           }
@@ -2431,9 +2428,6 @@ export default function CycleDetail() {
     return (
       <div className="fixed inset-0 z-50 flex flex-col bg-[var(--color-bg)] p-6">
         <div className="mb-3 flex flex-wrap items-center gap-2">
-          <button onClick={copyAll} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)]">
-            📋 Copiar texto
-          </button>
           <button onClick={copyImage} disabled={exporting} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)] disabled:opacity-60">
             {exporting ? "..." : "🖼 Copiar imagen"}
           </button>
@@ -2525,12 +2519,6 @@ export default function CycleDetail() {
               Reabrir ciclo
             </button>
           )}
-          <button onClick={copySelected} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)]">
-            Copiar selección
-          </button>
-          <button onClick={copyAll} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)]">
-            Copiar todo
-          </button>
           <button onClick={() => setPhotoMode(true)} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)]">
             📷 Modo foto
           </button>
@@ -3616,6 +3604,37 @@ export default function CycleDetail() {
         catalogs={catalogs}
         faena={faena}
         subfaena={subfaena}
+      />
+
+      <WorkerEditModal
+        open={!!editingWorkerRut}
+        mode="edit"
+        worker={editingWorkerRut ? allWorkers.find((w) => w.id === editingWorkerRut) : null}
+        allWorkers={allWorkers}
+        onClose={() => setEditingWorkerRut(null)}
+        onSaved={async () => {
+          const rut = editingWorkerRut;
+          setEditingWorkerRut(null);
+          if (!rut) return;
+          // Refetch para que el grid (vía rutToName + rutToLeader) vea los
+          // cambios sin tener que recargar la pantalla. La caché aditiva
+          // ya tiene el doc actualizado, pero el state local de CycleDetail
+          // necesita el sync explícito.
+          try {
+            const updated = await workersService.getById(rut);
+            if (updated) {
+              setAllWorkers((prev) => {
+                const idx = prev.findIndex((w) => w.id === rut);
+                if (idx === -1) return [...prev, updated];
+                const next = prev.slice();
+                next[idx] = updated;
+                return next;
+              });
+            }
+          } catch {
+            /* noop */
+          }
+        }}
       />
 
       {copyToast && (

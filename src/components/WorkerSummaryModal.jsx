@@ -1,7 +1,7 @@
 import { forwardRef, useEffect, useMemo, useRef, useState } from "react";
 import { toPng, toBlob } from "html-to-image";
 import Modal from "./Modal";
-import { workdayMapKey, getTratoTierTotals, containerLabel } from "../utils/cosechaCombos";
+import { workdayMapKey, getTratoTierTotals, containerLabel, tratoTypeLabel, cosechaUnit } from "../utils/cosechaCombos";
 import { DEFAULT_OVERTIME_RATE } from "../utils/tratoHE";
 import { cyclesService, faenasService, subfaenasService, workdaysService } from "../services";
 import { useCatalogs } from "../contexts/CatalogsContext";
@@ -58,6 +58,7 @@ const defaultCycleTitle = ({ faena, subfaena, cycle }) =>
 // El resto se deja en 0 y la tabla esconde la columna si nadie aportó.
 function buildCycleRows(workerRut, cycle, workdaysByLabor, catalogs) {
   const rows = [];
+  const cosechaContainers = new Set();
   for (const labor of cycle.labors || []) {
     const wdMap = workdaysByLabor[labor.id] || {};
     const byDate = new Map();
@@ -81,7 +82,11 @@ function buildCycleRows(workerRut, cycle, workdaysByLabor, catalogs) {
         if (labor.type === "cosecha") {
           kilos += Number(wd.qty) || 0;
           amount += Number(wd.amount) || 0;
-          if (wd.containerY != null) containers.add(Number(wd.containerY));
+          if (wd.containerY != null) {
+            const cy = Number(wd.containerY);
+            containers.add(cy);
+            cosechaContainers.add(cy);
+          }
         } else if (labor.type === "trato") {
           const t = getTratoTierTotals(wd);
           tratoQty += t.qty;
@@ -102,6 +107,7 @@ function buildCycleRows(workerRut, cycle, workdaysByLabor, catalogs) {
       rows.push({
         laborName: labor.name,
         laborType: labor.type,
+        tratoType: labor.tratoType ?? 0,
         containerLabels,
         date: d,
         kilos,
@@ -114,7 +120,7 @@ function buildCycleRows(workerRut, cycle, workdaysByLabor, catalogs) {
     }
   }
   rows.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.laborName.localeCompare(b.laborName)));
-  return rows;
+  return { rows, cosechaContainers };
 }
 
 export default function WorkerSummaryModal({ open, onClose, worker }) {
@@ -159,7 +165,7 @@ export default function WorkerSummaryModal({ open, onClose, worker }) {
             const k = workdayMapKey(wd.workerRut, wd.date, ck);
             wdMap[wd.laborId][k] = wd;
           }
-          const rows = buildCycleRows(worker.id, c, wdMap, catalogs);
+          const { rows, cosechaContainers } = buildCycleRows(worker.id, c, wdMap, catalogs);
           const totals = rows.reduce(
             (acc, r) => ({
               kilos: acc.kilos + r.kilos,
@@ -178,6 +184,14 @@ export default function WorkerSummaryModal({ open, onClose, worker }) {
             he: rows.some((r) => r.overtimeHours > 0),
             trato: rows.some((r) => r.tratoQty > 0),
           };
+          // Etiqueta de la columna/total de trato: si todos los tratos del ciclo
+          // son del mismo tipo (ej. todos "poda"), usamos el label del catálogo.
+          // Si hay mezcla, caemos al genérico "Trato".
+          const tratoTypes = new Set(rows.filter((r) => r.laborType === "trato").map((r) => r.tratoType));
+          const tratoLabel = tratoTypes.size === 1
+            ? tratoTypeLabel(catalogs, [...tratoTypes][0])
+            : "Trato";
+          const kilosLabel = cosechaUnit(catalogs, cosechaContainers);
           return {
             cycle: c,
             faena: faenaById.get(c.faenaId),
@@ -185,6 +199,8 @@ export default function WorkerSummaryModal({ open, onClose, worker }) {
             rows,
             totals,
             cols,
+            tratoLabel,
+            kilosLabel,
           };
         });
         result.sort((a, b) => (a.cycle.label || "").localeCompare(b.cycle.label || ""));
@@ -377,7 +393,7 @@ const PrintableWorkerSummary = forwardRef(function PrintableWorkerSummary({ work
         <div style={{ width: 90 }} />
       </div>
 
-      {data.map(({ cycle, faena, subfaena, rows, totals, cols }) => {
+      {data.map(({ cycle, faena, subfaena, rows, totals, cols, tratoLabel, kilosLabel }) => {
         // Helper local para que los totales caigan en la columna correcta.
         // valueCol = "kilos" | "jornadas" | "he" | "trato" | "amount"
         const renderTotalRow = (label, value, valueCol, bg) => (
@@ -423,10 +439,10 @@ const PrintableWorkerSummary = forwardRef(function PrintableWorkerSummary({ work
                 <tr style={{ background: "#9dc3e6" }}>
                   <th style={cellH}>Detalle Jornada</th>
                   <th style={cellH}>Fecha</th>
-                  {cols.kilos && <th style={{ ...cellH, textAlign: "right" }}>Kilos</th>}
+                  {cols.kilos && <th style={{ ...cellH, textAlign: "right" }}>{kilosLabel}</th>}
                   {cols.jornadas && <th style={{ ...cellH, textAlign: "right" }}>Jornadas</th>}
                   {cols.he && <th style={{ ...cellH, textAlign: "right" }}>HE</th>}
-                  {cols.trato && <th style={{ ...cellH, textAlign: "right" }}>Trato</th>}
+                  {cols.trato && <th style={{ ...cellH, textAlign: "right" }}>{tratoLabel}</th>}
                   <th style={{ ...cellH, textAlign: "right" }}>Precio</th>
                 </tr>
               </thead>
@@ -472,7 +488,7 @@ const PrintableWorkerSummary = forwardRef(function PrintableWorkerSummary({ work
                 )}
                 {rows.length > 0 && (
                   <>
-                    {cols.kilos && renderTotalRow("Total Kilos", fmtNumber(totals.kilos), "kilos")}
+                    {cols.kilos && renderTotalRow(`Total ${kilosLabel}`, fmtNumber(totals.kilos), "kilos")}
                     {cols.jornadas && renderTotalRow("Total Jornadas", fmtNumber(totals.jornadas), "jornadas")}
                     {cols.he &&
                       renderTotalRow(
@@ -480,7 +496,7 @@ const PrintableWorkerSummary = forwardRef(function PrintableWorkerSummary({ work
                         `${fmtNumber(totals.overtimeHours)}h · ${fmtCurrency(totals.heAmount)}`,
                         "he",
                       )}
-                    {cols.trato && renderTotalRow("Total Trato", fmtNumber(totals.tratoQty), "trato")}
+                    {cols.trato && renderTotalRow(`Total ${tratoLabel}`, fmtNumber(totals.tratoQty), "trato")}
                     {renderTotalRow("Subtotal ciclo", fmtCurrency(totals.amount), "amount", "#c6efce")}
                   </>
                 )}

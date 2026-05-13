@@ -6,6 +6,7 @@ import { useTheme } from "../contexts/ThemeContext";
 const navItems = [
   { to: "/", label: "Dashboard", icon: "🏠", end: true },
   { to: "/faenas", label: "Faenas", icon: "🌾" },
+  { to: "/calendar", label: "Calendario", icon: "📅" },
   { to: "/workers", label: "Trabajadores", icon: "👷" },
   { to: "/transports", label: "Transportes", icon: "🚛" },
   { to: "/advances", label: "Anticipos", icon: "🪙" },
@@ -132,6 +133,10 @@ export default function Layout() {
             <NavLink to="/admin/cleanup-paid-workdays" className={linkClass}>
               <span>🧹</span>
               <span>Limpiar pagados</span>
+            </NavLink>
+            <NavLink to="/admin/console" className={linkClass}>
+              <span>📟</span>
+              <span>Consola</span>
             </NavLink>
           </>
         )}

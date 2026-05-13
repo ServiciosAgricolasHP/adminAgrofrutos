@@ -22,7 +22,8 @@ import {
 } from "../services/advancesService";
 import { formatRutForDisplay } from "../utils/rutUtils";
 import { bankName, ACCOUNT_TYPES, isCashBank, CASH_BANK_CODE } from "../utils/banks";
-import { getTratoTierTotals, getDayCombos, getDaySingle, getTratoTiers } from "../utils/cosechaCombos";
+import { getTratoTierTotals, getDayCombos, getDaySingle, getTratoTiers, tratoTypeLabel, cosechaUnit } from "../utils/cosechaCombos";
+import { useCatalogs } from "../contexts/CatalogsContext";
 import {
   aggregateWorkerAmounts,
   downloadBchileXlsx,
@@ -587,9 +588,15 @@ export default function Payroll() {
     await load();
   };
   const onRedownload = async (p) => {
-    const cyclesForExport = (p.cycleDetails || []).map((c) => ({ id: c.id, label: c.label }));
+    // Aplicar overrides persistidos en el doc (lo que el usuario editó vía
+    // "📝 Editar encabezados") para que el XLSX use los nombres cortos.
+    const overrides = p.cycleLabelOverrides || {};
+    const cyclesForExport = (p.cycleDetails || []).map((c) => ({
+      id: c.id,
+      label: overrides[c.id] || c.label,
+    }));
     if (cyclesForExport.length === 0 && p.cycleIds) {
-      for (const id of p.cycleIds) cyclesForExport.push({ id, label: id });
+      for (const id of p.cycleIds) cyclesForExport.push({ id, label: overrides[id] || id });
     }
     await downloadBchileXlsx(p.items || [], p.name || "Nomina", cyclesForExport);
   };
@@ -1491,6 +1498,7 @@ function buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut) {
     const cellByWorkerDay = new Map(); // key: rut + "|" + date
     const dates = new Set();
     const workersInLabor = new Set();
+    const containers = new Set(); // envases vistos en cosecha — define la unidad
     for (const wd of wdsLabor) {
       const key = `${wd.workerRut}|${wd.date}`;
       dates.add(wd.date);
@@ -1518,6 +1526,7 @@ function buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut) {
         const amt = Number(wd.amount) || 0;
         c.kilos += kg;
         c.amount += amt;
+        containers.add(y);
         if (!c.byCombo[ck]) c.byCombo[ck] = { x, y, kilos: 0, amount: 0 };
         c.byCombo[ck].kilos += kg;
         c.byCombo[ck].amount += amt;
@@ -1629,6 +1638,8 @@ function buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut) {
       laborId: labor.id,
       laborName: labor.name,
       laborType: labor.type,
+      tratoType: labor.tratoType ?? 0,
+      cosechaContainers: [...containers],
       dates: sortedDates,
       rows,
       dayTotals,
@@ -1698,23 +1709,25 @@ function fmtDateShort(dateStr) {
   return `${String(d.getDate()).padStart(2, "0")}-${m}`;
 }
 
-function renderProductionCell(cell, laborType) {
+function renderProductionCell(cell, laborType, tratoLabel, kilosUnit) {
   if (!cell) return "";
   const fmtMoney = (v) => "$" + (Number(v) || 0).toLocaleString("es-CL");
   const num = (v) => (Number(v) || 0).toLocaleString("es-CL", { maximumFractionDigits: 2 });
   if (laborType === "cosecha") {
+    const unit = (kilosUnit || "kg").toLowerCase();
     const combos = Object.entries(cell.byCombo || {})
       .filter(([, b]) => b.kilos || b.amount)
       .sort(([, a], [, b]) => a.x - b.x || a.y - b.y);
     if (combos.length > 1) {
       const lines = combos
-        .map(([ck, b]) => `<div class="muted prod-breakdown">${ck}: ${num(b.kilos)} kg</div>`)
+        .map(([ck, b]) => `<div class="muted prod-breakdown">${ck}: ${num(b.kilos)} ${unit}</div>`)
         .join("");
-      return `${lines}<div>${num(cell.kilos)} kg</div><div class="muted">${fmtMoney(cell.amount)}</div>`;
+      return `${lines}<div>${num(cell.kilos)} ${unit}</div><div class="muted">${fmtMoney(cell.amount)}</div>`;
     }
-    return `<div>${num(cell.kilos)} kg</div><div class="muted">${fmtMoney(cell.amount)}</div>`;
+    return `<div>${num(cell.kilos)} ${unit}</div><div class="muted">${fmtMoney(cell.amount)}</div>`;
   }
   if (laborType === "trato") {
+    const unit = tratoLabel || "";
     const tiers = Object.entries(cell.byTier || {})
       .filter(([, b]) => b.jornadas || b.amount)
       .sort(([, a], [, b]) => a.index - b.index);
@@ -1722,9 +1735,9 @@ function renderProductionCell(cell, laborType) {
       const lines = tiers
         .map(([, b]) => `<div class="muted prod-breakdown">T${b.index + 1}: ${num(b.jornadas)}</div>`)
         .join("");
-      return `${lines}<div>${num(cell.jornadas)}</div><div class="muted">${fmtMoney(cell.amount)}</div>`;
+      return `${lines}<div>${num(cell.jornadas)}${unit ? ` ${unit}` : ""}</div><div class="muted">${fmtMoney(cell.amount)}</div>`;
     }
-    return `<div>${num(cell.jornadas)}</div><div class="muted">${fmtMoney(cell.amount)}</div>`;
+    return `<div>${num(cell.jornadas)}${unit ? ` ${unit}` : ""}</div><div class="muted">${fmtMoney(cell.amount)}</div>`;
   }
   if (laborType === "tratoHE") {
     const flags = [];
@@ -1743,31 +1756,33 @@ function renderProductionCell(cell, laborType) {
 
 // Like renderProductionCell, but for total rows/cells: keeps kg/jornadas
 // counts visible alongside the $ instead of letting them collapse into one number.
-function renderProductionTotal(totals, laborType) {
+function renderProductionTotal(totals, laborType, tratoLabel, kilosUnit) {
   if (!totals) return "";
   const fmtMoney = (v) => "$" + (Number(v) || 0).toLocaleString("es-CL");
   const num = (v) => (Number(v) || 0).toLocaleString("es-CL", { maximumFractionDigits: 2 });
   const amount = totals.amount || 0;
   if (laborType === "cosecha") {
     const kilos = totals.kilos || 0;
+    const unit = (kilosUnit || "kg").toLowerCase();
     const combos = Object.entries(totals.byCombo || {})
       .filter(([, b]) => b.kilos || b.amount)
       .sort(([, a], [, b]) => a.x - b.x || a.y - b.y);
     const breakdown = combos.length > 1
-      ? combos.map(([ck, b]) => `<div class="muted prod-breakdown">${ck}: ${num(b.kilos)} kg</div>`).join("")
+      ? combos.map(([ck, b]) => `<div class="muted prod-breakdown">${ck}: ${num(b.kilos)} ${unit}</div>`).join("")
       : "";
-    const kHtml = kilos ? `<div>${num(kilos)} kg</div>` : "";
+    const kHtml = kilos ? `<div>${num(kilos)} ${unit}</div>` : "";
     return `${breakdown}${kHtml}<div><b>${fmtMoney(amount)}</b></div>`;
   }
   if (laborType === "trato") {
     const j = totals.jornadas || 0;
+    const unit = tratoLabel || "jorn.";
     const tiers = Object.entries(totals.byTier || {})
       .filter(([, b]) => b.jornadas || b.amount)
       .sort(([, a], [, b]) => a.index - b.index);
     const breakdown = tiers.length > 1
       ? tiers.map(([, b]) => `<div class="muted prod-breakdown">T${b.index + 1}: ${num(b.jornadas)}</div>`).join("")
       : "";
-    const jHtml = j ? `<div>${num(j)} jorn.</div>` : "";
+    const jHtml = j ? `<div>${num(j)} ${unit}</div>` : "";
     return `${breakdown}${jHtml}<div><b>${fmtMoney(amount)}</b></div>`;
   }
   if (laborType === "tratoHE") {
@@ -1794,6 +1809,7 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
   const titleOverrides = options.titleOverrides || {};
   const workdaysByGroup = options.workdaysByGroup || {}; // { leader: { cycleId: rows[] } }
   const cyclesById = options.cyclesById || {};
+  const catalogs = options.catalogs || {};
   const mode = options.mode || "cash"; // "cash" | "detail"
   const isDetail = mode === "detail";
   const summaries = options.summaries || [];
@@ -1899,6 +1915,21 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
           if (laborSnapshots.length === 0) return "";
           const laborTables = laborSnapshots
             .map((ls) => {
+              // Para trato usamos el label del catálogo (ej. "Poda") en vez
+              // del genérico "A trato" / "jorn." que oscurece de qué labor se
+              // trata cuando hay varias del mismo tipo. Para cosecha la
+              // unidad sale del envase del catálogo (ej. "Saco" vs "Kilo").
+              const tratoLabel = ls.laborType === "trato"
+                ? tratoTypeLabel(catalogs, ls.tratoType ?? 0)
+                : "";
+              const kilosUnit = ls.laborType === "cosecha"
+                ? cosechaUnit(catalogs, new Set(ls.cosechaContainers || []))
+                : "";
+              const typeLabel = ls.laborType === "trato" && tratoLabel
+                ? tratoLabel
+                : ls.laborType === "cosecha" && kilosUnit
+                  ? kilosUnit
+                  : (LABOR_TYPE_LABEL[ls.laborType] || ls.laborType);
               const dayHeaders = ls.dates
                 .map((d) => {
                   const price = ls.priceByDate?.[d];
@@ -1910,7 +1941,7 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
                 .map((row) => {
                   const dayCells = ls.dates
                     .map(
-                      (d) => `<td class="prod-cell">${renderProductionCell(row.cells[d], ls.laborType)}</td>`,
+                      (d) => `<td class="prod-cell">${renderProductionCell(row.cells[d], ls.laborType, tratoLabel, kilosUnit)}</td>`,
                     )
                     .join("");
                   const rowTotalAgg = {
@@ -1922,12 +1953,12 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
                     <tr>
                       <td class="prod-name">${row.name || row.rut}</td>
                       ${dayCells}
-                      <td class="prod-total">${renderProductionTotal(rowTotalAgg, ls.laborType)}</td>
+                      <td class="prod-total">${renderProductionTotal(rowTotalAgg, ls.laborType, tratoLabel, kilosUnit)}</td>
                     </tr>`;
                 })
                 .join("");
               const dayTotals = ls.dates
-                .map((d) => `<td class="prod-total">${renderProductionTotal(ls.dayTotals[d], ls.laborType)}</td>`)
+                .map((d) => `<td class="prod-total">${renderProductionTotal(ls.dayTotals[d], ls.laborType, tratoLabel, kilosUnit)}</td>`)
                 .join("");
               const grandTotalAgg = {
                 amount: ls.grandAmount,
@@ -1938,7 +1969,7 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
               };
               return `
                 <div class="prod-table">
-                  <h4 style="background:${itemFill}">${ls.laborName} <span class="muted">(${LABOR_TYPE_LABEL[ls.laborType] || ls.laborType})</span></h4>
+                  <h4 style="background:${itemFill}">${ls.laborName} <span class="muted">(${typeLabel})</span></h4>
                   <table class="prod">
                     <thead>
                       <tr>
@@ -1952,7 +1983,7 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
                       <tr style="background:${leaderFill}">
                         <td class="prod-name"><b>Total día</b></td>
                         ${dayTotals}
-                        <td class="prod-total">${renderProductionTotal(grandTotalAgg, ls.laborType)}</td>
+                        <td class="prod-total">${renderProductionTotal(grandTotalAgg, ls.laborType, tratoLabel, kilosUnit)}</td>
                       </tr>
                     </tfoot>
                   </table>
@@ -2145,7 +2176,7 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
 </body></html>`;
 }
 
-async function printPaymentDetails(payroll, allGroups, titleOverrides = {}, summaries = []) {
+async function printPaymentDetails(payroll, allGroups, titleOverrides = {}, summaries = [], catalogs = {}) {
   if (allGroups.length === 0) return;
   const cycleIds = payroll.cycleIds || (payroll.cycleDetails || []).map((c) => c.id);
   const cycles = await Promise.all(cycleIds.map((id) => cyclesService.getById(id)));
@@ -2179,6 +2210,7 @@ async function printPaymentDetails(payroll, allGroups, titleOverrides = {}, summ
     titleOverrides,
     workdaysByGroup,
     cyclesById,
+    catalogs,
     mode: "detail",
     summaries,
   });
@@ -2192,7 +2224,7 @@ async function printPaymentDetails(payroll, allGroups, titleOverrides = {}, summ
   w.document.close();
 }
 
-async function printCashReceipts(payroll, cashGroups, titleOverrides = {}) {
+async function printCashReceipts(payroll, cashGroups, titleOverrides = {}, catalogs = {}) {
   if (cashGroups.length === 0) return;
 
   // Load cycles (for labor types) + workdays linked to cash items.
@@ -2230,6 +2262,7 @@ async function printCashReceipts(payroll, cashGroups, titleOverrides = {}) {
     titleOverrides,
     workdaysByGroup,
     cyclesById,
+    catalogs,
   });
   const w = window.open("", "_blank", "width=900,height=700");
   if (!w) {
@@ -2242,6 +2275,7 @@ async function printCashReceipts(payroll, cashGroups, titleOverrides = {}) {
 }
 
 function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOnly, onDownloadSnapshot }) {
+  const { catalogs } = useCatalogs();
   const items = payroll.items || [];
   const { bank, cash } = splitBankAndCash(items);
   const cashGroups = groupCashByLeader(cash);
@@ -2288,8 +2322,15 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
     return { cycle: c, bank: bankSum, cash: cashSum, total: bankSum + cashSum };
   });
 
+  // Encabezados editables por ciclo. Se guardan en el doc de la nómina
+  // (`payroll.cycleLabelOverrides`) para que persistan entre dispositivos y
+  // se apliquen a XLSX, comprobantes y PDF de detalle. Fallback: si la
+  // nómina no tiene el campo todavía pero existe localStorage de una
+  // versión vieja, lo migramos al primer save.
   const titleStorageKey = `cash_receipt_titles_${payroll.id || payroll.name}`;
   const [cycleTitleOverrides, setCycleTitleOverrides] = useState(() => {
+    const fromPayroll = payroll?.cycleLabelOverrides;
+    if (fromPayroll && Object.keys(fromPayroll).length > 0) return { ...fromPayroll };
     try { return JSON.parse(localStorage.getItem(titleStorageKey) || "{}"); } catch { return {}; }
   });
   const [showTitleEditor, setShowTitleEditor] = useState(false);
@@ -2298,16 +2339,39 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
 
   const setCycleTitle = (cid, val) => {
     setCycleTitleOverrides((prev) => {
-      const next = { ...prev, [cid]: val };
-      try { localStorage.setItem(titleStorageKey, JSON.stringify(next)); } catch {}
+      const next = { ...prev };
+      const trimmed = String(val || "").trim();
+      // Vacío = restaurar default; no guardamos override.
+      if (!trimmed) delete next[cid];
+      else next[cid] = val;
       return next;
     });
   };
 
+  // Persistencia debounced en Firestore. Cada cambio en cycleTitleOverrides
+  // espera 500ms de inactividad y luego escribe. localStorage queda como
+  // espejo por compatibilidad con la versión anterior.
+  useEffect(() => {
+    if (!payroll?.id) return;
+    const t = setTimeout(() => {
+      try { localStorage.setItem(titleStorageKey, JSON.stringify(cycleTitleOverrides)); } catch {
+        /* noop */
+      }
+      payrollsService
+        .update(payroll.id, { cycleLabelOverrides: cycleTitleOverrides })
+        .catch((err) => console.warn("No se pudo guardar overrides:", err));
+    }, 500);
+    return () => clearTimeout(t);
+  }, [cycleTitleOverrides, payroll?.id, titleStorageKey]);
+
+  // Helper para mostrar el label con override aplicado.
+  const displayCycleLabel = (cycle) =>
+    cycleTitleOverrides[cycle.id] || cycle.label || cycle.id;
+
   const handlePrint = async () => {
     setPrinting(true);
     try {
-      await printCashReceipts(payroll, cashGroups, cycleTitleOverrides);
+      await printCashReceipts(payroll, cashGroups, cycleTitleOverrides, catalogs);
     } finally {
       setPrinting(false);
     }
@@ -2316,7 +2380,7 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
   const handlePrintDetail = async () => {
     setPrintingDetail(true);
     try {
-      await printPaymentDetails(payroll, allGroups, cycleTitleOverrides, detailSummaries);
+      await printPaymentDetails(payroll, allGroups, cycleTitleOverrides, detailSummaries, catalogs);
     } finally {
       setPrintingDetail(false);
     }
@@ -2329,15 +2393,77 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex shrink-0 items-center justify-between border-b border-[var(--color-border)] px-5 py-3">
-          <div>
-            <h2 className="font-semibold">{payroll.name}</h2>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <h2 className="font-semibold">{payroll.name}</h2>
+              {cycleDetails.length > 0 && (
+                <button
+                  onClick={() => setShowTitleEditor((v) => !v)}
+                  className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-0.5 text-[10px] hover:bg-[var(--color-accent-soft)]"
+                  title="Cambiar el nombre con el que cada ciclo aparece en XLSX, comprobantes y PDF"
+                >
+                  📝 Editar encabezados
+                </button>
+              )}
+            </div>
             <p className="text-xs text-[var(--color-muted)]">
-              {(payroll.cycleLabels || []).join(" · ") || "—"}
+              {cycleDetails.length > 0
+                ? cycleDetails.map((c) => displayCycleLabel(c)).join(" · ")
+                : (payroll.cycleLabels || []).join(" · ") || "—"}
             </p>
           </div>
-          <button onClick={onClose} className="text-[var(--color-muted)] hover:text-[var(--color-text)]">✕</button>
+          <button onClick={onClose} className="ml-3 text-[var(--color-muted)] hover:text-[var(--color-text)]">✕</button>
         </div>
         <div className="flex-1 space-y-5 overflow-y-auto px-5 py-4">
+          {showTitleEditor && cycleDetails.length > 0 && (
+            <section className="rounded-lg border border-[var(--color-accent)]/50 bg-[var(--color-accent-soft)]/40 p-4">
+              <div className="mb-2 flex items-center justify-between">
+                <h3 className="text-sm font-semibold">📝 Encabezados de ciclo</h3>
+                <button
+                  onClick={() => setShowTitleEditor(false)}
+                  className="text-[var(--color-muted)] hover:text-[var(--color-text)]"
+                >
+                  ✕
+                </button>
+              </div>
+              <p className="mb-3 text-[11px] text-[var(--color-muted)]">
+                Personalizá cómo aparece cada ciclo en el XLSX, los comprobantes y el PDF de detalle.
+                Dejar vacío para restaurar el nombre original. Los cambios se guardan automáticamente.
+              </p>
+              <div className="space-y-2">
+                {cycleDetails.map((c) => {
+                  const override = cycleTitleOverrides[c.id];
+                  const hasOverride = !!override;
+                  return (
+                    <div key={c.id} className="flex items-center gap-2">
+                      <label
+                        className="w-44 shrink-0 truncate text-[11px] text-[var(--color-muted)]"
+                        title={c.label}
+                      >
+                        {c.label}
+                      </label>
+                      <input
+                        value={override ?? ""}
+                        placeholder={c.label}
+                        onChange={(e) => setCycleTitle(c.id, e.target.value)}
+                        className="flex-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-xs outline-none focus:border-[var(--color-accent)]"
+                      />
+                      {hasOverride && (
+                        <button
+                          onClick={() => setCycleTitle(c.id, "")}
+                          className="rounded px-1 text-xs text-[var(--color-muted)] hover:text-[var(--color-accent)]"
+                          title="Restaurar el nombre original"
+                        >
+                          ↺
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+          )}
+
           {/* Resumen — desglose general */}
           <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)] p-4">
             <h3 className="mb-3 text-sm font-semibold">Resumen</h3>
@@ -2381,7 +2507,7 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
                     {totalsByCycle.map(({ cycle, bank: b, cash: c, total }) => (
                       <tr key={cycle.id} className="border-t border-[var(--color-border)]">
                         <td className="px-2 py-1">
-                          <span className="font-medium">{cycle.label}</span>
+                          <span className="font-medium">{displayCycleLabel(cycle)}</span>
                           {cycle.faenaName && (
                             <span className="ml-1 text-[10px] text-[var(--color-muted)]">
                               · {cycle.faenaName}{cycle.subfaenaName ? `/${cycle.subfaenaName}` : ""}
@@ -2457,39 +2583,7 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
             <section>
               <div className="mb-2 flex items-center justify-between">
                 <h3 className="text-sm font-semibold">💵 Efectivo agrupado por líder ({cash.length})</h3>
-                <button
-                  onClick={() => setShowTitleEditor((v) => !v)}
-                  className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
-                >
-                  📝 Editar encabezados
-                </button>
               </div>
-              {showTitleEditor && (
-                <div className="mb-3 space-y-2 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] p-3">
-                  <p className="text-xs text-[var(--color-muted)]">
-                    Personaliza el nombre de cada ciclo solo para los comprobantes impresos.
-                  </p>
-                  {cycleDetails.map((c) => (
-                    <div key={c.id} className="flex items-center gap-2">
-                      <label className="w-32 text-xs text-[var(--color-muted)]">{c.label}:</label>
-                      <input
-                        value={cycleTitleOverrides[c.id] ?? c.label}
-                        onChange={(e) => setCycleTitle(c.id, e.target.value)}
-                        className="flex-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-xs outline-none focus:border-[var(--color-accent)]"
-                      />
-                      {cycleTitleOverrides[c.id] != null && cycleTitleOverrides[c.id] !== c.label && (
-                        <button
-                          onClick={() => setCycleTitle(c.id, c.label)}
-                          className="text-xs text-[var(--color-muted)] hover:text-[var(--color-accent)]"
-                          title="Restaurar"
-                        >
-                          ↺
-                        </button>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
               <div className="space-y-3">
                 {cashGroups.map((g) => (
                   <div key={g.leader} className="rounded border border-[var(--color-border)]">

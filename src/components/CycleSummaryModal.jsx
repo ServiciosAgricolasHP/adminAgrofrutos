@@ -7,6 +7,7 @@ import {
   getTratoTierTotals,
   workdayMapKey,
   tratoTypeLabel,
+  cosechaUnit,
 } from "../utils/cosechaCombos";
 import { isRedDay } from "../utils/tratoHE";
 import { tripsService } from "../services/transportsService";
@@ -33,45 +34,85 @@ const LOGO_URL = `${import.meta.env.BASE_URL}logo.png`;
 // Day-by-day aggregation per labor
 // ============================================================
 
-function laborQtyUnit(type) {
-  if (type === "cosecha") return "Kilos";
-  if (type === "trato") return "Unidades";
+// Encabezado de la columna principal según tipo de labor. tratoHE muestra
+// "Jornadas / HE" porque agrega dos métricas en la misma columna. Para trato
+// y cosecha tomamos la unidad del catálogo (ej. "Poda", "Saco") en vez de
+// literales fijos.
+function laborQtyUnit(labor, catalogs, containers) {
+  const type = labor?.type;
+  if (type === "cosecha") return cosechaUnit(catalogs, containers);
+  if (type === "trato") return tratoTypeLabel(catalogs, labor?.tratoType ?? 0);
+  if (type === "tratoHE") return "Jornadas / HE";
   return "Jornadas";
 }
 
-// Returns [{ date, qty, amount }]
+// Texto a mostrar en la celda de métrica según tipo de labor.
+function formatRowMetric(row, type) {
+  if (type === "cosecha") return fmtNumber(row.qty);
+  if (type === "trato") return fmtNumber(row.qty);
+  if (type === "tratoHE") {
+    const parts = [];
+    if (row.qty > 0) parts.push(`${fmtNumber(row.qty)} j`);
+    if (row.overtimeHours > 0) parts.push(`${fmtNumber(row.overtimeHours)} HE`);
+    return parts.join(" + ");
+  }
+  return fmtNumber(row.qty);
+}
+
+function formatTotalsMetric(totals, type) {
+  if (type === "tratoHE") {
+    const parts = [];
+    if (totals.qty > 0) parts.push(`${fmtNumber(totals.qty)} j`);
+    if (totals.overtimeHours > 0) parts.push(`${fmtNumber(totals.overtimeHours)} HE`);
+    return parts.join(" + ");
+  }
+  return fmtNumber(totals.qty);
+}
+
+// Returns { rows: [...], containers: Set<number> }
 function buildDailyRows(labor, wdMap) {
   const byDate = new Map();
+  const containers = new Set();
   for (const k in wdMap) {
     const wd = wdMap[k];
     const d = wd.date;
-    if (!byDate.has(d)) byDate.set(d, { date: d, qty: 0, amount: 0, workersSet: new Set() });
+    if (!byDate.has(d)) {
+      byDate.set(d, { date: d, qty: 0, overtimeHours: 0, amount: 0, workersSet: new Set() });
+    }
     const g = byDate.get(d);
     if (labor.type === "cosecha") {
       g.qty += Number(wd.qty) || 0;
       g.amount += Number(wd.amount) || 0;
+      containers.add(Number(wd.containerY) || 0);
     } else if (labor.type === "trato") {
       const t = getTratoTierTotals(wd);
       g.qty += t.qty;
       g.amount += t.amount;
     } else if (labor.type === "tratoHE") {
       g.qty += Number(wd.qty) || 0;
+      g.overtimeHours += Number(wd.overtimeHours) || 0;
       g.amount += Number(wd.amount) || 0;
     } else {
-      g.qty += 1; // count of workdays = jornadas
+      // main/supervision/extra: 1 jornada por workday
+      g.qty += 1;
       g.amount += Number(wd.amount) || 0;
     }
     g.workersSet.add(wd.workerRut);
   }
-  return [...byDate.values()]
+  const rows = [...byDate.values()]
     .map((g) => ({ ...g, workerCount: g.workersSet.size }))
     .sort((a, b) => (a.date < b.date ? -1 : 1));
+  return { rows, containers };
 }
 
 function laborTotals(rows) {
-  let qty = 0, amount = 0;
-  for (const r of rows) { qty += r.qty; amount += r.amount; }
-  return { qty, amount };
+  let qty = 0, overtimeHours = 0, amount = 0;
+  for (const r of rows) {
+    qty += r.qty;
+    overtimeHours += r.overtimeHours || 0;
+    amount += r.amount;
+  }
+  return { qty, overtimeHours, amount };
 }
 
 // ============================================================
@@ -100,7 +141,10 @@ const saveJSON = (key, value) => {
 export default function CycleSummaryModal({
   open, onClose, cycle, faena, subfaena, workdaysByLabor = {}, dayPrices = {}, catalogs = {},
 }) {
-  const { activeCarriers } = useCarriers();
+  // Usamos TODOS los carriers (no solo activos) — un transportista soft-deleted
+  // puede tener vueltas viejas en el ciclo y necesitamos su alias para no
+  // mostrar el UUID crudo.
+  const { carriers } = useCarriers();
   const [trips, setTrips] = useState([]);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState("");
@@ -176,11 +220,11 @@ export default function CycleSummaryModal({
     if (!cycle?.labors) return [];
     return cycle.labors.map((l) => {
       const wdMap = workdaysByLabor[l.id] || {};
-      const rows = buildDailyRows(l, wdMap);
+      const { rows, containers } = buildDailyRows(l, wdMap);
       const totals = laborTotals(rows);
-      return { labor: l, rows, totals, unit: laborQtyUnit(l.type) };
+      return { labor: l, rows, totals, unit: laborQtyUnit(l, catalogs, containers) };
     });
-  }, [cycle?.labors, workdaysByLabor]);
+  }, [cycle?.labors, workdaysByLabor, catalogs]);
 
   // Transport: group by carrier + date
   const transportData = useMemo(() => {
@@ -202,7 +246,7 @@ export default function CycleSummaryModal({
     }));
   }, [trips]);
 
-  const carrierById = useMemo(() => new Map(activeCarriers.map((c) => [c.id, c])), [activeCarriers]);
+  const carrierById = useMemo(() => new Map(carriers.map((c) => [c.id, c])), [carriers]);
 
   const grandTotalPagar = useMemo(() => {
     let sum = 0;
@@ -567,6 +611,7 @@ const PrintableSummary = forwardRef(function PrintableSummary(
             key={ld.labor.id}
             displayName={displayName}
             unit={ld.unit}
+            laborType={ld.labor.type}
             rows={ld.rows}
             totals={ld.totals}
             mode={mode}
@@ -579,7 +624,7 @@ const PrintableSummary = forwardRef(function PrintableSummary(
       {carriers.map((tg) => {
         if (mode === "cobrar" && tg.include === false) return null;
         const c = carrierById.get(tg.carrierId);
-        const fallbackName = c ? c.alias : tg.carrierId;
+        const fallbackName = c?.alias || c?.name || "(transportista eliminado)";
         const displayName = titles.carrierNames?.[tg.carrierId] || fallbackName;
         return (
           <TransportTable
@@ -611,7 +656,7 @@ const PrintableSummary = forwardRef(function PrintableSummary(
   );
 });
 
-function LaborTable({ displayName, unit, rows, totals, mode, chargeRate }) {
+function LaborTable({ displayName, unit, laborType, rows, totals, mode, chargeRate }) {
   if (rows.length === 0) return null;
   return (
     <div style={{ marginBottom: 14 }}>
@@ -637,7 +682,9 @@ function LaborTable({ displayName, unit, rows, totals, mode, chargeRate }) {
               <tr key={r.date}>
                 <td style={cell}>{displayName}</td>
                 <td style={cell}>{dateLabel(r.date)}</td>
-                <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtNumber(r.qty)}</td>
+                <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                  {formatRowMetric(r, laborType)}
+                </td>
                 <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{rate > 0 ? fmtCurrency(rate) : ""}</td>
                 <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(valorTotal)}</td>
                 <td style={{ ...cell, textAlign: "right", color: "#999" }}>$ -</td>
@@ -647,7 +694,9 @@ function LaborTable({ displayName, unit, rows, totals, mode, chargeRate }) {
           })}
           <tr style={{ background: "#c6efce" }}>
             <td style={{ ...cell, fontWeight: 700 }} colSpan={2}>Subtotal {displayName}</td>
-            <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtNumber(totals.qty)}</td>
+            <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
+              {formatTotalsMetric(totals, laborType)}
+            </td>
             <td style={cell}></td>
             <td style={cell}></td>
             <td style={cell}></td>

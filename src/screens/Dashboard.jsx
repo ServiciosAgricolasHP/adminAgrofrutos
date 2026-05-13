@@ -47,23 +47,47 @@ export default function Dashboard() {
     };
   }, [faenas, cycles, workers]);
 
-  const openCyclesList = useMemo(
-    () =>
-      cycles
-        .filter((c) => c.status !== "closed")
-        .map((c) => ({
-          ...c,
-          faenaName: faenas.find((f) => f.id === c.faenaId)?.name || "—",
-        }))
-        .slice(0, 8),
-    [cycles, faenas],
-  );
+  // Una entrada por faena con sus ciclos abiertos. Las faenas sin ciclo
+  // abierto siguen apareciendo (para acceder al detalle de la faena), pero
+  // ordenadas al final. Las que tienen ciclos abiertos van primero, por
+  // cantidad de actividad descendente.
+  const faenaGroups = useMemo(() => {
+    const map = new Map();
+    for (const f of faenas) {
+      map.set(f.id, { faena: f, openCycles: [], closedCount: 0 });
+    }
+    for (const c of cycles) {
+      const entry = map.get(c.faenaId);
+      if (!entry) continue;
+      if (c.status === "closed") entry.closedCount += 1;
+      else entry.openCycles.push(c);
+    }
+    for (const entry of map.values()) {
+      entry.openCycles.sort((a, b) =>
+        String(b.startDate || "").localeCompare(String(a.startDate || "")),
+      );
+    }
+    return [...map.values()].sort((a, b) => {
+      const ao = a.openCycles.length;
+      const bo = b.openCycles.length;
+      if (ao !== bo) return bo - ao;
+      return String(a.faena.name || "").localeCompare(String(b.faena.name || ""));
+    });
+  }, [faenas, cycles]);
 
   return (
     <div>
-      <div className="mb-6">
-        <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>
-        <p className="text-sm text-[var(--color-muted)]">Resumen general del sistema.</p>
+      <div className="mb-6 flex flex-wrap items-baseline justify-between gap-2">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>
+          <p className="text-sm text-[var(--color-muted)]">Resumen general del sistema.</p>
+        </div>
+        <Link
+          to="/faenas"
+          className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)]"
+        >
+          Ir a Faenas →
+        </Link>
       </div>
 
       {loading ? (
@@ -92,54 +116,92 @@ export default function Dashboard() {
             </div>
           </div>
 
-          <div className="mt-6 grid gap-4 lg:grid-cols-2">
-            <div className={card}>
-              <div className="mb-3 text-xs uppercase tracking-wider text-[var(--color-muted)]">
-                Ciclos abiertos
+          <section className="mt-6">
+            <div className="mb-3 flex items-baseline justify-between">
+              <h2 className="text-sm font-semibold uppercase tracking-wider text-[var(--color-muted)]">
+                Faenas y ciclos abiertos
+              </h2>
+              {faenas.length > 0 && (
+                <span className="text-xs text-[var(--color-muted)]">
+                  {faenas.length} faena{faenas.length === 1 ? "" : "s"}
+                </span>
+              )}
+            </div>
+
+            {faenaGroups.length === 0 ? (
+              <div className={`${card} text-sm text-[var(--color-muted)]`}>
+                Sin faenas creadas todavía. Andá a{" "}
+                <Link to="/faenas" className="text-[var(--color-accent)] hover:underline">
+                  Faenas
+                </Link>{" "}
+                para empezar.
               </div>
-              {openCyclesList.length === 0 ? (
-                <div className="text-sm text-[var(--color-muted)]">Sin ciclos abiertos.</div>
-              ) : (
-                <ul className="divide-y divide-[var(--color-border)]">
-                  {openCyclesList.map((c) => (
-                    <li key={c.id} className="flex items-center justify-between py-2">
-                      <div>
-                        <div className="text-sm font-medium">{c.label}</div>
-                        <div className="text-xs text-[var(--color-muted)]">
-                          {c.faenaName} {c.startDate && `· inicio ${c.startDate}`}
-                        </div>
+            ) : (
+              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                {faenaGroups.map(({ faena, openCycles, closedCount }) => {
+                  const isActive = openCycles.length > 0;
+                  return (
+                    <div
+                      key={faena.id}
+                      className={`${card} ${isActive ? "" : "opacity-75"}`}
+                    >
+                      <div className="flex items-baseline justify-between gap-2">
+                        <Link
+                          to="/faenas"
+                          className="truncate text-base font-medium hover:text-[var(--color-accent)]"
+                          title={faena.name}
+                        >
+                          {faena.name}
+                        </Link>
+                        {isActive ? (
+                          <span className="shrink-0 rounded-full bg-[var(--color-accent-soft)] px-2 py-0.5 text-[10px] font-medium text-[var(--color-accent)]">
+                            {openCycles.length} abierto{openCycles.length === 1 ? "" : "s"}
+                          </span>
+                        ) : closedCount > 0 ? (
+                          <span className="shrink-0 text-[10px] text-[var(--color-muted)]">
+                            {closedCount} cerrado{closedCount === 1 ? "" : "s"}
+                          </span>
+                        ) : (
+                          <span className="shrink-0 text-[10px] text-[var(--color-muted)]">
+                            sin ciclos
+                          </span>
+                        )}
                       </div>
-                      <Link
-                        to={`/cycles/${c.id}`}
-                        className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2.5 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
-                      >
-                        Abrir
-                      </Link>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-            <div className={card}>
-              <div className="mb-3 text-xs uppercase tracking-wider text-[var(--color-muted)]">Faenas</div>
-              {faenas.length === 0 ? (
-                <div className="text-sm text-[var(--color-muted)]">Sin faenas.</div>
-              ) : (
-                <ul className="divide-y divide-[var(--color-border)]">
-                  {faenas.slice(0, 6).map((f) => (
-                    <li key={f.id} className="flex items-center justify-between py-2">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium">{f.name}</span>
-                      </div>
-                      <span className="text-xs text-[var(--color-muted)]">
-                        {metrics.cyclesByFaena[f.id] || 0} abiertos
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          </div>
+
+                      {openCycles.length > 0 ? (
+                        <ul className="mt-2 space-y-0.5">
+                          {openCycles.map((c) => (
+                            <li key={c.id}>
+                              <Link
+                                to={`/cycles/${c.id}`}
+                                className="group flex items-center justify-between gap-2 rounded px-2 py-1 text-sm hover:bg-[var(--color-accent-soft)]"
+                              >
+                                <span className="truncate group-hover:text-[var(--color-accent)]">
+                                  {c.label}
+                                </span>
+                                {c.startDate && (
+                                  <span className="shrink-0 text-[10px] tabular-nums text-[var(--color-muted)]">
+                                    {c.startDate}
+                                  </span>
+                                )}
+                              </Link>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <Link
+                          to="/faenas"
+                          className="mt-2 inline-block text-xs text-[var(--color-muted)] hover:text-[var(--color-accent)]"
+                        >
+                          Ver detalle de la faena →
+                        </Link>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
         </>
       )}
     </div>

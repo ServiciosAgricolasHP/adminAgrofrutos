@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <title>Cargando…</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      SPA fallback para GitHub Pages.
+
+      GH Pages no soporta rewrites: si pegás https://.../adminAgrofrutos/cycles/abc
+      directo en la barra (o recargás un deep-link), el server busca un archivo
+      cycles/abc/index.html que no existe y devuelve este 404.html. El script
+      de abajo nos rescata: re-redirige a /adminAgrofrutos/?/cycles/abc, y
+      después index.html (con su propio script) reconstruye la URL real con
+      history.replaceState y deja a react-router-dom hacer su trabajo.
+
+      Truco de rafgraph/spa-github-pages.
+    -->
+    <script>
+      // Cuántos segmentos preservar del path real. Para
+      // serviciosagricolashp.github.io/adminAgrofrutos/* es 1 (= la carpeta
+      // del proyecto). Si el sitio fuera el repo raíz, sería 0.
+      var pathSegmentsToKeep = 1;
+      var l = window.location;
+      l.replace(
+        l.protocol + "//" + l.hostname + (l.port ? ":" + l.port : "") +
+        l.pathname.split("/").slice(0, 1 + pathSegmentsToKeep).join("/") + "/?/" +
+        l.pathname.slice(1).split("/").slice(pathSegmentsToKeep).join("/").replace(/&/g, "~and~") +
+        (l.search ? "&" + l.search.slice(1).replace(/&/g, "~and~") : "") +
+        l.hash
+      );
+    </script>
+  </head>
+  <body>
+    <p>Cargando…</p>
+  </body>
+</html>

@@ -101,6 +101,12 @@ Cada generación de nómina escribe además un **snapshot JSON** inmutable (cole
 ### Links útiles
 `/links` — listado de atajos a herramientas externas frecuentes. CRUD simple con reordenamiento drag-and-drop persistido en la colección `interestLinks`.
 
+### Calendario
+`/calendar` — vista mensual con barras de color por subfaena por día. Click en el día (zona blanca) abre un modal de zoom con todas las subfaenas del día; click en una barra abre un drawer con detalle (por labor + transportes) de esa subfaena. Carga workdays + trips del rango del mes con cache de sesión (5 min) — costo aprox. ~3k reads en mes pico. La función `fetchWorkdaysInRange` está aislada para migrar a snapshot por ciclo cerrado cuando el volumen lo justifique.
+
+### Consola admin
+`/admin/console` — solo admin. Permite contar workdays por mes/rango/ciclo y ver totales por colección usando `getCountFromServer` (1 read por cada 1000 docs vs N reads con `getDocs`).
+
 ## Servicios de datos
 
 - `services/firestoreBase.js` exporta `createService(entityName, collectionName)` — factory CRUD.
@@ -120,7 +126,18 @@ Cada generación de nómina escribe además un **snapshot JSON** inmutable (cole
 /advances                      Anticipos y Adelantos
 /payroll                       Nómina
 /links                         Links útiles
+/calendar                      Calendario mensual de producción
 /audit                         Auditoría (admin)
 /admin/migrate-workers         Importar trabajadores desde CSV (admin)
 /admin/cleanup-paid-workdays   Limpieza de workdays ya pagados (admin)
+/admin/console                 Consola: conteos de Firestore (admin)
+*                              NotFound (404) — botones "Volver" + "Ir al Dashboard"
 ```
+
+### Hosting de SPA en GitHub Pages
+
+GitHub Pages no resuelve rutas client-side; usamos el truco de [rafgraph/spa-github-pages](https://github.com/rafgraph/spa-github-pages):
+- `public/404.html` redirige cualquier ruta desconocida a `index.html?/<path>`.
+- `index.html` lee ese query, hace `history.replaceState` para devolver la URL correcta, y React Router toma el control.
+
+Resultado: `https://serviciosagricolashp.github.io/adminAgrofrutos/cycles/abc123` recargado en navegador navega bien en vez de devolver 404.

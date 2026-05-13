@@ -5,6 +5,7 @@ import Select from "./Select";
 import ConfirmDialog from "./ConfirmDialog";
 import { useCarriers } from "../contexts/CarriersContext";
 import { tripsService, TRIP_KINDS } from "../services/transportsService";
+import { CARRIER_TYPES } from "../services/carriersService";
 
 const fmtCurrency = (v) =>
   new Intl.NumberFormat("es-CL", { style: "currency", currency: "CLP", minimumFractionDigits: 0 }).format(
@@ -268,6 +269,7 @@ function TripEditModal({ open, onClose, trip, carriers, days, defaultDate, onSav
   const [notes, setNotes] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [creatingCarrier, setCreatingCarrier] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -363,7 +365,16 @@ function TripEditModal({ open, onClose, trip, carriers, days, defaultDate, onSav
       }
     >
       <form onSubmit={handleSubmit} className="grid grid-cols-2 gap-3">
-        <Select label="Transportista" value={carrierId} onChange={setCarrierId} options={carrierOptions} required />
+        <div>
+          <Select label="Transportista" value={carrierId} onChange={setCarrierId} options={carrierOptions} required />
+          <button
+            type="button"
+            onClick={() => setCreatingCarrier(true)}
+            className="mt-1 text-[11px] text-[var(--color-accent)] hover:underline"
+          >
+            + Nuevo transportista
+          </button>
+        </div>
         <Select
           label="Vehículo"
           value={vehicleAlias}
@@ -392,6 +403,125 @@ function TripEditModal({ open, onClose, trip, carriers, days, defaultDate, onSav
           <TextField label="Notas" value={notes} onChange={setNotes} />
         </div>
         {error && <div className="col-span-2 text-sm text-[var(--color-danger)]">{error}</div>}
+      </form>
+
+      <QuickCreateCarrierModal
+        open={creatingCarrier}
+        onClose={() => setCreatingCarrier(false)}
+        onCreated={(created) => {
+          setCreatingCarrier(false);
+          if (!created?.id) return;
+          setCarrierId(created.id);
+          // Si el nuevo transportista tiene un vehículo, lo pre-seleccionamos
+          // así el operador no tiene que abrir el dropdown a mano.
+          const firstVehicle = created.vehicles?.[0]?.alias;
+          if (firstVehicle) setVehicleAlias(firstVehicle);
+        }}
+      />
+    </Modal>
+  );
+}
+
+// Modal liviano para dar de alta un transportista sin salir del flujo de
+// agregar vuelta. Pide solo lo mínimo (alias, nombre, tipo, un vehículo);
+// edición completa sigue viviendo en el módulo de Transportes.
+function QuickCreateCarrierModal({ open, onClose, onCreated }) {
+  const { addCarrier } = useCarriers();
+  const [alias, setAlias] = useState("");
+  const [name, setName] = useState("");
+  const [type, setType] = useState("contracted");
+  const [defaultRate, setDefaultRate] = useState("");
+  const [vehicleAlias, setVehicleAlias] = useState("");
+  const [plate, setPlate] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!open) return;
+    setAlias("");
+    setName("");
+    setType("contracted");
+    setDefaultRate("");
+    setVehicleAlias("");
+    setPlate("");
+    setError("");
+  }, [open]);
+
+  const submit = async (e) => {
+    e?.preventDefault?.();
+    if (!alias.trim()) return setError("Alias requerido");
+    if (!name.trim()) return setError("Nombre requerido");
+    if (!vehicleAlias.trim()) return setError("Agregá al menos un vehículo");
+    setBusy(true);
+    try {
+      const created = await addCarrier({
+        alias: alias.trim(),
+        name: name.trim(),
+        type,
+        defaultRate: type === "contracted" ? Number(defaultRate) || 0 : 0,
+        vehicles: [
+          {
+            alias: vehicleAlias.trim(),
+            plate: plate.trim() || undefined,
+          },
+        ],
+      });
+      onCreated?.(created);
+    } catch (err) {
+      setError(err.message || "Error al crear");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const typeOptions = CARRIER_TYPES.map((t) => ({ value: t.value, label: t.label }));
+
+  return (
+    <Modal
+      open={open}
+      onClose={busy ? undefined : onClose}
+      title="Nuevo transportista"
+      size="md"
+      footer={(
+        <>
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+            className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm disabled:opacity-50"
+          >
+            Cancelar
+          </button>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={busy}
+            className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-[var(--color-accent-fg)] hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+          >
+            {busy ? "Creando..." : "Crear"}
+          </button>
+        </>
+      )}
+    >
+      <form onSubmit={submit} className="grid grid-cols-2 gap-3">
+        <TextField label="Alias" value={alias} onChange={setAlias} required autoFocus placeholder="ej: JC" />
+        <TextField label="Nombre" value={name} onChange={setName} required placeholder="ej: Juan Cárcamo" />
+        <Select label="Tipo" value={type} onChange={setType} options={typeOptions} />
+        {type === "contracted" && (
+          <TextField
+            label="Tarifa por defecto"
+            type="number"
+            value={defaultRate}
+            onChange={setDefaultRate}
+            placeholder="ej: 25000"
+          />
+        )}
+        <TextField label="Vehículo (alias)" value={vehicleAlias} onChange={setVehicleAlias} required placeholder="ej: Camión 1" />
+        <TextField label="Patente" value={plate} onChange={setPlate} placeholder="opcional" />
+        {error && <div className="col-span-2 text-sm text-[var(--color-danger)]">{error}</div>}
+        <p className="col-span-2 text-[11px] text-[var(--color-muted)]">
+          Para agregar más vehículos o ajustar otros datos, editá el transportista desde el módulo de Transportes.
+        </p>
       </form>
     </Modal>
   );

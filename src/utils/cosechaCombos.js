@@ -23,6 +23,15 @@ export const containerLabel = (catalogs, y) => {
   return cat.find((c) => c.value === y)?.label || `Envase ${y}`;
 };
 
+// Unidad a mostrar para totales/métricas de cosecha. Si todos los workdays
+// usaron el mismo envase (saco, caja, kilo…), usamos su label del catálogo;
+// si hay mezcla devolvemos un genérico para no sumar unidades distintas.
+export const cosechaUnit = (catalogs, containersSet) => {
+  if (!containersSet || containersSet.size === 0) return "Unid.";
+  if (containersSet.size === 1) return containerLabel(catalogs, [...containersSet][0]);
+  return "Unid.";
+};
+
 export const tratoTypeLabel = (catalogs, t) => {
   const cat = catalogs?.tratoTypes || [];
   return cat.find((e) => e.value === t)?.label || `Trato ${t}`;

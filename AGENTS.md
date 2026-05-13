@@ -38,7 +38,8 @@ src/
   firebase.js           ← Firebase init (Firestore db = "hpdatabase")
   Components/           ← UI compartida (Layout, Modal, ProtectedRoute, TransportsModal, WorkerEditModal, WorkerSummaryModal, CycleSummaryModal, etc.)
   screens/              ← componentes de ruta / page-level route components
-                        (Dashboard, Faenas, CycleDetail, Workers, Transports, Payroll, Advances)
+                        (Dashboard, Faenas, CycleDetail, Workers, Transports, Payroll, Advances,
+                         InterestLinks, Calendar, AdminConsole, MigrateWorkers, CleanupPaidWorkdays)
   contexts/             ← AuthContext, ThemeContext, CatalogsContext, CarriersContext
   services/             ← capa de datos (Firestore CRUD + caché + auditoría)
                         firestoreBase, transportsService, carriersService,
@@ -114,6 +115,8 @@ El tag `main` se renderiza como **"al día"** en métricas y tabs.
 
 - Combos = calidad × envase, almacenados como `dayPrices[laborId][date]` con claves `${x}_${y}`.
 - Catálogos globales para `qualities`, `containers` — editables via ⚙ Catálogos.
+- **Unidad mostrada en métricas** sale del envase del catálogo, no de un literal "kg". Helper `cosechaUnit(catalogs, containersSet)` en `utils/cosechaCombos.js`: si todos los workdays del scope usan el mismo envase (`Saco`, `Kilo`, `Caja`…) devuelve su label; si hay mezcla cae a `"Unid."`. Aplica en Calendar, CycleSummaryModal, WorkerSummaryModal y los comprobantes de Payroll.
+- **Unidad mostrada para trato** sale de `catalogs.tratoTypes` via `tratoTypeLabel(catalogs, labor.tratoType)` — ej. una labor a trato configurada como "Poda" muestra `4.737 poda` en vez de `4.737 trato`. Si una grilla mezcla varios `tratoType` en el mismo ciclo cae al genérico "Trato".
 
 ## Faenas / Ciclos / Cycles
 
@@ -134,6 +137,8 @@ El tag `main` se renderiza como **"al día"** en métricas y tabs.
 - **`rutToName`**: las celdas del grid muestran el nombre desde un map derivado del cache de workers, no desde el snapshot del ciclo — editar el nombre en `/workers` se refleja sin recargar.
 - **Loader de workdays trato**: `ck` se deriva del docId, no del payload. 5 segmentos → `ck = parts.slice(4).join("__")`; 4 segmentos + labor trato → `"t0"`; resto → `makeComboKey(qualityX, qualityY)`.
 - **Diálogos**: nunca usar `window.prompt/confirm/alert` dentro del grid — usar `<Modal>` + `<ConfirmDialog>` para mantener el estilo.
+- **Trabajadores huérfanos**: un workday cuyo `workerRut` no está en `labor.workers[]` (porque el trabajador fue removido de la labor pero el workday quedó vivo) se inyecta en la grilla con badge "Huérfano" en la celda del nombre, para que se vea y se pueda corregir desde la misma vista en lugar de quedar invisible pero contando en métricas/payroll.
+- **Doble click sobre la celda del RUT** abre `WorkerEditModal` para editar los datos del trabajador sin salir del ciclo. Filas temporales (`_isTemp`) y de header se ignoran.
 
 ## Transports / Transporte
 
@@ -142,7 +147,8 @@ El tag `main` se renderiza como **"al día"** en métricas y tabs.
   2. **Vueltas** — listado y CRUD.
   3. **Pago por faena** — selecciona ciclos activos + rango de fechas → genera un `paymentSummary` por transportista con sus vueltas pendientes.
   4. **Resúmenes / Pagos** — historial; marcar pagado, revertir, imprimir.
-- Modal: `src/Components/TransportsModal.jsx` — usado en `CycleDetail` para asignar viajes rápidos.
+- **Balance general** — sección en la cabecera de la pantalla: rango de fechas + filas por transportista (viajes − pagos). Bumpea `balanceVersion` al pagar/revertir para refrescar. Botón **🖨 Imprimir balance** abre ventana de impresión.
+- Modal: `src/Components/TransportsModal.jsx` — usado en `CycleDetail` para asignar viajes rápidos. Incluye un sub-modal **+ Nuevo transportista** que crea un carrier inline y lo auto-selecciona junto con su primer vehículo (sin salir del modal de viajes).
 - Servicios: `services/transportsService.js` exporta `tripsService` (alias `transportsService`) y `paymentsService` (alias `transportPaymentsService`).
 - Contexto: `CarriersContext` precarga transportistas; expone CRUD con soft-delete.
 - Tipos de viaje: `regular` (Vuelta), `approach` (Acercamiento) — definidos en `TRIP_KINDS`.
@@ -254,6 +260,23 @@ Botones de descarga:
 - `Components/CycleSummaryModal.jsx` — modos **Pagar** y **Cobrar**, day-by-day por labor, persistencia localStorage (cobrar settings + títulos editables `summary_titles_${cycleId}`).
 - `Components/WorkerSummaryModal.jsx` — multi-ciclo activo, day-by-day, títulos editables (`worker_summary_titles_${rut}`).
 - Ambos: logo desde `${import.meta.env.BASE_URL}logo.png`, modo foto (copiar imagen, descargar PNG, imprimir con `print-color-adjust: exact`).
+- **Headers/totales reflejan el catálogo, no literales**: la columna principal y los "Total" se etiquetan con `cosechaUnit(catalogs, containersDelCiclo)` para cosecha y `tratoTypeLabel(catalogs, labor.tratoType)` para trato. Si un ciclo mezcla varios tipos cae al genérico ("Trato", "Unid.").
+
+## Calendario / Calendar
+
+- Pantalla: `src/screens/Calendar.jsx`. Ruta `/calendar`.
+- Vista mensual. Cada celda lista las subfaenas que trabajaron ese día como barras de color (color estable derivado de un hash del nombre + paleta).
+- Dos interacciones:
+  1. Click en una **barra** → `DayDetailDrawer` con detalle por labor + transportistas del día/subfaena. Métricas heterogéneas (kilos solo de cosecha, jornadas solo de los tipos que aportan jornada, trato/HE solo donde aplica). Las tarjetas con valor 0 se ocultan.
+  2. Click en la **celda** (zona blanca) → `DayExpandedModal` con todas las subfaenas del día. Click en una subfaena dentro de este modal pasa a `DayDetailDrawer` con `from: "all"` para que al cerrar el drawer se vuelva al modal del día (cadena de modales).
+- **Cache de sesión por mes**: `sessionStorage` con TTL 5 min, key `af.calendar.{year}.{month}`. Reduce reads al navegar atrás/adelante.
+- **Estrategia de lecturas**: hoy lee todos los workdays del rango del mes (~3k reads en mes pico, ~US$0.02). La función `fetchWorkdaysInRange(start, end)` está aislada como el punto de migración: cuando el volumen crezca consistentemente >5k workdays/mes o la carga supere 2s, mover ciclos cerrados a un snapshot agregado y combinar abierto+cerrado en esa misma función — el resto de la UI no cambia.
+
+## Consola admin / AdminConsole
+
+- Pantalla: `src/screens/AdminConsole.jsx`. Ruta `/admin/console` (solo admin).
+- Cuatro secciones para inspección barata: conteos por colección, workdays por mes (12 reads para todo un año), workdays por rango, workdays por ciclo.
+- Usa `getCountFromServer` de Firestore — 1 read por cada 1000 docs vs N con `getDocs`. Permite estimar costos sin descargar la colección.
 
 ## Links útiles
 
@@ -265,7 +288,7 @@ Botones de descarga:
 ## Layout
 
 - **Sidebar colapsable** (`layout.sidebarOpen` en `localStorage`): un solo botón ☰ funciona como toggle en desktop y abre drawer en mobile (decidido por `matchMedia("(min-width: 768px)")`).
-- Nav incluye: Dashboard, Faenas, Trabajadores, Transportes, Anticipos, Nómina, Links útiles. Items admin (Auditoría, Migrar CSV, Limpiar pagados) se ven solo con `isAdmin`.
+- Nav incluye: Dashboard, Faenas, Calendario, Trabajadores, Transportes, Anticipos, Nómina, Links útiles. Items admin (Auditoría, Migrar CSV, Limpiar pagados, Consola) se ven solo con `isAdmin`.
 
 ## Env
 
@@ -284,7 +307,14 @@ Botones de descarga:
 /advances                      Anticipos / Adelantos
 /payroll                       Nómina
 /links                         Links útiles
+/calendar                      Calendario mensual
 /audit                         Auditoría (admin only)
 /admin/migrate-workers         Importar trabajadores desde CSV (admin)
 /admin/cleanup-paid-workdays   Limpieza de workdays ya pagados (admin)
+/admin/console                 Consola admin: Firestore counts (admin only)
+*                              NotFound (catch-all dentro y fuera del Layout)
 ```
+
+### SPA en GitHub Pages
+
+- `public/404.html` + script en `index.html` (truco rafgraph/spa-github-pages): cualquier ruta desconocida recarga `index.html?/<path>`, el script hace `history.replaceState` y React Router renderiza la ruta correcta. Sin esto, recargar `/cycles/abc` devuelve 404 de GitHub Pages.
