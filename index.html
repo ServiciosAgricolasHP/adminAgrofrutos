@@ -5,10 +5,27 @@
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>adminagrofrutos</title>
-    <script type="module" crossorigin src="/adminAgrofrutos/assets/index-C7sd63dd.js"></script>
-    <link rel="stylesheet" crossorigin href="/adminAgrofrutos/assets/index-CdlAiAz_.css">
+    <script type="module" crossorigin src="/adminAgrofrutos/assets/index-BqALO3lT.js"></script>
+    <link rel="stylesheet" crossorigin href="/adminAgrofrutos/assets/index-BkjKj2mO.css">
   </head>
   <body>
+    <!--
+      Lee el path codificado por public/404.html (ruta SPA cuando el usuario
+      recarga un deep-link en GitHub Pages) y lo reescribe via history para
+      que react-router-dom resuelva la pantalla real sin un round-trip extra.
+    -->
+    <script>
+      (function (l) {
+        if (l.search[1] === "/") {
+          var decoded = l.search
+            .slice(1)
+            .split("&")
+            .map(function (s) { return s.replace(/~and~/g, "&"); })
+            .join("?");
+          window.history.replaceState(null, null, l.pathname.slice(0, -1) + decoded + l.hash);
+        }
+      })(window.location);
+    </script>
     <div id="root"></div>
   </body>
 </html>
