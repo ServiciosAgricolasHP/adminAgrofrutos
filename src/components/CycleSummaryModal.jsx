@@ -35,6 +35,50 @@ const dateLabel = (dateStr) => {
 
 const LOGO_URL = `${import.meta.env.BASE_URL}logo.png`;
 
+// Mediana — estadístico robusto a outliers (una jornada mensual no la corre
+// como sí lo hace el promedio simple). Usado para sugerir la tarifa de cobro
+// por día sin que un único día atípico distorsione el resultado.
+function medianOf(values) {
+  if (!values || values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[mid - 1] + sorted[mid]) / 2
+    : sorted[mid];
+}
+
+// Etiqueta descriptiva de la actividad para mostrar en el editor de cobro y
+// resúmenes. Usa los catálogos para describir "qué se está cobrando":
+//   - cosecha → "Cosecha — Saco" (envase si todas las filas usan el mismo)
+//   - trato   → "Trato — Poda × Árbol" (tratoType × unidad cuando coincide)
+//   - tratoHE → "Jornada + HE"
+//   - main    → "Jornada simple"
+//   - supervision → "Supervisión"
+//   - extra   → "Extra"
+function activityLabel(labor, catalogs, containers, tratoUnitsSet) {
+  const type = labor?.type;
+  if (type === "cosecha") {
+    if (containers && containers.size === 1) {
+      return `Cosecha — ${containerLabel(catalogs, [...containers][0])}`;
+    }
+    return "Cosecha";
+  }
+  if (type === "trato") {
+    const tt = tratoTypeLabel(catalogs, labor?.tratoType ?? 0);
+    if (tratoUnitsSet && tratoUnitsSet.size === 1) {
+      const u = [...tratoUnitsSet][0];
+      const ul = u == null ? null : tratoUnitLabel(catalogs, u);
+      if (ul) return `Trato — ${tt} × ${ul}`;
+    }
+    return `Trato — ${tt}`;
+  }
+  if (type === "tratoHE") return "Jornada + HE";
+  if (type === "main") return "Jornada simple";
+  if (type === "supervision") return "Supervisión";
+  if (type === "extra") return "Extra";
+  return type || "—";
+}
+
 // ============================================================
 // Day-by-day aggregation per labor
 // ============================================================
@@ -403,6 +447,8 @@ export default function CycleSummaryModal({
         rows,
         totals,
         unit: laborQtyUnit(l, catalogs, containers, tratoUnitsSet),
+        containers,
+        tratoUnitsSet,
       };
     });
   }, [cycle?.labors, workdaysByLabor, catalogs, dayPrices]);
@@ -450,15 +496,32 @@ export default function CycleSummaryModal({
   // ============================================================
   // Cobrar rows
   // ============================================================
+  //
+  // Para la tarifa sugerida usamos la MEDIANA del precio por día y no el
+  // promedio simple (total/qty). Motivo: si una labor tiene 1 jornada
+  // mensual de $500k mezclada con 30 días normales a $25k, el promedio se
+  // dispara (~$40k) y queda muy lejos del precio real del 96% de los días.
+  // La mediana ignora el outlier y devuelve $25k, que es lo que el
+  // contratista efectivamente está pagando.
+  //
+  // Igual mantenemos el `meanRate` calculado para mostrarlo entre paréntesis
+  // y que el usuario tenga visibilidad de la diferencia.
   const cobrarLabors = useMemo(() => {
     return laborsData.map((ld) => {
       const cfg = cobrar.labors[ld.labor.id] || {};
       const include = cfg.include !== false;
-      const defaultRate = ld.totals.qty > 0 ? Math.round(ld.totals.amount / ld.totals.qty) : 0;
+      const meanRate = ld.totals.qty > 0 ? Math.round(ld.totals.amount / ld.totals.qty) : 0;
+      // Tarifa por día (row.amount / row.qty) — saltea pisos y filas sin qty.
+      const perDayRates = (ld.rows || [])
+        .filter((r) => (Number(r.qty) || 0) > 0)
+        .map((r) => (Number(r.amount) || 0) / (Number(r.qty) || 1));
+      const medianRate = Math.round(medianOf(perDayRates));
+      const defaultRate = medianRate || meanRate;
       const rate = cfg.chargeRate != null ? Number(cfg.chargeRate) : defaultRate;
-      return { ...ld, include, rate, defaultRate };
+      const activity = activityLabel(ld.labor, catalogs, ld.containers, ld.tratoUnitsSet);
+      return { ...ld, include, rate, defaultRate, meanRate, medianRate, activity };
     });
-  }, [laborsData, cobrar.labors]);
+  }, [laborsData, cobrar.labors, catalogs]);
 
   const cobrarCarriers = useMemo(() => {
     return transportData.map((tg) => {
@@ -724,13 +787,20 @@ function CobrarEditor({ labors, carriers, carrierById, onLaborChange, onCarrierC
               <th className="px-2 py-1">Incluir</th>
               <th className="px-2 py-1">Concepto</th>
               <th className="px-2 py-1 text-right">Cantidad</th>
-              <th className="px-2 py-1 text-right">Pago prom.</th>
+              <th className="px-2 py-1 text-right" title="Mediana del precio por día — robusta a outliers como una jornada mensual. Entre paréntesis el promedio simple cuando difiere.">
+                Pago tipo
+              </th>
               <th className="px-2 py-1 text-right">Tarifa cobro</th>
               <th className="px-2 py-1 text-right">Subtotal</th>
             </tr>
           </thead>
           <tbody>
-            {labors.map((l) => (
+            {labors.map((l) => {
+              const showMeanHint =
+                l.meanRate &&
+                l.medianRate &&
+                Math.abs(l.meanRate - l.medianRate) / Math.max(1, l.medianRate) > 0.1;
+              return (
               <tr key={l.labor.id} className="border-t border-[var(--color-border)]">
                 <td className="px-2 py-1.5">
                   <input
@@ -740,11 +810,30 @@ function CobrarEditor({ labors, carriers, carrierById, onLaborChange, onCarrierC
                   />
                 </td>
                 <td className="px-2 py-1.5">
-                  <span className="font-medium">{l.labor.name}</span>
-                  <span className="ml-1 text-[var(--color-muted)]">({l.unit.toLowerCase()})</span>
+                  {l.activity && (
+                    <div>
+                      <span className="rounded-full bg-[var(--color-accent-soft)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-accent)]">
+                        {l.activity}
+                      </span>
+                    </div>
+                  )}
+                  <div className="mt-0.5">
+                    <span className="font-medium">{l.labor.name}</span>
+                    <span className="ml-1 text-[var(--color-muted)]">({l.unit.toLowerCase()})</span>
+                  </div>
                 </td>
                 <td className="px-2 py-1.5 text-right tabular-nums">{fmtNumber(l.totals.qty)}</td>
-                <td className="px-2 py-1.5 text-right text-[var(--color-muted)] tabular-nums">{fmtCurrency(l.defaultRate)}</td>
+                <td className="px-2 py-1.5 text-right text-[var(--color-muted)] tabular-nums">
+                  <div>{fmtCurrency(l.defaultRate)}</div>
+                  {showMeanHint && (
+                    <div
+                      className="text-[10px] opacity-70"
+                      title="Promedio simple — sube/baja con outliers; la mediana es lo que ves arriba."
+                    >
+                      prom. {fmtCurrency(l.meanRate)}
+                    </div>
+                  )}
+                </td>
                 <td className="px-2 py-1.5 text-right">
                   <input
                     type="number"
@@ -758,7 +847,8 @@ function CobrarEditor({ labors, carriers, carrierById, onLaborChange, onCarrierC
                   {l.include ? fmtCurrency(l.totals.qty * l.rate) : <span className="text-[var(--color-muted)]">—</span>}
                 </td>
               </tr>
-            ))}
+              );
+            })}
             {carriers.map((c) => {
               const ci = carrierById.get(c.carrierId);
               return (
