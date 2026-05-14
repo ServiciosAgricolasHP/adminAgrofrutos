@@ -1079,7 +1079,8 @@ function LaborWorkerGrid({
     } else if (t === "tratoHE") {
       // Sin línea de jornada — se renderiza solo en la línea de monto abajo.
     } else {
-      lines.push(<div key="j" style={{ fontWeight: 600 }}>{fmtNumber(c.qty)}j</div>);
+      // main/supervision/extra: tampoco mostramos "j". El monto manda como
+      // línea principal (la jornada se cuenta sola en la columna Total).
     }
     if (c.pisoAmount > 0 && (c.qty || c.jornadas)) {
       lines.push(
@@ -1090,10 +1091,15 @@ function LaborWorkerGrid({
       const heSuffix = (t === "tratoHE" && c.overtimeHours > 0)
         ? ` (${fmtNumber(c.overtimeHours)} HE)`
         : "";
-      const fontSize = t === "tratoHE" ? 11 : 9;
-      const fontWeight = t === "tratoHE" ? 600 : 400;
+      // Cosecha y trato tienen su métrica "principal" arriba (kg / cantidad),
+      // entonces el monto va abajo en chico/gris. Para los tipos sin métrica
+      // arriba (tratoHE, main, supervision, extra) el monto ES la info
+      // principal: lo agrandamos y oscurecemos.
+      const isMainLine = t !== "cosecha" && t !== "trato";
+      const fontSize = isMainLine ? 11 : 9;
+      const fontWeight = isMainLine ? 600 : 400;
       lines.push(
-        <div key="amt" style={{ fontSize, fontWeight, color: t === "tratoHE" ? "#000" : "#555" }}>
+        <div key="amt" style={{ fontSize, fontWeight, color: isMainLine ? "#000" : "#555" }}>
           {fmtCurrency(c.amount)}{heSuffix}
         </div>,
       );
@@ -1166,14 +1172,20 @@ function LaborWorkerGrid({
               <td style={{ ...cell, fontWeight: 700 }}>Total día</td>
               {dates.map((d) => {
                 const t = dayTotals.get(d);
-                const isHE = labor?.type === "tratoHE";
+                const lt = labor?.type;
+                const isHE = lt === "tratoHE";
+                // Cosecha y trato muestran la métrica de producción arriba
+                // (kilos / cantidad). Para tratoHE, main, supervision, extra
+                // solo va el monto — el conteo de jornadas vive en la
+                // columna Total Jornadas a la derecha.
+                const showQty = lt === "cosecha" || lt === "trato";
                 const amtLine = isHE && t.overtimeHours > 0
                   ? `${fmtCurrency(t.amount)} (${fmtNumber(t.overtimeHours)} HE)`
                   : fmtCurrency(t.amount);
                 return (
                   <td key={d} style={{ ...cell, textAlign: "center", fontVariantNumeric: "tabular-nums", fontWeight: 700 }}>
-                    {!isHE && <div>{fmtNumber(t.qty)}</div>}
-                    <div style={{ fontSize: isHE ? 11 : 9, color: "#333" }}>{amtLine}</div>
+                    {showQty && <div>{fmtNumber(t.qty)}</div>}
+                    <div style={{ fontSize: showQty ? 9 : 11, color: "#333" }}>{amtLine}</div>
                   </td>
                 );
               })}

@@ -32,10 +32,13 @@
       "Bash(identify public/logo.png)",
       "Bash(git commit *)",
       "Bash(npx eslint *)",
-      "Bash(git check-ignore *)"
+      "Bash(git check-ignore *)",
+      "Bash(rm -f .git/index.lock && git status 2>&1 | tail -10)",
+      "Bash(npx gh-pages-clean *)"
     ],
     "additionalDirectories": [
-      "C:\\Users\\bruno\\OneDrive\\Documentos\\git"
+      "C:\\Users\\bruno\\OneDrive\\Documentos\\git",
+      "C:\\Users\\bruno\\OneDrive\\Documentos\\git\\adminAgrofrutos\\.git"
     ]
   }
 }

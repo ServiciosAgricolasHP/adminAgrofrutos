@@ -16,6 +16,7 @@ import {
 } from "../utils/banks";
 import WorkerEditModal from "../components/WorkerEditModal";
 import WorkerSummaryModal from "../components/WorkerSummaryModal";
+import GroupSummaryModal from "../components/GroupSummaryModal";
 import ConfirmDialog from "../components/ConfirmDialog";
 import ResizableArea from "../components/ResizableArea";
 import { useIsMobile } from "../hooks/useIsMobile";
@@ -31,6 +32,7 @@ export default function Workers() {
   const [edit, setEdit] = useState(null);
   const [confirm, setConfirm] = useState(null);
   const [summary, setSummary] = useState(null);
+  const [groupSummaryOpen, setGroupSummaryOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [allWorkersForModal, setAllWorkersForModal] = useState([]);
   // Filtros opcionales (componibles con la búsqueda). Cuando alguno está
@@ -355,6 +357,13 @@ export default function Workers() {
             )}
           </div>
           <button
+            onClick={() => setGroupSummaryOpen(true)}
+            className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-sm font-medium hover:bg-[var(--color-accent-soft)] sm:w-auto"
+            title="Armar un grupo de trabajadores y generar matriz + resúmenes individuales"
+          >
+            📊 Resúmenes por grupo
+          </button>
+          <button
             onClick={openCreate}
             className="w-full rounded-md bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)] shadow-sm hover:bg-[var(--color-accent-hover)] sm:w-auto"
           >
@@ -532,6 +541,11 @@ export default function Workers() {
         open={!!summary}
         worker={summary}
         onClose={() => setSummary(null)}
+      />
+
+      <GroupSummaryModal
+        open={groupSummaryOpen}
+        onClose={() => setGroupSummaryOpen(false)}
       />
 
       <ConfirmDialog

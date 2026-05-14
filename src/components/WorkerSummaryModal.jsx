@@ -150,76 +150,8 @@ export default function WorkerSummaryModal({ open, onClose, worker }) {
     (async () => {
       setLoading(true);
       try {
-        const [wds, pendingAdvances] = await Promise.all([
-          workdaysService.list({ wheres: [["workerRut", "==", worker.id]] }),
-          listPendingForWorkers([worker.id]).catch(() => []),
-        ]);
-        setAdvances(
-          [...pendingAdvances].sort((a, b) => String(a.date || "").localeCompare(String(b.date || ""))),
-        );
-        const cycleIds = [...new Set(wds.map((w) => w.cycleId).filter(Boolean))];
-        const cycles = await Promise.all(cycleIds.map((id) => cyclesService.getById(id)));
-        const activeCycles = cycles.filter((c) => c && c.status !== "closed");
-        const faenaIds = [...new Set(activeCycles.map((c) => c.faenaId).filter(Boolean))];
-        const subIds = [...new Set(activeCycles.map((c) => c.subfaenaId).filter(Boolean))];
-        const faenas = await Promise.all(faenaIds.map((id) => faenasService.getById(id)));
-        const subs = await Promise.all(subIds.map((id) => subfaenasService.getById(id)));
-        const faenaById = new Map(faenas.filter(Boolean).map((f) => [f.id, f]));
-        const subById = new Map(subs.filter(Boolean).map((s) => [s.id, s]));
-
-        const result = activeCycles.map((c) => {
-          const wdMap = {};
-          for (const wd of wds) {
-            if (wd.cycleId !== c.id) continue;
-            const labor = (c.labors || []).find((l) => l.id === wd.laborId);
-            if (!labor) continue;
-            if (!wdMap[wd.laborId]) wdMap[wd.laborId] = {};
-            // Usamos el id del doc como key: garantiza no-colisión entre
-            // combos/tiers distintos y entre workdays normales y `pisoOnly`
-            // del mismo (worker, date, labor).
-            wdMap[wd.laborId][wd.id || workdayMapKey(wd.workerRut, wd.date, "0_0")] = wd;
-          }
-          const { rows, cosechaContainers } = buildCycleRows(worker.id, c, wdMap, catalogs);
-          const totals = rows.reduce(
-            (acc, r) => ({
-              kilos: acc.kilos + r.kilos,
-              jornadas: acc.jornadas + r.jornadas,
-              tratoQty: acc.tratoQty + r.tratoQty,
-              overtimeHours: acc.overtimeHours + r.overtimeHours,
-              heAmount: acc.heAmount + r.heAmount,
-              amount: acc.amount + r.amount,
-              piso: acc.piso + (r.piso || 0),
-            }),
-            { kilos: 0, jornadas: 0, tratoQty: 0, overtimeHours: 0, heAmount: 0, amount: 0, piso: 0 },
-          );
-          // Columnas a mostrar: solo las que tienen al menos un valor > 0.
-          const cols = {
-            kilos: rows.some((r) => r.kilos > 0),
-            jornadas: rows.some((r) => r.jornadas > 0),
-            he: rows.some((r) => r.overtimeHours > 0),
-            trato: rows.some((r) => r.tratoQty > 0),
-            piso: rows.some((r) => (r.piso || 0) > 0),
-          };
-          // Etiqueta de la columna/total de trato: si todos los tratos del ciclo
-          // son del mismo tipo (ej. todos "poda"), usamos el label del catálogo.
-          // Si hay mezcla, caemos al genérico "Trato".
-          const tratoTypes = new Set(rows.filter((r) => r.laborType === "trato").map((r) => r.tratoType));
-          const tratoLabel = tratoTypes.size === 1
-            ? tratoTypeLabel(catalogs, [...tratoTypes][0])
-            : "Trato";
-          const kilosLabel = cosechaUnit(catalogs, cosechaContainers);
-          return {
-            cycle: c,
-            faena: faenaById.get(c.faenaId),
-            subfaena: subById.get(c.subfaenaId),
-            rows,
-            totals,
-            cols,
-            tratoLabel,
-            kilosLabel,
-          };
-        });
-        result.sort((a, b) => (a.cycle.label || "").localeCompare(b.cycle.label || ""));
+        const { data: result, advances: adv } = await loadWorkerSummaryData(worker.id, catalogs);
+        setAdvances(adv);
         setData(result);
       } finally {
         setLoading(false);
@@ -418,7 +350,83 @@ const advanceTypeLabel = (type) =>
 const advanceTypeIcon = (type) =>
   ADVANCE_TYPES.find((t) => t.value === type)?.icon || "•";
 
-const PrintableWorkerSummary = forwardRef(function PrintableWorkerSummary(
+// Carga los datos de resumen para un trabajador (workdays + ciclos + anticipos
+// pendientes), ya con el shape que espera `PrintableWorkerSummary`. Devuelve
+// `{ data, advances, grandTotal, advancesSaldo }`. Usado por `WorkerSummaryModal`
+// internamente y por `GroupSummaryModal` para componer N resúmenes seguidos.
+// eslint-disable-next-line react-refresh/only-export-components
+export async function loadWorkerSummaryData(workerId, catalogs) {
+  if (!workerId) return { data: [], advances: [], grandTotal: 0, advancesSaldo: 0 };
+  const [wds, pendingAdvances] = await Promise.all([
+    workdaysService.list({ wheres: [["workerRut", "==", workerId]] }),
+    listPendingForWorkers([workerId]).catch(() => []),
+  ]);
+  const advances = [...pendingAdvances].sort((a, b) =>
+    String(a.date || "").localeCompare(String(b.date || "")),
+  );
+  const cycleIds = [...new Set(wds.map((w) => w.cycleId).filter(Boolean))];
+  const cycles = await Promise.all(cycleIds.map((id) => cyclesService.getById(id)));
+  const activeCycles = cycles.filter((c) => c && c.status !== "closed");
+  const faenaIds = [...new Set(activeCycles.map((c) => c.faenaId).filter(Boolean))];
+  const subIds = [...new Set(activeCycles.map((c) => c.subfaenaId).filter(Boolean))];
+  const faenas = await Promise.all(faenaIds.map((id) => faenasService.getById(id)));
+  const subs = await Promise.all(subIds.map((id) => subfaenasService.getById(id)));
+  const faenaById = new Map(faenas.filter(Boolean).map((f) => [f.id, f]));
+  const subById = new Map(subs.filter(Boolean).map((s) => [s.id, s]));
+
+  const data = activeCycles.map((c) => {
+    const wdMap = {};
+    for (const wd of wds) {
+      if (wd.cycleId !== c.id) continue;
+      const labor = (c.labors || []).find((l) => l.id === wd.laborId);
+      if (!labor) continue;
+      if (!wdMap[wd.laborId]) wdMap[wd.laborId] = {};
+      wdMap[wd.laborId][wd.id || workdayMapKey(wd.workerRut, wd.date, "0_0")] = wd;
+    }
+    const { rows, cosechaContainers } = buildCycleRows(workerId, c, wdMap, catalogs);
+    const totals = rows.reduce(
+      (acc, r) => ({
+        kilos: acc.kilos + r.kilos,
+        jornadas: acc.jornadas + r.jornadas,
+        tratoQty: acc.tratoQty + r.tratoQty,
+        overtimeHours: acc.overtimeHours + r.overtimeHours,
+        heAmount: acc.heAmount + r.heAmount,
+        amount: acc.amount + r.amount,
+        piso: acc.piso + (r.piso || 0),
+      }),
+      { kilos: 0, jornadas: 0, tratoQty: 0, overtimeHours: 0, heAmount: 0, amount: 0, piso: 0 },
+    );
+    const cols = {
+      kilos: rows.some((r) => r.kilos > 0),
+      jornadas: rows.some((r) => r.jornadas > 0),
+      he: rows.some((r) => r.overtimeHours > 0),
+      trato: rows.some((r) => r.tratoQty > 0),
+      piso: rows.some((r) => (r.piso || 0) > 0),
+    };
+    const tratoTypes = new Set(rows.filter((r) => r.laborType === "trato").map((r) => r.tratoType));
+    const tratoLabel = tratoTypes.size === 1
+      ? tratoTypeLabel(catalogs, [...tratoTypes][0])
+      : "Trato";
+    const kilosLabel = cosechaUnit(catalogs, cosechaContainers);
+    return {
+      cycle: c,
+      faena: faenaById.get(c.faenaId),
+      subfaena: subById.get(c.subfaenaId),
+      rows,
+      totals,
+      cols,
+      tratoLabel,
+      kilosLabel,
+    };
+  });
+  data.sort((a, b) => (a.cycle.label || "").localeCompare(b.cycle.label || ""));
+
+  const grandTotal = data.reduce((s, d) => s + (d.totals.amount || 0) + (d.totals.piso || 0), 0);
+  const advancesSaldo = advances.reduce((s, a) => s + advanceRemaining(a), 0);
+  return { data, advances, grandTotal, advancesSaldo };
+}
+
+export const PrintableWorkerSummary = forwardRef(function PrintableWorkerSummary(
   { worker, data, grandTotal, advances = [], advancesSaldo = 0, titles },
   ref,
 ) {
