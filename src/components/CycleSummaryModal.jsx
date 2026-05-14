@@ -205,13 +205,17 @@ function buildWorkerLaborGrid(labor, wdMap) {
       c.qty += t.qty;
       wEntry.totals.qty += t.qty;
     } else if (labor?.type === "tratoHE") {
+      // Para tratoHE `wd.qty` guarda el monto base diario (no la cuenta de
+      // jornadas). La jornada es implícita: 1 por workday document. Antes
+      // sumábamos `q` a jornadas y por eso aparecía algo como "200.000" en
+      // la columna de Total Jornadas — era $200k, no 8 jornadas.
       const q = Number(wd.qty) || 0;
       const oh = Number(wd.overtimeHours) || 0;
       c.qty += q;
-      c.jornadas += q;
+      c.jornadas += 1;
       c.overtimeHours += oh;
       wEntry.totals.qty += q;
-      wEntry.totals.jornadas += q;
+      wEntry.totals.jornadas += 1;
       wEntry.totals.overtimeHours += oh;
     } else {
       c.qty += 1;
@@ -1142,7 +1146,9 @@ function LaborWorkerGrid({
                   </td>
                 ))}
                 <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
-                  {fmtNumber(w.totals.qty)}
+                  {labor?.type === "tratoHE"
+                    ? fmtNumber(w.totals.jornadas)
+                    : fmtNumber(w.totals.qty)}
                 </td>
                 {labor?.type === "tratoHE" && (
                   <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
@@ -1150,9 +1156,7 @@ function LaborWorkerGrid({
                   </td>
                 )}
                 <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
-                  {labor?.type === "tratoHE" && w.totals.overtimeHours > 0
-                    ? `${fmtCurrency(w.totals.amount)} + ${fmtNumber(w.totals.overtimeHours)}h`
-                    : fmtCurrency(w.totals.amount)}
+                  {fmtCurrency(w.totals.amount)}
                 </td>
               </tr>
             ))}
@@ -1174,7 +1178,9 @@ function LaborWorkerGrid({
                 );
               })}
               <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
-                {fmtNumber(grand.qty)}
+                {labor?.type === "tratoHE"
+                  ? fmtNumber(grand.jornadas)
+                  : fmtNumber(grand.qty)}
               </td>
               {labor?.type === "tratoHE" && (
                 <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
@@ -1182,9 +1188,7 @@ function LaborWorkerGrid({
                 </td>
               )}
               <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
-                {labor?.type === "tratoHE" && grand.overtimeHours > 0
-                  ? `${fmtCurrency(grand.amount)} + ${fmtNumber(grand.overtimeHours)}h`
-                  : fmtCurrency(grand.amount)}
+                {fmtCurrency(grand.amount)}
               </td>
             </tr>
           {anyPiso && grand.pisoAmount > 0 && (
