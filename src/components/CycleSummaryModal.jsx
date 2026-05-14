@@ -1088,7 +1088,7 @@ function LaborWorkerGrid({
     }
     if (c.amount) {
       const heSuffix = (t === "tratoHE" && c.overtimeHours > 0)
-        ? ` + ${fmtNumber(c.overtimeHours)}h`
+        ? ` (${fmtNumber(c.overtimeHours)} HE)`
         : "";
       const fontSize = t === "tratoHE" ? 11 : 9;
       const fontWeight = t === "tratoHE" ? 600 : 400;
@@ -1152,7 +1152,7 @@ function LaborWorkerGrid({
                 </td>
                 {labor?.type === "tratoHE" && (
                   <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
-                    {w.totals.overtimeHours > 0 ? `${fmtNumber(w.totals.overtimeHours)}h` : ""}
+                    {w.totals.overtimeHours > 0 ? `${fmtNumber(w.totals.overtimeHours)} HE` : ""}
                   </td>
                 )}
                 <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
@@ -1168,7 +1168,7 @@ function LaborWorkerGrid({
                 const t = dayTotals.get(d);
                 const isHE = labor?.type === "tratoHE";
                 const amtLine = isHE && t.overtimeHours > 0
-                  ? `${fmtCurrency(t.amount)} + ${fmtNumber(t.overtimeHours)}h`
+                  ? `${fmtCurrency(t.amount)} (${fmtNumber(t.overtimeHours)} HE)`
                   : fmtCurrency(t.amount);
                 return (
                   <td key={d} style={{ ...cell, textAlign: "center", fontVariantNumeric: "tabular-nums", fontWeight: 700 }}>
@@ -1184,7 +1184,7 @@ function LaborWorkerGrid({
               </td>
               {labor?.type === "tratoHE" && (
                 <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
-                  {grand.overtimeHours > 0 ? `${fmtNumber(grand.overtimeHours)}h` : ""}
+                  {grand.overtimeHours > 0 ? `${fmtNumber(grand.overtimeHours)} HE` : ""}
                 </td>
               )}
               <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
