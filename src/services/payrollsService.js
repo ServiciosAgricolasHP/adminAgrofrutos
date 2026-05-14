@@ -13,29 +13,30 @@ export const PAYROLL_STATUSES = [
 export const payrollsService = createService("payroll", "payrolls");
 
 // Batched: tag every included workday with payrollId. Firestore batch limit = 500.
-export async function tagWorkdaysWithPayroll(workdayIds, payrollId) {
+// `onProgress(done, total)` is called after each chunk for UI feedback.
+export async function tagWorkdaysWithPayroll(workdayIds, payrollId, onProgress) {
   await batchUpdateWorkdays(workdayIds, {
     payrollId,
     payrollTaggedAt: serverTimestamp(),
     payrollTaggedBy: auth.currentUser?.uid || null,
-  });
+  }, onProgress);
 }
 
 // Used when payroll is deleted — release the workdays.
-export async function untagWorkdaysFromPayroll(workdayIds) {
-  await batchUpdateWorkdays(workdayIds, { payrollId: null, paidAt: null });
+export async function untagWorkdaysFromPayroll(workdayIds, onProgress) {
+  await batchUpdateWorkdays(workdayIds, { payrollId: null, paidAt: null }, onProgress);
 }
 
 // Used when payroll is marked paid — also stamp the workdays.
-export async function markWorkdaysPaid(workdayIds) {
+export async function markWorkdaysPaid(workdayIds, onProgress) {
   await batchUpdateWorkdays(workdayIds, {
     paidAt: serverTimestamp(),
     paidBy: auth.currentUser?.uid || null,
-  });
+  }, onProgress);
 }
 
-export async function unmarkWorkdaysPaid(workdayIds) {
-  await batchUpdateWorkdays(workdayIds, { paidAt: null, paidBy: null });
+export async function unmarkWorkdaysPaid(workdayIds, onProgress) {
+  await batchUpdateWorkdays(workdayIds, { paidAt: null, paidBy: null }, onProgress);
 }
 
 // Aplica un patch a una lista de workdays. Usa `updateDoc` individual con
@@ -47,10 +48,17 @@ export async function unmarkWorkdaysPaid(workdayIds) {
 // seguir limpiando el resto, permitiendo borrar/revertir la nómina sin
 // dejarla huérfana. Para los survivors, esto sigue siendo rápido por la
 // concurrencia (Promise.all en chunks).
-async function batchUpdateWorkdays(ids, patch) {
+async function batchUpdateWorkdays(ids, patch, onProgress) {
   if (!ids || ids.length === 0) return;
-  const concurrency = 20;
+  // Concurrency 50: cada updateDoc cuesta ~80-150ms de round-trip. Con 50 en
+  // paralelo Firestore aguanta sin problema (no es bulk-write con rate limit)
+  // y bajamos 2.5x el tiempo total vs concurrency=20. 500 workdays pasan de
+  // ~2.5s a ~1s.
+  const concurrency = 50;
   let skipped = 0;
+  let done = 0;
+  const total = ids.length;
+  if (onProgress) onProgress(0, total);
   for (let i = 0; i < ids.length; i += concurrency) {
     const chunk = ids.slice(i, i + concurrency);
     await Promise.all(
@@ -67,6 +75,8 @@ async function batchUpdateWorkdays(ids, patch) {
         }
       }),
     );
+    done += chunk.length;
+    if (onProgress) onProgress(done, total);
   }
   if (skipped > 0) {
     console.warn(

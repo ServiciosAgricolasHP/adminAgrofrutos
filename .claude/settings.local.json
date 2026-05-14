@@ -14,7 +14,28 @@
       "Bash(node -e ' *)",
       "PowerShell($line = \\(Get-Content 'src/services/workersService.js' -Encoding UTF8\\)[25]; [System.BitConverter]::ToString\\([System.Text.Encoding]::UTF8.GetBytes\\($line\\)\\))",
       "Bash(git commit -m ' *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Bash(if [ -d \"../portalTrabajadoresHP\" ]; then echo \"EXISTS\"; ls -la ../portalTrabajadoresHP/; else echo \"MISSING\"; fi)",
+      "Read(//c/Users/bruno/OneDrive/Documentos/git/**)",
+      "Bash(git init *)",
+      "Bash(git branch *)",
+      "Bash(git remote *)",
+      "Bash(git filter-branch *)",
+      "Bash(xargs -n 1 git update-ref -d)",
+      "Bash(git reflog *)",
+      "Bash(git gc *)",
+      "Bash(git ls-remote *)",
+      "Bash(git fetch *)",
+      "Bash(rm ../portalTrabajadoresHP-data-backup-*.json && ls ../portalTrabajadoresHP-data-backup-*.json 2>&1; echo \"---backup cleanup done\")",
+      "Bash(rm -rf node_modules/.cache/gh-pages)",
+      "Bash(git update-ref *)",
+      "Bash(identify public/logo.png)",
+      "Bash(git commit *)",
+      "Bash(npx eslint *)",
+      "Bash(git check-ignore *)"
+    ],
+    "additionalDirectories": [
+      "C:\\Users\\bruno\\OneDrive\\Documentos\\git"
     ]
   }
 }

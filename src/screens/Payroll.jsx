@@ -107,6 +107,10 @@ export default function Payroll() {
   const previewWorkdaysRef = useRef([]);
   const previewAdvancesRef = useRef([]);
   const [busy, setBusy] = useState(false);
+  // Progress overlay state. `step` es el mensaje principal (ej. "Etiquetando
+  // jornadas"), `detail` un complemento opcional (ej. "340 / 500"), `percent`
+  // 0-100. Si es `null`, no se muestra overlay.
+  const [progress, setProgress] = useState(null);
   const [payrollName, setPayrollName] = useState("");
 
   const [confirmDelete, setConfirmDelete] = useState(null);
@@ -420,6 +424,7 @@ export default function Payroll() {
       if (!proceed) return;
     }
     setBusy(true);
+    setProgress({ step: "Armando datos de la nómina...", detail: "", percent: 2 });
     try {
       const cycleIds = [...selectedCycleIds];
       const selectedCycles = cycles.filter((c) => cycleIds.includes(c.id));
@@ -535,6 +540,7 @@ export default function Payroll() {
           })),
       };
 
+      setProgress({ step: "Creando registro de la nómina...", detail: "", percent: 5 });
       const created = await payrollsService.create({
         name: finalName,
         format: "bchile",
@@ -555,33 +561,68 @@ export default function Payroll() {
         hasSnapshot: true,
       });
 
-      // Persist the snapshot in its own collection, keyed by payrollId. Keeps
-      // the payrolls doc light for listing and stays under the 1MB per-doc
-      // limit for big nominas.
+      // Snapshot completo para guardar en `payrollSnapshots` (1:1 con payroll)
+      // y para auto-bajada como JSON local.
       const fullSnapshot = { ...snapshot, payrollId: created.id };
-      try {
-        await payrollSnapshotsService.upsert(created.id, fullSnapshot);
-      } catch (err) {
-        console.warn("No se pudo guardar el snapshot en payrollSnapshots:", err);
-      }
-
-      // Immediate local download of the JSON file. Independent of the cloud
-      // save above so the user always gets a local copy.
+      // Bajada local inmediata del JSON (no toca red).
       downloadSnapshotJson(finalName, fullSnapshot);
 
-      await tagWorkdaysWithPayroll(allWorkdayIds, created.id);
-      await applyAdvancesToPayroll(allApplications, created.id);
+      // Los siguientes 3 pasos son independientes (solo necesitan `created.id`)
+      // y antes corrían secuenciales. En paralelo:
+      //   • snapshot upload (1 escritura, hasta 1MB)          ~15% del progreso
+      //   • tagWorkdays (N updates, progreso real por chunk)  ~65%
+      //   • applyAdvances (get M + batch update)              ~10%
+      // El % es una mezcla: el de workdays viene del callback real, los demás
+      // son toggles "iniciado / terminado". El XLSX ya NO se descarga
+      // automáticamente — queda como acción manual desde el historial.
+      const W_SNAPSHOT = 15, W_TAG = 65, W_ADV = 10;
+      let snapshotDone = false, advancesDone = false;
+      let tagDone = 0, tagTotal = Math.max(1, allWorkdayIds.length);
+      const recompute = () => {
+        const pct =
+          10 + // base por crear doc
+          (snapshotDone ? W_SNAPSHOT : 0) +
+          W_TAG * (tagDone / tagTotal) +
+          (advancesDone ? W_ADV : 0);
+        const detailParts = [];
+        if (allWorkdayIds.length > 0) detailParts.push(`Jornadas ${tagDone}/${tagTotal}`);
+        if (allApplications.length > 0) detailParts.push(`Anticipos ${advancesDone ? "✓" : "…"}`);
+        detailParts.push(`Snapshot ${snapshotDone ? "✓" : "…"}`);
+        setProgress({
+          step: "Guardando y aplicando descuentos en paralelo...",
+          detail: detailParts.join(" · "),
+          percent: pct,
+        });
+      };
+      recompute();
 
-      const cyclesForExport = cycleDetails.map((c) => ({
-        id: c.id,
-        label: c.label,
-        faenaId: c.faenaId,
-        faenaName: c.faenaName,
-        subfaenaId: c.subfaenaId,
-        subfaenaName: c.subfaenaName,
-      }));
-      await downloadBchileXlsx(cleanItems, payrollName || payrollSuggestedName(), cyclesForExport);
+      const pSnapshot = (async () => {
+        try {
+          await payrollSnapshotsService.upsert(created.id, fullSnapshot);
+        } catch (err) {
+          console.warn("No se pudo guardar el snapshot en payrollSnapshots:", err);
+        }
+        snapshotDone = true;
+        recompute();
+      })();
 
+      const pTag = (async () => {
+        await tagWorkdaysWithPayroll(allWorkdayIds, created.id, (done, total) => {
+          tagDone = done;
+          tagTotal = Math.max(1, total);
+          recompute();
+        });
+      })();
+
+      const pAdv = (async () => {
+        await applyAdvancesToPayroll(allApplications, created.id);
+        advancesDone = true;
+        recompute();
+      })();
+
+      await Promise.all([pSnapshot, pTag, pAdv]);
+
+      setProgress({ step: "Actualizando lista...", detail: "", percent: 95 });
       // Reset
       setSelectedCycleIds(new Set());
       saveSelection(new Set());
@@ -590,8 +631,11 @@ export default function Payroll() {
       setStep(1);
       setTab("history");
       await load();
+      setProgress({ step: "Listo ✓", detail: "", percent: 100 });
     } finally {
       setBusy(false);
+      // Pequeño delay para que el "Listo ✓" sea visible un instante.
+      setTimeout(() => setProgress(null), 400);
     }
   };
 
@@ -620,20 +664,65 @@ export default function Payroll() {
   const onDelete = async () => {
     if (!confirmDelete) return;
     const id = confirmDelete.id;
+    const workdayIds = confirmDelete.workdayIds || [];
+    const advanceIds = confirmDelete.advanceIds || [];
+    setConfirmDelete(null);
+    setProgress({ step: "Iniciando eliminación...", detail: "", percent: 2 });
     try {
-      await untagWorkdaysFromPayroll(confirmDelete.workdayIds || []);
-      await restoreAdvancesFromPayroll(confirmDelete.advanceIds || [], id);
+      // Las tres operaciones de cleanup (untag workdays, restore advances,
+      // remove snapshot) son independientes — corren en paralelo. Solo
+      // necesitamos esperarlas antes de borrar el doc principal para no
+      // dejar referencias colgando.
+      const W_UNTAG = 70, W_ADV = 15, W_SNAP = 10;
+      let untagDone = 0, untagTotal = Math.max(1, workdayIds.length);
+      let advancesDone = false, snapDone = false;
+      const recompute = () => {
+        const pct =
+          W_UNTAG * (untagDone / untagTotal) +
+          (advancesDone ? W_ADV : 0) +
+          (snapDone ? W_SNAP : 0);
+        const detailParts = [];
+        if (workdayIds.length > 0) detailParts.push(`Jornadas ${untagDone}/${untagTotal}`);
+        if (advanceIds.length > 0) detailParts.push(`Anticipos ${advancesDone ? "✓" : "…"}`);
+        detailParts.push(`Snapshot ${snapDone ? "✓" : "…"}`);
+        setProgress({
+          step: "Liberando jornadas y anticipos...",
+          detail: detailParts.join(" · "),
+          percent: pct,
+        });
+      };
+      recompute();
+
+      const pUntag = untagWorkdaysFromPayroll(workdayIds, (done, total) => {
+        untagDone = done;
+        untagTotal = Math.max(1, total);
+        recompute();
+      });
+      const pAdv = (async () => {
+        await restoreAdvancesFromPayroll(advanceIds, id);
+        advancesDone = true;
+        recompute();
+      })();
+      const pSnap = (async () => {
+        try { await payrollSnapshotsService.remove(id); } catch { /* noop */ }
+        snapDone = true;
+        recompute();
+      })();
+
+      await Promise.all([pUntag, pAdv, pSnap]);
+
+      setProgress({ step: "Eliminando nómina...", detail: "", percent: 95 });
       await payrollsService.remove(id);
-      // Best-effort cleanup of the snapshot. Old nominas may not have one.
-      try { await payrollSnapshotsService.remove(id); } catch { /* noop */ }
     } catch (err) {
       console.error("Error al eliminar nómina:", err);
       alert(`Error al eliminar la nómina: ${err?.message || err}`);
+      setProgress(null);
       return;
-    } finally {
-      setConfirmDelete(null);
     }
+    setProgress({ step: "Actualizando lista...", detail: "", percent: 98 });
     await load();
+    setProgress({ step: "Listo ✓", detail: "", percent: 100 });
+    setTimeout(() => setProgress(null), 400);
   };
   const onRedownload = async (p) => {
     // Aplicar overrides persistidos en el doc (lo que el usuario editó vía
@@ -792,6 +881,36 @@ export default function Payroll() {
           }}
         />
       )}
+
+      <ProgressOverlay info={progress} />
+    </div>
+  );
+}
+
+// Overlay modal de progreso. Se monta solo cuando hay `info`. Muestra el paso
+// actual, un detalle opcional (ej. "340 / 500") y una barra. No es cancelable
+// porque la mayoría de los pasos ya están corriendo en paralelo.
+function ProgressOverlay({ info }) {
+  if (!info) return null;
+  const pct = Math.max(0, Math.min(100, Math.round(Number(info.percent) || 0)));
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm">
+      <div className="w-[420px] max-w-[90vw] rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-5 shadow-2xl">
+        <div className="mb-3 flex items-center gap-2">
+          <div className="h-4 w-4 animate-spin rounded-full border-2 border-[var(--color-accent)] border-t-transparent" />
+          <div className="text-sm font-medium">{info.step || "Procesando..."}</div>
+        </div>
+        {info.detail && (
+          <div className="mb-2 text-xs text-[var(--color-muted)]">{info.detail}</div>
+        )}
+        <div className="h-2 w-full overflow-hidden rounded-full bg-[var(--color-surface-2)]">
+          <div
+            className="h-full bg-[var(--color-accent)] transition-all duration-200"
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+        <div className="mt-1 text-right text-xs text-[var(--color-muted)]">{pct}%</div>
+      </div>
     </div>
   );
 }
@@ -998,7 +1117,7 @@ function PreviewTable({
           disabled={busy || countSelected === 0}
           className="rounded-md bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
         >
-          {busy ? "Generando..." : "Guardar y descargar XLSX"}
+          {busy ? "Generando..." : "Guardar nómina"}
         </button>
       </div>
 
