@@ -13,6 +13,8 @@ import {
   markPending as markPayrollPending,
   tagWorkdaysWithPayroll,
   untagWorkdaysFromPayroll,
+  removeWorkerFromPayroll,
+  removeCycleFromPayroll,
 } from "../services/payrollsService";
 import {
   listPendingForWorkers,
@@ -777,6 +779,17 @@ export default function Payroll() {
           onRedownload={onRedownload}
           onDownloadNominaOnly={onDownloadNominaOnly}
           onDownloadSnapshot={onDownloadSnapshot}
+          onChanged={async () => {
+            // Re-fetch single payroll para refrescar el modal y la lista.
+            try {
+              const fresh = await payrollsService.getById(detailPayroll.id);
+              if (fresh) setDetailPayroll(fresh);
+              else setDetailPayroll(null);
+            } catch (err) {
+              console.warn("No se pudo refrescar nómina:", err);
+            }
+            await load();
+          }}
         />
       )}
     </div>
@@ -2472,7 +2485,7 @@ async function printCashReceipts(payroll, cashGroups, titleOverrides = {}, catal
   w.document.close();
 }
 
-function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOnly, onDownloadSnapshot }) {
+function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOnly, onDownloadSnapshot, onChanged }) {
   const { catalogs } = useCatalogs();
   const items = payroll.items || [];
   const { bank, cash } = splitBankAndCash(items);
@@ -2522,6 +2535,43 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
   })();
 
   const cycleDetails = payroll.cycleDetails || [];
+
+  // Edit mode: permite sacar un trabajador o un ciclo entero de la nómina.
+  // Solo disponible si la nómina está pendiente (paga = revertir primero).
+  const isPending = payroll.status !== "paid";
+  const [editMode, setEditMode] = useState(false);
+  const [editBusy, setEditBusy] = useState(false);
+  const handleRemoveWorker = async (item) => {
+    if (!isPending || editBusy) return;
+    const label = `${item.name || item.rut} (${fmtCurrency(item.amount || 0)})`;
+    if (!window.confirm(`¿Sacar a ${label} de esta nómina?\n\nSe liberan sus workdays y se restauran sus anticipos aplicados. No se puede deshacer (pero podés re-incluirlo generando otra nómina).`)) return;
+    setEditBusy(true);
+    try {
+      await removeWorkerFromPayroll(payroll.id, item.rut);
+      await onChanged?.();
+    } catch (err) {
+      alert(`Error al sacar el trabajador: ${err?.message || err}`);
+    } finally {
+      setEditBusy(false);
+    }
+  };
+  const handleRemoveCycle = async (cycle) => {
+    if (!isPending || editBusy) return;
+    const cycleAmount = (payroll.items || []).reduce(
+      (s, it) => s + (Number(it.byCycle?.[cycle.id]) || 0),
+      0,
+    );
+    if (!window.confirm(`¿Sacar el ciclo "${cycle.label}" (${fmtCurrency(cycleAmount)}) de esta nómina?\n\nSe liberan los workdays del ciclo. Los trabajadores que SOLO tenían producción en este ciclo salen también; los que tenían producción en otros ciclos quedan con su monto reducido. No se puede deshacer.`)) return;
+    setEditBusy(true);
+    try {
+      await removeCycleFromPayroll(payroll.id, cycle.id);
+      await onChanged?.();
+    } catch (err) {
+      alert(`Error al sacar el ciclo: ${err?.message || err}`);
+    } finally {
+      setEditBusy(false);
+    }
+  };
 
   // Resumen ejecutivo por subfaena (primera hoja del "Detalle de pago"
   // imprimible). Filas: subfaenas con monto > 0, ordenadas por faena y
@@ -2665,6 +2715,19 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
                   📝 Editar encabezados
                 </button>
               )}
+              {isPending && (
+                <button
+                  onClick={() => setEditMode((v) => !v)}
+                  className={`rounded border px-2 py-0.5 text-[10px] ${
+                    editMode
+                      ? "border-[var(--color-danger)] bg-[var(--color-danger-soft)] text-[var(--color-danger)]"
+                      : "border-[var(--color-border)] bg-[var(--color-surface-2)] hover:bg-[var(--color-accent-soft)]"
+                  }`}
+                  title="Sacar trabajadores o ciclos enteros de esta nómina"
+                >
+                  {editMode ? "✕ Cerrar edición" : "✂ Editar contenido"}
+                </button>
+              )}
             </div>
             <p className="text-xs text-[var(--color-muted)]">
               {cycleDetails.length > 0
@@ -2790,16 +2853,34 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
               <h3 className="mb-2 text-sm font-semibold">Ciclos / Faenas pagadas</h3>
               <ul className="space-y-1 text-sm">
                 {cycleDetails.map((c) => (
-                  <li key={c.id} className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5">
-                    <span className="font-medium">{c.label}</span>
-                    {c.faenaName && (
-                      <span className="ml-2 text-xs text-[var(--color-muted)]">
-                        {c.faenaName}{c.subfaenaName ? ` / ${c.subfaenaName}` : ""}
-                      </span>
+                  <li key={c.id} className="flex items-center justify-between gap-2 rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5">
+                    <div className="min-w-0">
+                      <span className="font-medium">{c.label}</span>
+                      {c.faenaName && (
+                        <span className="ml-2 text-xs text-[var(--color-muted)]">
+                          {c.faenaName}{c.subfaenaName ? ` / ${c.subfaenaName}` : ""}
+                        </span>
+                      )}
+                    </div>
+                    {editMode && cycleDetails.length > 1 && (
+                      <button
+                        type="button"
+                        disabled={editBusy}
+                        onClick={() => handleRemoveCycle(c)}
+                        className="shrink-0 rounded border border-[var(--color-danger)] bg-[var(--color-danger-soft)] px-2 py-0.5 text-[10px] text-[var(--color-danger)] hover:opacity-80 disabled:opacity-50"
+                        title="Sacar este ciclo entero de la nómina"
+                      >
+                        ✕ Quitar ciclo
+                      </button>
                     )}
                   </li>
                 ))}
               </ul>
+              {editMode && cycleDetails.length === 1 && (
+                <p className="mt-1 text-[10px] text-[var(--color-muted)]">
+                  Para sacar el único ciclo, eliminá la nómina entera.
+                </p>
+              )}
             </section>
           )}
 
@@ -2815,6 +2896,7 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
                     <th className="px-2 py-1">Cuenta</th>
                     <th className="px-2 py-1">Tipo</th>
                     <th className="px-2 py-1 text-right">Monto</th>
+                    {editMode && <th className="px-2 py-1"></th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -2826,6 +2908,19 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
                       <td className="px-2 py-1 font-mono text-xs">{it.accountNumber}</td>
                       <td className="px-2 py-1 text-xs">{accountTypeShort(it.accountType)}</td>
                       <td className="px-2 py-1 text-right tabular-nums">{fmtCurrency(it.amount)}</td>
+                      {editMode && (
+                        <td className="px-2 py-1 text-right">
+                          <button
+                            type="button"
+                            disabled={editBusy}
+                            onClick={() => handleRemoveWorker(it)}
+                            className="rounded border border-[var(--color-danger)] bg-[var(--color-danger-soft)] px-1.5 py-0.5 text-[10px] text-[var(--color-danger)] hover:opacity-80 disabled:opacity-50"
+                            title="Sacar trabajador de la nómina"
+                          >
+                            ✕
+                          </button>
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>
@@ -2833,6 +2928,7 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
                   <tr className="border-t-2 border-[var(--color-border)] font-semibold">
                     <td colSpan={5} className="px-2 py-2 text-right">Subtotal banco</td>
                     <td className="px-2 py-2 text-right tabular-nums">{fmtCurrency(bank.reduce((s, x) => s + x.amount, 0))}</td>
+                    {editMode && <td></td>}
                   </tr>
                 </tfoot>
               </table>
@@ -2858,6 +2954,19 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
                             <td className="px-2 py-1 font-mono text-xs">{formatRutForDisplay(it.rut)}</td>
                             <td className="px-2 py-1">{it.name}</td>
                             <td className="px-2 py-1 text-right tabular-nums">{fmtCurrency(it.amount)}</td>
+                            {editMode && (
+                              <td className="px-2 py-1 text-right">
+                                <button
+                                  type="button"
+                                  disabled={editBusy}
+                                  onClick={() => handleRemoveWorker(it)}
+                                  className="rounded border border-[var(--color-danger)] bg-[var(--color-danger-soft)] px-1.5 py-0.5 text-[10px] text-[var(--color-danger)] hover:opacity-80 disabled:opacity-50"
+                                  title="Sacar trabajador de la nómina"
+                                >
+                                  ✕
+                                </button>
+                              </td>
+                            )}
                           </tr>
                         ))}
                       </tbody>

@@ -6,6 +6,7 @@ import {
   cyclesService,
   workdaysService,
 } from "../services";
+import { payrollsService } from "../services/payrollsService";
 import {
   userPrefsService,
   FAENA_PALETTE,
@@ -601,13 +602,47 @@ export default function Faenas() {
             setConfirm(null);
             return;
           }
+          // Bloqueamos el cascade si algún workday del scope ya forma parte
+          // de una nómina — borrarlo dejaría la nómina huérfana. Mensaje
+          // explícito al admin para que elimine primero esas nóminas.
+          const allCycleWds = [];
+          for (const c of cyc) {
+            const wds = await workdaysService.list({ wheres: [["cycleId", "==", c.id]] });
+            allCycleWds.push(...wds);
+          }
+          const taggedPayrollIds = [...new Set(allCycleWds.map((w) => w.payrollId).filter(Boolean))];
+          if (taggedPayrollIds.length > 0) {
+            const payrolls = await Promise.all(
+              taggedPayrollIds.map((id) => payrollsService.getById(id).catch(() => null)),
+            );
+            const names = payrolls
+              .filter(Boolean)
+              .map((p) => `· ${p.name}${p.status === "paid" ? " (pagada)" : ""}`)
+              .join("\n");
+            const taggedCount = allCycleWds.filter((w) => w.payrollId).length;
+            alert(
+              `No se puede eliminar en cascada:\n` +
+                `${taggedCount} workday(s) ya forman parte de ${taggedPayrollIds.length} nómina(s):\n` +
+                `${names || "(nómina sin nombre)"}\n\n` +
+                `Eliminá primero esas nóminas y volvé a intentar.`,
+            );
+            setConfirm(null);
+            return;
+          }
+
           const ok = window.confirm(
             `Bloqueado por:\n - ${blockers.join("\n - ")}\n\n¿Eliminar TODO en cascada (subfaenas + ciclos + producción)?\nRevisa la consola del navegador para ver los IDs.\nEsta acción no se puede deshacer.`,
           );
           if (!ok) { setConfirm(null); return; }
 
+          // Reusamos los wds ya cargados arriba para no duplicar reads.
+          const wdsByCycle = new Map();
+          for (const w of allCycleWds) {
+            if (!wdsByCycle.has(w.cycleId)) wdsByCycle.set(w.cycleId, []);
+            wdsByCycle.get(w.cycleId).push(w);
+          }
           for (const c of cyc) {
-            const wds = await workdaysService.list({ wheres: [["cycleId", "==", c.id]] });
+            const wds = wdsByCycle.get(c.id) || [];
             console.log(`  Borrando ciclo ${c.id} (${c.label}) con ${wds.length} workdays`);
             for (const w of wds) await workdaysService.remove(w.id);
             await cyclesService.remove(c.id);
@@ -632,6 +667,31 @@ export default function Faenas() {
             wheres: [["cycleId", "==", confirm.item.id]],
           });
           if (wds.length) {
+            // ANTES de proponer el cascade, bloqueamos si algún workday está
+            // taggeado con `payrollId`. Borrar el ciclo dejaría la nómina
+            // huérfana (los `workdayIds` apuntarían a docs inexistentes), lo
+            // que rompe los flujos de borrar/revertir/marcar pagada esa
+            // nómina. El admin tiene que eliminar primero esas nóminas y
+            // después puede borrar el ciclo.
+            const taggedPayrollIds = [...new Set(wds.map((w) => w.payrollId).filter(Boolean))];
+            if (taggedPayrollIds.length > 0) {
+              const payrolls = await Promise.all(
+                taggedPayrollIds.map((id) => payrollsService.getById(id).catch(() => null)),
+              );
+              const names = payrolls
+                .filter(Boolean)
+                .map((p) => `· ${p.name}${p.status === "paid" ? " (pagada)" : ""}`)
+                .join("\n");
+              const taggedCount = wds.filter((w) => w.payrollId).length;
+              alert(
+                `No se puede eliminar el ciclo "${confirm.item.label}":\n` +
+                  `${taggedCount} workday(s) ya forman parte de ${taggedPayrollIds.length} nómina(s):\n` +
+                  `${names || "(nómina sin nombre)"}\n\n` +
+                  `Eliminá primero esas nóminas y volvé a intentar.`,
+              );
+              setConfirm(null);
+              return;
+            }
             if (isAdmin) {
               const ok = window.confirm(
                 `El ciclo "${confirm.item.label}" tiene ${wds.length} registro(s) de producción.\n\n¿Eliminar TODO en cascada (producción + ciclo)?\nEsta acción no se puede deshacer.`,
