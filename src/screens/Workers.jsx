@@ -33,12 +33,20 @@ export default function Workers() {
   const [summary, setSummary] = useState(null);
   const [search, setSearch] = useState("");
   const [allWorkersForModal, setAllWorkersForModal] = useState([]);
+  // Filtros opcionales (componibles con la búsqueda). Cuando alguno está
+  // activo, los resultados salen de la lista completa cacheada en lugar de la
+  // búsqueda server-side, y la regla de "≥4 caracteres" se relaja.
+  // leaderFilter: "" | "__none__" | <nombre líder UPPER>
+  // payFilter: "" | "cash" | "transfer"
+  const [leaderFilter, setLeaderFilter] = useState("");
+  const [payFilter, setPayFilter] = useState("");
   const cacheRef = useRef(new Map());
   const reqIdRef = useRef(0);
 
   const queryKind = detectQueryKind(search);
   const queryRaw = search.trim();
   const queryReady = queryRaw.replace(/[.\s-]/g, "").length >= MIN_SEARCH;
+  const filtersActive = leaderFilter !== "" || payFilter !== "";
 
   // Debounced server-side search (≥ MIN_SEARCH chars). Caches results per
   // query within the session to avoid hitting Firestore on re-typed queries.
@@ -71,7 +79,8 @@ export default function Workers() {
   }, [queryRaw, queryReady]);
 
   // Lazy-load full workers list (used by the edit modal for similarity check
-  // and leader pool). Hits Firestore at most once per 24h thanks to the cache.
+  // and leader pool, y también para los filtros opt-in). Hits Firestore at
+  // most once per 24h thanks to the cache.
   const ensureAllForModal = async () => {
     if (allWorkersForModal.length) return allWorkersForModal;
     const list = await workersService.list({
@@ -82,6 +91,64 @@ export default function Workers() {
     });
     setAllWorkersForModal(list);
     return list;
+  };
+
+  // Pre-cargar la lista en cuanto el usuario active cualquier filtro.
+  useEffect(() => {
+    if (filtersActive && allWorkersForModal.length === 0) {
+      ensureAllForModal();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filtersActive]);
+
+  // Líderes únicos para el dropdown (toma del dataset completo cacheado).
+  const leaderOptions = useMemo(() => {
+    const set = new Set();
+    for (const w of allWorkersForModal) {
+      const l = (w.groupLeader?.[0] || "").toString().toUpperCase().trim();
+      if (l) set.add(l);
+    }
+    return [...set].sort((a, b) => a.localeCompare(b, "es"));
+  }, [allWorkersForModal]);
+
+  const stripAccents = (s) =>
+    String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toUpperCase();
+
+  // Cuando hay filtros activos los resultados salen del dataset completo.
+  // La búsqueda por texto se aplica encima como substring acentos-insensitive
+  // sobre nombre y RUT (componible).
+  const displayedResults = useMemo(() => {
+    if (!filtersActive) return results;
+    let arr = allWorkersForModal;
+    if (leaderFilter === "__none__") {
+      arr = arr.filter((w) => !((w.groupLeader?.[0] || "").toString().trim()));
+    } else if (leaderFilter) {
+      arr = arr.filter(
+        (w) => (w.groupLeader?.[0] || "").toString().toUpperCase().trim() === leaderFilter,
+      );
+    }
+    if (payFilter === "cash") {
+      arr = arr.filter((w) => isCashBank(w.bankDetails?.[3]));
+    } else if (payFilter === "transfer") {
+      arr = arr.filter((w) => w.bankDetails?.[3] && !isCashBank(w.bankDetails?.[3]));
+    }
+    if (queryRaw) {
+      const needle = stripAccents(queryRaw.replace(/[.\s-]/g, ""));
+      if (needle) {
+        arr = arr.filter((w) => {
+          const name = stripAccents(w.name);
+          const id = stripAccents(String(w.id || "").replace(/[.\s-]/g, ""));
+          return name.includes(needle) || id.includes(needle);
+        });
+      }
+    }
+    return arr;
+  }, [filtersActive, leaderFilter, payFilter, allWorkersForModal, queryRaw, results]);
+
+  const showResults = filtersActive || queryReady;
+  const clearFilters = () => {
+    setLeaderFilter("");
+    setPayFilter("");
   };
 
   const refreshCurrentSearch = async () => {
@@ -100,6 +167,19 @@ export default function Workers() {
   const onSaved = async () => {
     setEdit(null);
     await refreshCurrentSearch();
+    // Si la lista completa está cargada (por filtros o por el modal), la
+    // refrescamos también — `workersService.update` ya invalidó el cache.
+    if (allWorkersForModal.length) {
+      try {
+        const list = await workersService.list({
+          order: ["name", "asc"],
+          cache: true,
+          persist: true,
+          ttl: 24 * 60 * 60 * 1000,
+        });
+        setAllWorkersForModal(list);
+      } catch { /* noop */ }
+    }
   };
 
   const openCreate = async () => {
@@ -120,6 +200,9 @@ export default function Workers() {
       bankDetails = [worker.id, "", null, CASH_BANK_CODE];
     }
     setResults((prev) => prev.map((w) => (w.id === worker.id ? { ...w, bankDetails } : w)));
+    setAllWorkersForModal((prev) =>
+      prev.map((w) => (w.id === worker.id ? { ...w, bankDetails } : w)),
+    );
     try {
       await workersService.update(worker.id, { bankDetails });
     } catch (err) {
@@ -248,11 +331,13 @@ export default function Workers() {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
+      <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Trabajadores</h1>
           <p className="text-sm text-[var(--color-muted)]">
-            {queryReady ? `${results.length} resultado(s)` : `Escribe al menos ${MIN_SEARCH} caracteres para buscar`}
+            {showResults
+              ? `${displayedResults.length} resultado(s)`
+              : `Escribe al menos ${MIN_SEARCH} caracteres para buscar`}
           </p>
         </div>
         <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
@@ -278,23 +363,71 @@ export default function Workers() {
         </div>
       </div>
 
+      <div className="mb-4 flex flex-wrap items-center gap-2 text-xs">
+        <select
+          value={leaderFilter}
+          onChange={(e) => setLeaderFilter(e.target.value)}
+          className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1.5 text-xs shadow-sm focus:border-[var(--color-accent)] outline-none"
+          title="Filtrar por líder de grupo"
+        >
+          <option value="">👥 Líder: todos</option>
+          <option value="__none__">— Sin líder —</option>
+          {leaderOptions.map((l) => (
+            <option key={l} value={l}>{l}</option>
+          ))}
+        </select>
+        <button
+          type="button"
+          onClick={() => setPayFilter((v) => (v === "cash" ? "" : "cash"))}
+          className={`rounded-md border px-2 py-1.5 ${
+            payFilter === "cash"
+              ? "border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
+              : "border-[var(--color-border)] bg-[var(--color-surface-2)] hover:bg-[var(--color-accent-soft)]"
+          }`}
+        >
+          💵 Efectivo
+        </button>
+        <button
+          type="button"
+          onClick={() => setPayFilter((v) => (v === "transfer" ? "" : "transfer"))}
+          className={`rounded-md border px-2 py-1.5 ${
+            payFilter === "transfer"
+              ? "border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
+              : "border-[var(--color-border)] bg-[var(--color-surface-2)] hover:bg-[var(--color-accent-soft)]"
+          }`}
+        >
+          🏦 Transferencia
+        </button>
+        {filtersActive && (
+          <button
+            type="button"
+            onClick={clearFilters}
+            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1.5 text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)]"
+          >
+            ✕ Limpiar filtros
+          </button>
+        )}
+      </div>
+
       <ResizableArea storageKey="workers-grid" defaultHeight={460} minHeight={280}>
       <div
         className={`h-full ${isMobile ? "" : "ag-theme-quartz ag-theme-app"}`}
       >
-        {!queryReady ? (
+        {!showResults ? (
           <div className="flex h-full items-center justify-center rounded-lg border border-dashed border-[var(--color-border)] text-sm text-[var(--color-muted)]">
-            Escribe al menos {MIN_SEARCH} caracteres (RUT o nombre) para buscar.
+            Escribe al menos {MIN_SEARCH} caracteres (RUT o nombre) o activá un filtro para listar.
           </div>
-        ) : loading ? (
+        ) : loading && !filtersActive ? (
           <div className="flex h-full items-center justify-center text-[var(--color-muted)]">Buscando...</div>
-        ) : results.length === 0 ? (
+        ) : filtersActive && allWorkersForModal.length === 0 ? (
+          <div className="flex h-full items-center justify-center text-[var(--color-muted)]">Cargando trabajadores...</div>
+        ) : displayedResults.length === 0 ? (
           <div className="flex h-full items-center justify-center rounded-lg border border-dashed border-[var(--color-border)] text-sm text-[var(--color-muted)]">
-            Sin resultados para "{search}".
+            Sin resultados{search ? ` para "${search}"` : ""}.
           </div>
         ) : isMobile ? (
           <div className="space-y-2">
-            {results.map((w) => {
+            {displayedResults.map((w) => {
               const isRut = isCuentaRut(w.bankDetails);
               const isCash = isCashBank(w.bankDetails?.[3]);
               const leader = (w.groupLeader?.[0] || "").toUpperCase().trim() || "—";
@@ -376,7 +509,7 @@ export default function Workers() {
           </div>
         ) : (
           <AgGridReact
-            rowData={results}
+            rowData={displayedResults}
             columnDefs={columnDefs}
             defaultColDef={{ resizable: true, sortable: true, filter: true }}
             getRowId={(p) => p.data.id}

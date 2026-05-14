@@ -144,8 +144,12 @@ function buildBchileSheet(wb, items) {
   ];
   ws.addRow(headers);
   for (const it of items) {
+    // `paymentRut` viene de bankDetails[0] (la cuenta destino del banco) y
+    // puede diferir del RUT de la persona — p.ej. cuando el pago va a una
+    // cuenta de un familiar. El portal de BChile lo valida contra la
+    // titularidad de la cuenta, así que SIEMPRE va paymentRut acá.
     ws.addRow([
-      rutWithDvNoDash(it.rut),
+      rutWithDvNoDash(it.paymentRut || it.rut),
       cleanText(it.name),
       String(it.accountNumber || ""),
       String(it.bankCode || ""),

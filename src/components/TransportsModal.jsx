@@ -256,7 +256,7 @@ export default function TransportsModal({ open, onClose, cycle, faena, subfaena,
   );
 }
 
-function TripEditModal({ open, onClose, trip, carriers, days, defaultDate, onSave }) {
+export function TripEditModal({ open, onClose, trip, carriers, days, defaultDate, onSave }) {
   const [carrierId, setCarrierId] = useState("");
   const [vehicleAlias, setVehicleAlias] = useState("");
   const [date, setDate] = useState(defaultDate || "");
@@ -383,7 +383,11 @@ function TripEditModal({ open, onClose, trip, carriers, days, defaultDate, onSav
           required
           placeholder={carrier ? "Selecciona..." : "Elige transportista primero"}
         />
-        <Select label="Fecha" value={date} onChange={setDate} options={dayOptions} required />
+        {dayOptions.length > 0 ? (
+          <Select label="Fecha" value={date} onChange={setDate} options={dayOptions} required />
+        ) : (
+          <TextField label="Fecha" type="date" value={date} onChange={setDate} required />
+        )}
         <Select label="Tipo" value={kind} onChange={setKind} options={kindOptions} />
         <TextField label="Lugar (origen)" value={lugar} onChange={setLugar} placeholder="ej: C.ALTO/PURRANQUE" />
         <TextField label="Destino" value={destino} onChange={setDestino} placeholder="ej: FRESIA" />

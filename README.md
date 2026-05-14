@@ -71,23 +71,33 @@ public/
 ## Módulos
 
 ### Faenas / Ciclos
-Jerarquía Faena → Subfaena → Ciclo → Labors → Workdays. El nombre del ciclo se compone de un prefijo bloqueado `Faena/Subfaena/` + sufijo editable. Cada ciclo se puede renombrar, abrir, cerrar y eliminar.
+Jerarquía Faena → Subfaena → Ciclo → Labors → Workdays. El nombre del ciclo se compone de un prefijo bloqueado `Faena/Subfaena/` + sufijo editable. Cada ciclo se puede renombrar, abrir, cerrar y eliminar. Se permiten múltiples ciclos abiertos en la misma subfaena.
+
+**Importar al crear un ciclo**: si ya hay un ciclo abierto en la misma subfaena, el form de creación ofrece una sección de import opt-in. Permite elegir qué labores clonar (con su config completa), si copiar la lista de días, si copiar precios por día, y si mover los workdays existentes al nuevo ciclo (saltea los que ya estén en una nómina para no romper snapshots).
 
 **Pisos (trato / cosecha)**: opt-in por día. En el panel de Precios cada día tiene un botón **"+ piso"** discreto que solo aparece si no está configurado; al guardarlo se muestra inline con acciones editar/quitar. La grilla agrega una columna "P" 🪙 **solo** en los días que tienen piso (configurado o asignado a alguien) — el resto queda sin columna extra. Click marca/desmarca el piso del trabajador (se crea/borra un workday separado con flag `pisoOnly`). El monto se suma al pago de producción y se refleja como columna/total separado en resúmenes y nómina.
 
 ### Trabajadores
-Carga única con cache persistente (5 min). Búsqueda client-side con substring (acentos y mayúsculas insensitive) sobre RUT y nombre. Auto-detect del tipo de búsqueda. Acciones rápidas para asignar Cuenta RUT (Banco Estado) o marcar como Efectivo.
+Búsqueda server-side por prefijo (RUT o nombre, ≥4 caracteres, debounced 250ms) con cache de la sesión. Acciones rápidas para asignar Cuenta RUT (Banco Estado) o marcar como Efectivo.
+
+**Filtros opcionales** (componibles con la búsqueda, opt-in): dropdown de líder (incluye "Sin líder") + chips toggle 💵 Efectivo / 🏦 Transferencia. Al activar cualquiera se carga la lista completa de trabajadores (cache 24h en localStorage, una sola query) y los filtros se aplican client-side; la regla de ≥4 caracteres se relaja para listar sin búsqueda. Si además hay texto, se filtra encima por substring acentos-insensitive sobre nombre y RUT.
 
 El **líder de grupo** es estricto: dropdown con líderes ya existentes; crear nuevos requiere acción explícita.
 
 ### Transportes
 Cuatro pestañas: Transportistas, Vueltas, **Pago por faena** (selecciona ciclos + rango de fechas, genera un resumen de pago por transportista), y Resúmenes / Pagos.
 
+**Imprimir varios resúmenes en lote**: botón en la pestaña Resúmenes / Pagos que abre un modal con filtros (estado pendiente/pagado/ambos, rango de fechas, multi-select de transportistas, multi-select de faena/subfaena). Dos botones de salida: 🖨 Imprimir todos en una única ventana (cada resumen en su propia página, con `page-break-after`) o 📦 Descargar ZIP con un PNG por resumen. Los filtros por faena/subfaena requieren cargar las vueltas una vez (cache en el modal).
+
 ### Anticipos y Adelantos
 Módulo separado para registrar adelantos (anticipo = vale chico; adelanto = mayor). Estados: pendiente / aplicado / cancelado. Se descuentan automáticamente en la nómina siguiente.
 
+El **resumen del trabajador** (módulo Trabajadores → 📊) muestra ahora una sección "Anticipos / Adelantos pendientes" con cada uno, su saldo y nota, y el bloque de totales se reorganiza en `Total producción − Saldo anticipos = NETO ESTIMADO` cuando hay saldo pendiente.
+
+El **resumen del ciclo** (módulo CycleDetail → 📊) agrega una segunda sección "Resumen por trabajador" — una infografía por labor con grilla `Trabajador × Días` (similar al grid pero imprimible). Cada labor tiene sus propios botones 📋 / 📥 / 🖨 para capturar sólo esa sección; el botón global del modal captura todo. Las celdas usan labels del catálogo (envase, calidad, tipo de trato) y al imprimir el thead se repite en cada hoja nueva.
+
 ### Nómina
-Selector de ciclos activos con monto pendiente por ciclo. Preview con anticipos pre-aplicados, validación de cuentas, filtros y bulk actions. Genera XLSX con cuatro hojas:
+Selector de ciclos activos con monto pendiente por ciclo. Cada ciclo seleccionado expone sus labores como chips toggleables — sirve para pagar solo algunas labores y dejar el resto disponible para una próxima nómina. Preview con anticipos pre-aplicados, validación de cuentas, filtros y bulk actions. Genera XLSX con cuatro hojas:
 
 1. **Nomina** — formato Banco de Chile (subir al portal del banco).
 2. **Resumen** — Transferencias / Efectivo / Total por ciclo.
@@ -95,6 +105,8 @@ Selector de ciclos activos con monto pendiente por ciclo. Preview con anticipos 
 4. **Efectivo** — agrupado por líder con paletas de color y subtotales.
 
 Hay descarga **sólo Nómina** (la hoja BChile pura) o XLSX completo. Comprobantes imprimibles del efectivo (uno por líder, con líneas de firma) e incluyen una columna **Anticipo** explícita cuando algún trabajador del grupo trae descuento.
+
+El **Detalle de pago** imprimible abre con un **Resumen por subfaena** (una fila por subfaena, con la faena impresa sólo en la primera fila del bloque): columnas `Con cuenta RUT` (todas las transferencias) vs `Efectivo` + TOTAL.
 
 Anti doble pago: cada workday se etiqueta con `payrollId`. Al eliminar una nómina, los workdays y anticipos vuelven a estar disponibles.
 
@@ -105,6 +117,8 @@ Cada generación de nómina escribe además un **snapshot JSON** inmutable (cole
 
 ### Calendario
 `/calendar` — vista mensual con barras de color por subfaena por día. Click en el día (zona blanca) abre un modal de zoom con todas las subfaenas del día; click en una barra abre un drawer con detalle (por labor + transportes) de esa subfaena. Carga workdays + trips del rango del mes con cache de sesión (5 min) — costo aprox. ~3k reads en mes pico. La función `fetchWorkdaysInRange` está aislada para migrar a snapshot por ciclo cerrado cuando el volumen lo justifique.
+
+En el drawer del día cada labor es expandible: muestra la **lista de trabajadores** que participaron (con nombre + RUT + producción + monto, ordenados por monto desc) y, para cosecha, la **distribución por calidad / envase** (cards con kg y % por combo). La lista de trabajadores se carga una vez por sesión usando el cache 24h compartido con la pantalla de Trabajadores (0 reads extra después de la primera carga del día).
 
 ### Consola admin
 `/admin/console` — solo admin. Permite contar workdays por mes/rango/ciclo y ver totales por colección usando `getCountFromServer` (1 read por cada 1000 docs vs N reads con `getDocs`).

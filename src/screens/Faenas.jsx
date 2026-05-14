@@ -19,6 +19,7 @@ import ConfirmDialog from "../components/ConfirmDialog";
 import TextField from "../components/TextField";
 import Select from "../components/Select";
 import { useIsMobile } from "../hooks/useIsMobile";
+import { workdayDocId } from "../utils/cosechaCombos";
 
 const emptyFaena = { name: "", location: "", notes: "" };
 const emptySub = { name: "", notes: "" };
@@ -344,37 +345,63 @@ export default function Faenas() {
         alert("La faena tiene subfaenas. Selecciona una subfaena para el ciclo.");
         return;
       }
-      const scope = existing.filter((c) =>
-        data.subfaenaId ? c.subfaenaId === data.subfaenaId : !c.subfaenaId,
-      );
-      const openCount = scope.filter((c) => c.status !== "closed").length;
-      if (openCount >= 2) {
-        alert(`Ya hay 2 ciclos abiertos en este ámbito. Cierra uno antes de crear otro.`);
-        return;
-      }
     }
     setBusy(true);
     try {
+      // Determinar labores y datos a importar desde el ciclo origen (si aplica).
       let labors;
-      if (mode === "create" && data.copyWorkers && data.prevCycle) {
-        const prevLabors = data.prevCycle.labors || [];
-        labors = prevLabors.map((l) => ({
-          id: newId(),
-          name: l.name,
-          type: l.type,
-          workers: l.workers || [],
-          // Carry over labor-specific config so the next cycle starts ready.
-          ...(l.baseDayDefault != null ? { baseDayDefault: l.baseDayDefault } : {}),
-          ...(l.bonusManejo != null ? { bonusManejo: l.bonusManejo } : {}),
-          ...(l.bonusSupervision != null ? { bonusSupervision: l.bonusSupervision } : {}),
-          ...(l.overtimeRate != null ? { overtimeRate: l.overtimeRate } : {}),
-        }));
-        if (labors.length === 0) labors = defaultLabors();
+      let importPlan = null; // { source, labors, sourceLaborById, oldToNewLaborId }
+      if (mode === "create" && data.importEnabled && data.importSourceId) {
+        const source = (data.importCandidates || []).find((c) => c.id === data.importSourceId);
+        const picked = (source?.labors || []).filter((l) => (data.importLaborIds || new Set()).has(l.id));
+        if (picked.length === 0) {
+          alert("Marcá al menos una labor a clonar (o desactivá la importación).");
+          setBusy(false);
+          return;
+        }
+        const oldToNewLaborId = new Map();
+        labors = picked.map((l) => {
+          const id = newId();
+          oldToNewLaborId.set(l.id, id);
+          // Copiamos la config completa (todo lo que no sea id) — el form
+          // de la labor en CycleDetail solo lee campos conocidos.
+          const { id: _drop, ...rest } = l;
+          return { ...rest, id };
+        });
+        importPlan = { source, picked, oldToNewLaborId };
       } else {
         labors = data.labors && data.labors.length ? data.labors : defaultLabors();
       }
+
       const prefix = cyclePrefix(faenaId, data.subfaenaId);
       const suffix = (data.labelSuffix ?? data.label ?? "").trim();
+
+      // Días: los días marcados en `importDays` definen la lista del nuevo
+      // ciclo (y también restringen qué workdays/precios se importan).
+      const importDaysSet = data.importDays || new Set();
+      let nextDays = data.days || [];
+      if (mode === "create" && importPlan) {
+        nextDays = (importPlan.source.days || []).filter((d) => importDaysSet.has(d));
+      }
+
+      // dayPrices: si pidieron copiarlos, re-mapeamos las claves de laborId
+      // de las labores seleccionadas y filtramos por días seleccionados.
+      let nextDayPrices = undefined;
+      if (mode === "create" && importPlan && data.importCopyDayPrices) {
+        const src = importPlan.source.dayPrices || {};
+        const out = {};
+        for (const [oldLid, newLid] of importPlan.oldToNewLaborId) {
+          const srcLab = src[oldLid];
+          if (!srcLab) continue;
+          const filtered = {};
+          for (const d in srcLab) {
+            if (importDaysSet.has(d)) filtered[d] = srcLab[d];
+          }
+          if (Object.keys(filtered).length > 0) out[newLid] = filtered;
+        }
+        if (Object.keys(out).length > 0) nextDayPrices = out;
+      }
+
       const payload = {
         faenaId,
         subfaenaId: data.subfaenaId || null,
@@ -382,11 +409,56 @@ export default function Faenas() {
         startDate: data.startDate || todayStr(),
         notes: data.notes || "",
         status: data.status || "open",
-        days: data.days || [],
+        days: nextDays,
         labors,
+        ...(nextDayPrices ? { dayPrices: nextDayPrices } : {}),
       };
-      if (mode === "create") await cyclesService.create(payload);
-      else await cyclesService.update(data.id, payload);
+
+      let createdCycleId = null;
+      if (mode === "create") {
+        const created = await cyclesService.create(payload);
+        createdCycleId = created?.id || created;
+      } else {
+        await cyclesService.update(data.id, payload);
+      }
+
+      // Mover workdays: para cada labor importada, leemos sus workdays del
+      // origen y los re-creamos en el nuevo ciclo (nuevo cycleId/laborId).
+      // El docId encodea cycleId+laborId, así que es delete + create.
+      // Saltamos workdays con payrollId para no romper snapshots de nómina.
+      if (mode === "create" && importPlan && data.importMoveWorkdays && createdCycleId) {
+        const oldCycleId = importPlan.source.id;
+        let skippedPaid = 0;
+        let moved = 0;
+        for (const oldLabor of importPlan.picked) {
+          const newLaborId = importPlan.oldToNewLaborId.get(oldLabor.id);
+          const wds = await workdaysService.list({
+            wheres: [["cycleId", "==", oldCycleId], ["laborId", "==", oldLabor.id]],
+          });
+          for (const w of wds) {
+            if (w.payrollId) { skippedPaid += 1; continue; }
+            // Solo movemos los workdays cuyo `date` está en la selección.
+            if (!importDaysSet.has(w.date)) continue;
+            // Derivar comboKey del docId (5to segmento). Si solo hay 4,
+            // es "0_0" implícito (workday simple).
+            const parts = String(w.id || "").split("__");
+            const ck = parts.length >= 5 ? parts.slice(4).join("__") : "0_0";
+            const newDocId = workdayDocId(createdCycleId, newLaborId, w.workerRut, w.date, ck);
+            const { id: _oldId, cycleId: _cy, laborId: _la, ...rest } = w;
+            await workdaysService.upsert(newDocId, {
+              ...rest,
+              cycleId: createdCycleId,
+              laborId: newLaborId,
+            });
+            await workdaysService.remove(w.id);
+            moved += 1;
+          }
+        }
+        if (skippedPaid > 0) {
+          alert(`Se movieron ${moved} workday(s). ${skippedPaid} ya estaban en una nómina y quedaron en el ciclo origen.`);
+        }
+      }
+
       setCycleForm(null);
       await loadCycles(faenaId);
     } finally {
@@ -401,18 +473,14 @@ export default function Faenas() {
     }
     const existing = cyclesByFaena[faenaId] || [];
     const scope = existing.filter((c) => c.subfaenaId === subfaenaId);
-    const openCount = scope.filter((c) => c.status !== "closed").length;
-    if (openCount >= 2) {
-      alert(`Ya hay 2 ciclos abiertos en este ámbito. Cierra uno antes de crear otro.`);
-      return;
-    }
 
-    // Most recent cycle in this scope (open or closed), for optional worker import.
+    // Lista de ciclos abiertos (no cerrados) del mismo ámbito que sirven como
+    // posible fuente de import. Los presentamos ordenados por fecha más
+    // reciente primero.
     const sortKey = (c) => c.endDate || c.startDate || c.createdAt?.toDate?.()?.toISOString?.() || "";
-    const prevCycle = [...scope].sort((a, b) => sortKey(b).localeCompare(sortKey(a)))[0];
-    const prevWorkerCount = prevCycle
-      ? new Set((prevCycle.labors || []).flatMap((l) => l.workers || [])).size
-      : 0;
+    const openCandidates = scope
+      .filter((c) => c.status !== "closed")
+      .sort((a, b) => sortKey(b).localeCompare(sortKey(a)));
 
     setCycleForm({
       mode: "create",
@@ -423,9 +491,16 @@ export default function Faenas() {
         startDate: todayStr(),
         notes: "",
         labors: defaultLabors(),
-        prevCycle: prevCycle || null,
-        prevWorkerCount,
-        copyWorkers: !!prevCycle && prevWorkerCount > 0,
+        // Import desde otro ciclo abierto. Opt-in: arranca apagado para no
+        // ensuciar la creación rápida. Al activarlo seleccionamos por defecto
+        // el más reciente con todas sus labores y todos sus días.
+        importCandidates: openCandidates,
+        importEnabled: false,
+        importSourceId: openCandidates[0]?.id || null,
+        importLaborIds: new Set((openCandidates[0]?.labors || []).map((l) => l.id)),
+        importDays: new Set((openCandidates[0]?.days || [])),
+        importCopyDayPrices: false,
+        importMoveWorkdays: false,
       },
     });
   };
@@ -923,30 +998,17 @@ export default function Faenas() {
               value={cycleForm.data.notes}
               onChange={(v) => setCycleForm((c) => ({ ...c, data: { ...c.data, notes: v } }))}
             />
-            {cycleForm.mode === "create" && cycleForm.data.prevCycle && cycleForm.data.prevWorkerCount > 0 && (
-              <div className="rounded-md border border-[var(--color-accent-soft)] bg-[var(--color-accent-soft)]/30 p-3 text-sm">
-                <label className="flex items-start gap-2">
-                  <input
-                    type="checkbox"
-                    checked={!!cycleForm.data.copyWorkers}
-                    onChange={(e) =>
-                      setCycleForm((c) => ({ ...c, data: { ...c.data, copyWorkers: e.target.checked } }))
-                    }
-                    className="mt-0.5"
-                  />
-                  <span>
-                    Importar <b>{cycleForm.data.prevWorkerCount}</b> trabajador(es) y las labores del último ciclo{" "}
-                    <span className="text-[var(--color-muted)]">
-                      ({cycleForm.data.prevCycle.label}
-                      {cycleForm.data.prevCycle.status !== "closed" ? " · abierto" : ""})
-                    </span>.
-                  </span>
-                </label>
-              </div>
+            {cycleForm.mode === "create" && (cycleForm.data.importCandidates || []).length > 0 && (
+              <ImportSection
+                data={cycleForm.data}
+                onChange={(patch) =>
+                  setCycleForm((c) => ({ ...c, data: { ...c.data, ...patch } }))
+                }
+              />
             )}
             <p className="text-xs text-[var(--color-muted)]">
-              {cycleForm.mode === "create" && cycleForm.data.copyWorkers && cycleForm.data.prevCycle
-                ? "Se copiarán las labores y trabajadores del ciclo anterior."
+              {cycleForm.mode === "create" && cycleForm.data.importEnabled
+                ? "Se clonarán las labores marcadas. Si activaste 'Mover workdays', se transferirán al nuevo ciclo y desaparecerán del origen."
                 : 'Se creará con una labor "Principal" por defecto. Podrás agregar más al abrir el ciclo.'}
             </p>
             <div className="flex justify-end gap-2 pt-2">
@@ -1050,6 +1112,178 @@ export default function Faenas() {
 }
 
 // ---------------------------------------------------------------------------
+
+// Sección del modal de creación de ciclo que ofrece importar desde otro
+// ciclo abierto del mismo ámbito. Se renderiza solo si hay al menos un
+// candidato. Permite elegir cuáles labores clonar y si copiar días/precios o
+// mover los workdays existentes al nuevo ciclo.
+function ImportSection({ data, onChange }) {
+  const candidates = data.importCandidates || [];
+  const source = candidates.find((c) => c.id === data.importSourceId) || null;
+  const sourceLabors = source?.labors || [];
+  const sourceDays = source?.days || [];
+  const selectedIds = data.importLaborIds || new Set();
+  const selectedDays = data.importDays || new Set();
+
+  const toggleLabor = (id) => {
+    const next = new Set(selectedIds);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    onChange({ importLaborIds: next });
+  };
+  const allLaborsOn = sourceLabors.every((l) => selectedIds.has(l.id));
+  const toggleAllLabors = () => {
+    onChange({ importLaborIds: new Set(allLaborsOn ? [] : sourceLabors.map((l) => l.id)) });
+  };
+  const toggleDay = (d) => {
+    const next = new Set(selectedDays);
+    if (next.has(d)) next.delete(d); else next.add(d);
+    onChange({ importDays: next });
+  };
+  const allDaysOn = sourceDays.length > 0 && sourceDays.every((d) => selectedDays.has(d));
+  const toggleAllDays = () => {
+    onChange({ importDays: new Set(allDaysOn ? [] : sourceDays) });
+  };
+  const onPickSource = (id) => {
+    const c = candidates.find((x) => x.id === id);
+    onChange({
+      importSourceId: id,
+      importLaborIds: new Set((c?.labors || []).map((l) => l.id)),
+      importDays: new Set((c?.days || [])),
+    });
+  };
+
+  return (
+    <div className="rounded-md border border-[var(--color-accent-soft)] bg-[var(--color-accent-soft)]/30 p-3 text-sm space-y-2">
+      <label className="flex items-start gap-2 font-medium">
+        <input
+          type="checkbox"
+          checked={!!data.importEnabled}
+          onChange={(e) => onChange({ importEnabled: e.target.checked })}
+          className="mt-0.5"
+        />
+        <span>Importar desde un ciclo abierto del mismo ámbito</span>
+      </label>
+      {data.importEnabled && (
+        <div className="space-y-3 pl-6">
+          {candidates.length > 1 && (
+            <label className="block text-xs">
+              <span className="text-[var(--color-muted)]">Ciclo origen</span>
+              <select
+                value={data.importSourceId || ""}
+                onChange={(e) => onPickSource(e.target.value)}
+                className="mt-1 w-full rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1.5 text-sm"
+              >
+                {candidates.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.label} · abierto
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          {sourceLabors.length > 0 && (
+            <div>
+              <div className="mb-1 flex items-center justify-between text-xs">
+                <span className="text-[var(--color-muted)]">Labores a clonar</span>
+                <button
+                  type="button"
+                  onClick={toggleAllLabors}
+                  className="text-[var(--color-accent)] hover:underline"
+                >
+                  {allLaborsOn ? "Ninguna" : "Todas"}
+                </button>
+              </div>
+              <div className="max-h-40 overflow-auto rounded border border-[var(--color-border)] bg-[var(--color-surface)]">
+                {sourceLabors.map((l) => {
+                  const workers = (l.workers || []).length;
+                  return (
+                    <label
+                      key={l.id}
+                      className="flex items-center gap-2 border-b border-[var(--color-border)] px-2 py-1.5 text-xs last:border-b-0"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.has(l.id)}
+                        onChange={() => toggleLabor(l.id)}
+                      />
+                      <span className="flex-1">
+                        <b>{l.name}</b>{" "}
+                        <span className="text-[var(--color-muted)]">· {l.type}</span>
+                      </span>
+                      <span className="text-[var(--color-muted)]">
+                        {workers} trab.
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          {sourceDays.length > 0 && (
+            <div>
+              <div className="mb-1 flex items-center justify-between text-xs">
+                <span className="text-[var(--color-muted)]">Días a importar</span>
+                <button
+                  type="button"
+                  onClick={toggleAllDays}
+                  className="text-[var(--color-accent)] hover:underline"
+                >
+                  {allDaysOn ? "Ninguno" : "Todos"}
+                </button>
+              </div>
+              <div className="flex flex-wrap gap-1 rounded border border-[var(--color-border)] bg-[var(--color-surface)] p-1.5">
+                {sourceDays.map((d) => {
+                  const on = selectedDays.has(d);
+                  return (
+                    <button
+                      type="button"
+                      key={d}
+                      onClick={() => toggleDay(d)}
+                      className={`rounded-full border px-2 py-0.5 text-[10px] tabular-nums transition-opacity ${
+                        on
+                          ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+                          : "border-dashed border-[var(--color-border)] bg-transparent text-[var(--color-muted)] opacity-60"
+                      }`}
+                    >
+                      {d}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="mt-1 text-[10px] text-[var(--color-muted)]">
+                La lista de días del nuevo ciclo será solo las fechas marcadas.
+                Mover/copiar workdays y precios queda restringido a estas fechas.
+              </p>
+            </div>
+          )}
+          <label className="flex items-start gap-2 text-xs">
+            <input
+              type="checkbox"
+              checked={!!data.importCopyDayPrices}
+              onChange={(e) => onChange({ importCopyDayPrices: e.target.checked })}
+              className="mt-0.5"
+            />
+            <span>Copiar precios por día (combos/tiers/piso) de las labores y días marcados</span>
+          </label>
+          <label className="flex items-start gap-2 text-xs">
+            <input
+              type="checkbox"
+              checked={!!data.importMoveWorkdays}
+              onChange={(e) => onChange({ importMoveWorkdays: e.target.checked })}
+              className="mt-0.5"
+            />
+            <span>
+              <b>Mover</b> los workdays de las labores seleccionadas al nuevo ciclo.{" "}
+              <span className="text-[var(--color-danger)]">
+                ⚠ Desaparecen del ciclo origen.
+              </span>
+            </span>
+          </label>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function CycleRow({ cycle, subName, onEdit, onOpenCloseFlow, onReopen, onDelete }) {
   return (

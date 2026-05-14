@@ -3,6 +3,8 @@ import { toPng, toBlob } from "html-to-image";
 import Modal from "./Modal";
 import {
   containerLabel,
+  qualityLabel,
+  comboLabel,
   getDaySingle,
   getTratoTierTotals,
   workdayMapKey,
@@ -125,6 +127,106 @@ function laborTotals(rows) {
 }
 
 // ============================================================
+// Worker × Date grid per labor (segunda sección imprimible)
+// ============================================================
+// Construye la grilla workers × dates para una labor: cada celda trae la
+// producción del trabajador ese día. La métrica varía según labor.type:
+//   - cosecha: kilos (qty) + monto + breakdown por combo (calidad/envase)
+//   - trato:   qty (n° de "podas"/"desmalezados"/...) + monto
+//   - tratoHE: jornadas + horas extras + monto
+//   - main/supervision/extra: 1 jornada + monto
+// Los nombres de trabajadores salen de `labor.workers[].name` (denormalizado
+// al asignarlos a la labor). Si un workday queda huérfano, cae al RUT.
+function buildWorkerLaborGrid(labor, wdMap) {
+  const nameByRut = new Map();
+  for (const w of labor?.workers || []) {
+    if (w?.rut) nameByRut.set(w.rut, w.name || w.rut);
+  }
+
+  const byWorker = new Map(); // rut -> { rut, name, byDate, totals }
+  const datesSet = new Set();
+  const containers = new Set();
+  let anyPiso = false;
+
+  for (const k in wdMap) {
+    const wd = wdMap[k];
+    if (!wd?.workerRut || !wd?.date) continue;
+    datesSet.add(wd.date);
+
+    if (!byWorker.has(wd.workerRut)) {
+      byWorker.set(wd.workerRut, {
+        rut: wd.workerRut,
+        name: nameByRut.get(wd.workerRut) || wd.workerName || wd.workerRut,
+        byDate: new Map(),
+        totals: { qty: 0, amount: 0, kilos: 0, jornadas: 0, overtimeHours: 0, pisoAmount: 0 },
+      });
+    }
+    const wEntry = byWorker.get(wd.workerRut);
+    if (!wEntry.byDate.has(wd.date)) {
+      wEntry.byDate.set(wd.date, {
+        date: wd.date,
+        qty: 0,
+        amount: 0,
+        kilos: 0,
+        jornadas: 0,
+        overtimeHours: 0,
+        pisoAmount: 0,
+        byCombo: new Map(),
+      });
+    }
+    const c = wEntry.byDate.get(wd.date);
+    const wdAmount = Number(wd.amount) || 0;
+    c.amount += wdAmount;
+    wEntry.totals.amount += wdAmount;
+
+    if (wd.pisoOnly) {
+      c.pisoAmount += wdAmount;
+      wEntry.totals.pisoAmount += wdAmount;
+      anyPiso = true;
+      continue;
+    }
+
+    if (labor?.type === "cosecha") {
+      const kg = Number(wd.qty) || 0;
+      const qx = Number(wd.qualityX) || 0;
+      const cy = Number(wd.containerY) || 0;
+      containers.add(cy);
+      c.kilos += kg;
+      c.qty += kg;
+      wEntry.totals.kilos += kg;
+      wEntry.totals.qty += kg;
+      const ck = `${qx}_${cy}`;
+      if (!c.byCombo.has(ck)) c.byCombo.set(ck, { qx, cy, kilos: 0 });
+      c.byCombo.get(ck).kilos += kg;
+    } else if (labor?.type === "trato") {
+      const t = getTratoTierTotals(wd);
+      c.qty += t.qty;
+      wEntry.totals.qty += t.qty;
+    } else if (labor?.type === "tratoHE") {
+      const q = Number(wd.qty) || 0;
+      const oh = Number(wd.overtimeHours) || 0;
+      c.qty += q;
+      c.jornadas += q;
+      c.overtimeHours += oh;
+      wEntry.totals.qty += q;
+      wEntry.totals.jornadas += q;
+      wEntry.totals.overtimeHours += oh;
+    } else {
+      c.qty += 1;
+      c.jornadas += 1;
+      wEntry.totals.qty += 1;
+      wEntry.totals.jornadas += 1;
+    }
+  }
+
+  const dates = [...datesSet].sort();
+  const workers = [...byWorker.values()].sort((a, b) =>
+    (a.name || a.rut).localeCompare(b.name || b.rut, "es"),
+  );
+  return { workers, dates, containers, anyPiso };
+}
+
+// ============================================================
 // LocalStorage helpers
 // ============================================================
 
@@ -235,6 +337,17 @@ export default function CycleSummaryModal({
     });
   }, [cycle?.labors, workdaysByLabor, catalogs]);
 
+  // Grilla workers × dates por labor — segunda sección imprimible. Cada
+  // labor rinde su propia infografía con botones de copiar/imprimir.
+  const laborWorkerGrids = useMemo(() => {
+    if (!cycle?.labors) return [];
+    return cycle.labors.map((l) => {
+      const wdMap = workdaysByLabor[l.id] || {};
+      const grid = buildWorkerLaborGrid(l, wdMap);
+      return { labor: l, ...grid };
+    });
+  }, [cycle?.labors, workdaysByLabor]);
+
   // Transport: group by carrier + date
   const transportData = useMemo(() => {
     const byCarrier = new Map();
@@ -332,7 +445,12 @@ export default function CycleSummaryModal({
         body { font-family: ui-sans-serif, system-ui, sans-serif; padding: 20px; color: #000; margin: 0; }
         table { border-collapse: collapse; width: 100%; }
         th, td { border: 1px solid #888; padding: 6px 8px; font-size: 12px; }
-        @media print { @page { size: portrait; margin: 12mm; } }
+        /* Repetir el encabezado de la tabla en cada hoja nueva cuando la
+           tabla excede la página (Chrome/Firefox). */
+        thead { display: table-header-group; }
+        tfoot { display: table-row-group; }
+        tr { page-break-inside: avoid; }
+        @media print { @page { size: landscape; margin: 10mm; } }
       </style>
     </head><body>${html}</body></html>`);
     win.document.close();
@@ -422,15 +540,33 @@ export default function CycleSummaryModal({
         />
       )}
 
-      <PrintableSummary
-        ref={printRef}
-        mode={mode}
-        titles={titles}
-        labors={mode === "cobrar" ? cobrarLabors : laborsData}
-        carriers={mode === "cobrar" ? cobrarCarriers : transportData}
-        carrierById={carrierById}
-        grandTotal={mode === "cobrar" ? grandTotalCobrar : grandTotalPagar}
-      />
+      <div ref={printRef}>
+        <PrintableSummary
+          mode={mode}
+          titles={titles}
+          labors={mode === "cobrar" ? cobrarLabors : laborsData}
+          carriers={mode === "cobrar" ? cobrarCarriers : transportData}
+          carrierById={carrierById}
+          grandTotal={mode === "cobrar" ? grandTotalCobrar : grandTotalPagar}
+        />
+        {/* Resumen por trabajador (workers × dates), una infografía por
+            labor. Solo se muestra en modo "pagar" — el cobrar es por
+            tarifa pactada, no por desglose por trabajador. */}
+        {mode === "pagar" && laborWorkerGrids.map((g) => (
+          <LaborWorkerGrid
+            key={g.labor.id}
+            labor={g.labor}
+            displayName={titles.laborNames?.[g.labor.id] || g.labor.name}
+            unit={laborsData.find((ld) => ld.labor.id === g.labor.id)?.unit || ""}
+            catalogs={catalogs}
+            containers={g.containers}
+            workers={g.workers}
+            dates={g.dates}
+            anyPiso={g.anyPiso}
+            titles={titles}
+          />
+        ))}
+      </div>
     </Modal>
   );
 }
@@ -785,3 +921,284 @@ function TransportTable({ displayName, rows, totalCount, totalAmount, mode, char
 
 const cellH = { border: "1px solid #555", padding: "6px 8px", fontSize: 12, fontWeight: 700, textAlign: "left" };
 const cell = { border: "1px solid #999", padding: "5px 8px", fontSize: 12 };
+
+// ============================================================
+// LaborWorkerGrid — grilla imprimible workers × dates, una por labor
+// ============================================================
+// Replica visualmente lo que se ve en el grid de CycleDetail pero solo lectura
+// y optimizado para imprimir / capturar imagen. Tiene su propio ref +
+// botones (📋 / 📥 / 🖨). Para impresión, el `<thead>` lleva
+// `display: table-header-group` que hace que Chrome repita el encabezado en
+// cada hoja nueva cuando la tabla excede la primera página.
+function LaborWorkerGrid({
+  labor,
+  displayName,
+  unit,
+  catalogs,
+  containers,
+  workers,
+  dates,
+  anyPiso,
+  titles,
+}) {
+  const ref = useRef(null);
+  const [busy, setBusy] = useState("");
+
+  const filename = `resumen_trabajadores_${(labor?.name || "labor").replace(/[/\s]+/g, "_")}.png`;
+
+  const handleCopy = async () => {
+    if (!ref.current) return;
+    setBusy("copy");
+    try {
+      const blob = await toBlob(ref.current, { backgroundColor: "#ffffff", pixelRatio: 2 });
+      if (!blob) throw new Error("No se pudo generar la imagen");
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+      alert("Imagen copiada al portapapeles");
+    } catch (err) {
+      alert("Error: " + (err.message || err));
+    } finally {
+      setBusy("");
+    }
+  };
+  const handleDownload = async () => {
+    if (!ref.current) return;
+    setBusy("download");
+    try {
+      const dataUrl = await toPng(ref.current, { backgroundColor: "#ffffff", pixelRatio: 2 });
+      const link = document.createElement("a");
+      link.download = filename;
+      link.href = dataUrl;
+      link.click();
+    } finally {
+      setBusy("");
+    }
+  };
+  const handlePrint = () => {
+    if (!ref.current) return;
+    const html = ref.current.outerHTML;
+    const win = window.open("", "_blank", "width=1100,height=800");
+    if (!win) return;
+    win.document.write(`<!DOCTYPE html><html><head><title>${displayName} — trabajadores</title>
+      <style>
+        * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; box-sizing: border-box; }
+        body { font-family: ui-sans-serif, system-ui, sans-serif; padding: 20px; color: #000; margin: 0; }
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid #888; padding: 5px 7px; font-size: 11px; }
+        /* Hace que el thead se repita en cada hoja nueva (Chrome/Firefox). */
+        thead { display: table-header-group; }
+        tfoot { display: table-row-group; }
+        tr { page-break-inside: avoid; }
+        @media print { @page { size: landscape; margin: 10mm; } }
+      </style>
+    </head><body>${html}<script>window.onload = () => { window.focus(); window.print(); };</script></body></html>`);
+    win.document.close();
+  };
+
+  if (workers.length === 0 || dates.length === 0) return null;
+
+  // Sumas por columna (día) — pie de tabla.
+  const dayTotals = new Map();
+  for (const d of dates) dayTotals.set(d, { qty: 0, amount: 0, jornadas: 0, overtimeHours: 0, pisoAmount: 0 });
+  for (const w of workers) {
+    for (const [d, c] of w.byDate.entries()) {
+      const t = dayTotals.get(d);
+      if (!t) continue;
+      t.qty += c.qty;
+      t.amount += c.amount;
+      t.jornadas += c.jornadas;
+      t.overtimeHours += c.overtimeHours || 0;
+      t.pisoAmount += c.pisoAmount || 0;
+    }
+  }
+  const grand = { qty: 0, amount: 0, jornadas: 0, overtimeHours: 0, pisoAmount: 0 };
+  for (const w of workers) {
+    grand.qty += w.totals.qty;
+    grand.amount += w.totals.amount;
+    grand.jornadas += w.totals.jornadas || 0;
+    grand.overtimeHours += w.totals.overtimeHours || 0;
+    grand.pisoAmount += w.totals.pisoAmount || 0;
+  }
+
+  const containerName = labor?.type === "cosecha" && containers.size === 1
+    ? containerLabel(catalogs, [...containers][0])
+    : null;
+
+  // Devuelve el contenido de una celda (worker, date). qty arriba grande,
+  // monto chico abajo. Para tratoHE agrega chips de jornadas/HE. Para piso
+  // muestra un tag dorado discreto.
+  const renderCell = (c) => {
+    if (!c || (!c.qty && !c.amount && !c.pisoAmount)) return null;
+    const lines = [];
+    const t = labor?.type;
+    if (c.pisoAmount > 0 && !c.qty && !c.jornadas) {
+      lines.push(
+        <div key="piso" style={{ color: "#b45309", fontSize: 10 }}>🪙 {fmtCurrency(c.pisoAmount)}</div>,
+      );
+    } else if (t === "cosecha") {
+      const main = (
+        <div key="kg" style={{ fontWeight: 600 }}>
+          {fmtNumber(c.qty)}{containerName ? ` ${containerName.toLowerCase()}` : ""}
+        </div>
+      );
+      lines.push(main);
+      if (c.byCombo && c.byCombo.size > 1) {
+        for (const [, b] of c.byCombo) {
+          lines.push(
+            <div key={`${b.qx}_${b.cy}`} style={{ fontSize: 9, color: "#666" }}>
+              {qualityLabel(catalogs, b.qx)}: {fmtNumber(b.kilos)}
+            </div>,
+          );
+        }
+      }
+    } else if (t === "trato") {
+      lines.push(<div key="qty" style={{ fontWeight: 600 }}>{fmtNumber(c.qty)}</div>);
+    } else if (t === "tratoHE") {
+      const parts = [];
+      if (c.jornadas > 0) parts.push(`${fmtNumber(c.jornadas)}j`);
+      if (c.overtimeHours > 0) parts.push(`HE ${fmtNumber(c.overtimeHours)}h`);
+      lines.push(<div key="he" style={{ fontWeight: 600 }}>{parts.join(" · ") || "—"}</div>);
+    } else {
+      lines.push(<div key="j" style={{ fontWeight: 600 }}>{fmtNumber(c.qty)}j</div>);
+    }
+    if (c.pisoAmount > 0 && (c.qty || c.jornadas)) {
+      lines.push(
+        <div key="piso" style={{ color: "#b45309", fontSize: 9 }}>🪙 {fmtCurrency(c.pisoAmount)}</div>,
+      );
+    }
+    if (c.amount) {
+      lines.push(
+        <div key="amt" style={{ fontSize: 9, color: "#555" }}>{fmtCurrency(c.amount)}</div>,
+      );
+    }
+    return <>{lines}</>;
+  };
+
+  return (
+    <div style={{ marginTop: 20 }}>
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <h3 className="text-sm font-semibold">
+          Resumen por trabajador — <span className="text-[var(--color-muted)]">{displayName}</span>
+        </h3>
+        <div className="flex gap-1">
+          <button
+            onClick={handleCopy}
+            disabled={busy === "copy"}
+            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)] disabled:opacity-60"
+            title="Copiar imagen al portapapeles"
+          >
+            {busy === "copy" ? "..." : "📋"}
+          </button>
+          <button
+            onClick={handleDownload}
+            disabled={busy === "download"}
+            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)] disabled:opacity-60"
+            title="Descargar PNG"
+          >
+            {busy === "download" ? "..." : "📥"}
+          </button>
+          <button
+            onClick={handlePrint}
+            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
+            title="Imprimir"
+          >
+            🖨
+          </button>
+        </div>
+      </div>
+      <div
+        ref={ref}
+        style={{
+          background: "#ffffff",
+          color: "#000",
+          padding: 14,
+          fontFamily: "ui-sans-serif, system-ui, sans-serif",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 14 }}>{titles?.main || "DETALLE DE JORNADA"}</div>
+            {titles?.subtitle && <div style={{ fontSize: 12, color: "#555" }}>{titles.subtitle}</div>}
+          </div>
+          <div style={{ textAlign: "right" }}>
+            <div style={{ fontWeight: 700, fontSize: 13 }}>{displayName}</div>
+            <div style={{ fontSize: 11, color: "#555" }}>
+              {workers.length} trabajador{workers.length === 1 ? "" : "es"} · {dates.length} día{dates.length === 1 ? "" : "s"} · {unit}
+            </div>
+          </div>
+        </div>
+        <table style={{ borderCollapse: "collapse", width: "100%" }}>
+          <thead>
+            <tr style={{ background: "#9dc3e6" }}>
+              <th style={{ ...cellH, position: "sticky", left: 0 }}>Trabajador</th>
+              {dates.map((d) => (
+                <th key={d} style={{ ...cellH, textAlign: "center", minWidth: 70 }}>{dateLabel(d)}</th>
+              ))}
+              <th style={{ ...cellH, textAlign: "right", background: "#7eb0d8" }}>Total {unit}</th>
+              <th style={{ ...cellH, textAlign: "right", background: "#7eb0d8" }}>Total $</th>
+            </tr>
+          </thead>
+          <tbody>
+            {workers.map((w) => (
+              <tr key={w.rut}>
+                <td style={{ ...cell, fontWeight: 600 }}>
+                  <div>{w.name}</div>
+                  <div style={{ fontSize: 9, color: "#777", fontFamily: "ui-monospace, monospace" }}>{w.rut}</div>
+                </td>
+                {dates.map((d) => (
+                  <td key={d} style={{ ...cell, textAlign: "center", fontVariantNumeric: "tabular-nums" }}>
+                    {renderCell(w.byDate.get(d))}
+                  </td>
+                ))}
+                <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
+                  {labor?.type === "tratoHE"
+                    ? `${fmtNumber(w.totals.jornadas)}j${w.totals.overtimeHours > 0 ? ` · ${fmtNumber(w.totals.overtimeHours)} HE` : ""}`
+                    : fmtNumber(w.totals.qty)}
+                </td>
+                <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
+                  {fmtCurrency(w.totals.amount)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+          <tfoot>
+            <tr style={{ background: "#c6efce", fontWeight: 700 }}>
+              <td style={{ ...cell, fontWeight: 700 }}>Total día</td>
+              {dates.map((d) => {
+                const t = dayTotals.get(d);
+                return (
+                  <td key={d} style={{ ...cell, textAlign: "center", fontVariantNumeric: "tabular-nums", fontWeight: 700 }}>
+                    <div>
+                      {labor?.type === "tratoHE"
+                        ? `${fmtNumber(t.jornadas)}j${t.overtimeHours > 0 ? `/${fmtNumber(t.overtimeHours)}h` : ""}`
+                        : fmtNumber(t.qty)}
+                    </div>
+                    <div style={{ fontSize: 9, color: "#333" }}>{fmtCurrency(t.amount)}</div>
+                  </td>
+                );
+              })}
+              <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
+                {labor?.type === "tratoHE"
+                  ? `${fmtNumber(grand.jornadas)}j${grand.overtimeHours > 0 ? ` · ${fmtNumber(grand.overtimeHours)} HE` : ""}`
+                  : fmtNumber(grand.qty)}
+              </td>
+              <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
+                {fmtCurrency(grand.amount + (anyPiso ? 0 : 0))}
+              </td>
+            </tr>
+            {anyPiso && grand.pisoAmount > 0 && (
+              <tr style={{ background: "#fce4d6" }}>
+                <td style={{ ...cell, fontWeight: 700, color: "#b45309" }} colSpan={dates.length + 1}>
+                  🪙 Total pisos
+                </td>
+                <td style={{ ...cell, textAlign: "right", fontWeight: 700, color: "#b45309", fontVariantNumeric: "tabular-nums" }}>—</td>
+                <td style={{ ...cell, textAlign: "right", fontWeight: 700, color: "#b45309", fontVariantNumeric: "tabular-nums" }}>
+                  {fmtCurrency(grand.pisoAmount)}
+                </td>
+              </tr>
+            )}
+          </tfoot>
+        </table>
+      </div>
+    </div>
+  );
+}

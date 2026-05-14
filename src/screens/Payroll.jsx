@@ -22,7 +22,7 @@ import {
 } from "../services/advancesService";
 import { formatRutForDisplay } from "../utils/rutUtils";
 import { bankName, ACCOUNT_TYPES, isCashBank, CASH_BANK_CODE } from "../utils/banks";
-import { getTratoTierTotals, getDayCombos, getDaySingle, getTratoTiers, tratoTypeLabel, cosechaUnit } from "../utils/cosechaCombos";
+import { getTratoTierTotals, getDayCombos, getDaySingle, getTratoTiers, tratoTypeLabel, cosechaUnit, comboLabel, containerLabel } from "../utils/cosechaCombos";
 import { useCatalogs } from "../contexts/CatalogsContext";
 import {
   aggregateWorkerAmounts,
@@ -94,6 +94,10 @@ export default function Payroll() {
   const [payrolls, setPayrolls] = useState([]);
 
   const [selectedCycleIds, setSelectedCycleIds] = useState(loadSelection);
+  // Por cada ciclo seleccionado guardamos qué labores entran a la nómina.
+  // No persistido (a diferencia de selectedCycleIds): la elección es local
+  // a la sesión de generación. Default al chequear un ciclo: todas sus labores.
+  const [selectedLaborsByCycle, setSelectedLaborsByCycle] = useState(() => new Map());
   const [step, setStep] = useState(1); // 1 = pick cycles, 2 = preview
   const [previewItems, setPreviewItems] = useState([]); // [{rut, name, accountNumber, bankCode, accountType, email, amount, include, _missing}]
   // Cached source data from buildPreview, used to assemble the static snapshot
@@ -184,9 +188,31 @@ export default function Payroll() {
   const toggleCycle = (id) => {
     setSelectedCycleIds((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
+      const wasSelected = next.has(id);
+      if (wasSelected) next.delete(id);
       else next.add(id);
       saveSelection(next);
+      return next;
+    });
+    setSelectedLaborsByCycle((prev) => {
+      const next = new Map(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        const cycle = cycles.find((c) => c.id === id);
+        next.set(id, new Set((cycle?.labors || []).map((l) => l.id)));
+      }
+      return next;
+    });
+  };
+
+  const toggleLaborInCycle = (cycleId, laborId) => {
+    setSelectedLaborsByCycle((prev) => {
+      const next = new Map(prev);
+      const set = new Set(next.get(cycleId) || []);
+      if (set.has(laborId)) set.delete(laborId);
+      else set.add(laborId);
+      next.set(cycleId, set);
       return next;
     });
   };
@@ -207,8 +233,10 @@ export default function Payroll() {
       }
 
       // Load workdays for each cycle, excluding ones already tagged in another
-      // payroll and ones belonging to TEMP-* (temporary) workers, which never
+      // payroll y ones belonging to TEMP-* (temporary) workers, which never
       // make it into a payroll until their RUT is assigned in CycleDetail.
+      // También filtramos por la selección de labores por ciclo: workdays de
+      // labores no marcadas quedan disponibles para una próxima nómina.
       const allWorkdays = [];
       const chunkSize = 10;
       for (let i = 0; i < cycleIds.length; i += chunkSize) {
@@ -217,6 +245,8 @@ export default function Payroll() {
         for (const wd of wds) {
           if (wd.payrollId) continue;
           if (String(wd.workerRut || "").startsWith("TEMP-")) continue;
+          const allowedLabors = selectedLaborsByCycle.get(wd.cycleId);
+          if (allowedLabors && !allowedLabors.has(wd.laborId)) continue;
           allWorkdays.push(wd);
         }
       }
@@ -407,6 +437,7 @@ export default function Payroll() {
 
       const cleanItems = items.map((p) => ({
         rut: p.rut,
+        paymentRut: p.paymentRut || p.rut,
         name: p.name,
         accountNumber: p.accountNumber,
         bankCode: p.bankCode,
@@ -539,7 +570,14 @@ export default function Payroll() {
       await tagWorkdaysWithPayroll(allWorkdayIds, created.id);
       await applyAdvancesToPayroll(allApplications, created.id);
 
-      const cyclesForExport = cycleDetails.map((c) => ({ id: c.id, label: c.label }));
+      const cyclesForExport = cycleDetails.map((c) => ({
+        id: c.id,
+        label: c.label,
+        faenaId: c.faenaId,
+        faenaName: c.faenaName,
+        subfaenaId: c.subfaenaId,
+        subfaenaName: c.subfaenaName,
+      }));
       await downloadBchileXlsx(cleanItems, payrollName || payrollSuggestedName(), cyclesForExport);
 
       // Reset
@@ -594,6 +632,10 @@ export default function Payroll() {
     const cyclesForExport = (p.cycleDetails || []).map((c) => ({
       id: c.id,
       label: overrides[c.id] || c.label,
+      faenaId: c.faenaId,
+      faenaName: c.faenaName,
+      subfaenaId: c.subfaenaId,
+      subfaenaName: c.subfaenaName,
     }));
     if (cyclesForExport.length === 0 && p.cycleIds) {
       for (const id of p.cycleIds) cyclesForExport.push({ id, label: overrides[id] || id });
@@ -665,6 +707,8 @@ export default function Payroll() {
             groups={activeByFaena}
             selected={selectedCycleIds}
             toggle={toggleCycle}
+            selectedLaborsByCycle={selectedLaborsByCycle}
+            toggleLaborInCycle={toggleLaborInCycle}
             subfaenaName={subfaenaName}
             cycleStats={cycleStats}
             onNext={buildPreview}
@@ -731,7 +775,7 @@ export default function Payroll() {
   );
 }
 
-function CycleSelector({ groups, selected, toggle, subfaenaName, cycleStats, onNext, busy }) {
+function CycleSelector({ groups, selected, toggle, selectedLaborsByCycle, toggleLaborInCycle, subfaenaName, cycleStats, onNext, busy }) {
   if (groups.length === 0) {
     return (
       <div className="flex flex-1 items-center justify-center rounded-lg border border-dashed border-[var(--color-border)] text-[var(--color-muted)]">
@@ -753,33 +797,63 @@ function CycleSelector({ groups, selected, toggle, subfaenaName, cycleStats, onN
                 const isSelected = selected.has(c.id);
                 const stat = cycleStats?.[c.id] || { unpaid: 0, paid: 0, total: 0 };
                 const noUnpaid = stat.unpaid <= 0;
+                const labors = c.labors || [];
+                const selectedLabors = selectedLaborsByCycle?.get(c.id) || new Set();
+                const allLaborsOn = labors.length > 0 && labors.every((l) => selectedLabors.has(l.id));
+                const noneOn = isSelected && labors.length > 0 && selectedLabors.size === 0;
                 return (
-                  <label
-                    key={c.id}
-                    className={`flex cursor-pointer items-center gap-3 px-4 py-2 hover:bg-[var(--color-accent-soft)] ${
-                      noUnpaid ? "opacity-60" : ""
-                    }`}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={isSelected}
-                      onChange={() => toggle(c.id)}
-                      disabled={noUnpaid && !isSelected}
-                      className="h-4 w-4"
-                    />
-                    <div className="flex-1 text-sm">
-                      <div className="font-medium">{c.label || c.id}</div>
-                      {sub && <div className="text-xs text-[var(--color-muted)]">{sub}</div>}
-                    </div>
-                    <div className="text-right text-xs">
-                      <div className={noUnpaid ? "text-[var(--color-muted)]" : "font-semibold text-[var(--color-accent)]"}>
-                        Pendiente: {fmtCurrency(stat.unpaid)}
+                  <div key={c.id} className={noUnpaid ? "opacity-60" : ""}>
+                    <label className="flex cursor-pointer items-center gap-3 px-4 py-2 hover:bg-[var(--color-accent-soft)]">
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={() => toggle(c.id)}
+                        disabled={noUnpaid && !isSelected}
+                        className="h-4 w-4"
+                      />
+                      <div className="flex-1 text-sm">
+                        <div className="font-medium">{c.label || c.id}</div>
+                        {sub && <div className="text-xs text-[var(--color-muted)]">{sub}</div>}
+                        {isSelected && labors.length > 0 && !allLaborsOn && (
+                          <div className="text-xs text-amber-700 dark:text-amber-400">
+                            {noneOn
+                              ? "⚠ Sin labores seleccionadas — no entra al preview"
+                              : `Pagar ${selectedLabors.size} de ${labors.length} labores`}
+                          </div>
+                        )}
                       </div>
-                      {stat.paid > 0 && (
-                        <div className="text-[var(--color-muted)]">Pagado: {fmtCurrency(stat.paid)}</div>
-                      )}
-                    </div>
-                  </label>
+                      <div className="text-right text-xs">
+                        <div className={noUnpaid ? "text-[var(--color-muted)]" : "font-semibold text-[var(--color-accent)]"}>
+                          Pendiente: {fmtCurrency(stat.unpaid)}
+                        </div>
+                        {stat.paid > 0 && (
+                          <div className="text-[var(--color-muted)]">Pagado: {fmtCurrency(stat.paid)}</div>
+                        )}
+                      </div>
+                    </label>
+                    {isSelected && labors.length > 1 && (
+                      <div className="flex flex-wrap gap-1.5 border-t border-[var(--color-border)] bg-[var(--color-surface-2)]/40 px-4 py-2">
+                        {labors.map((l) => {
+                          const on = selectedLabors.has(l.id);
+                          return (
+                            <button
+                              type="button"
+                              key={l.id}
+                              onClick={() => toggleLaborInCycle(c.id, l.id)}
+                              className={`rounded-full border px-2 py-0.5 text-[11px] transition-opacity ${
+                                on
+                                  ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+                                  : "border-dashed border-[var(--color-border)] bg-transparent text-[var(--color-muted)] opacity-60"
+                              }`}
+                              title={on ? "Excluir esta labor de la nómina" : "Incluir esta labor"}
+                            >
+                              {on ? "✓" : "○"} {l.name}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
                 );
               })}
             </div>
@@ -1479,7 +1553,7 @@ function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedow
 // Build a "grid snapshot" for a group of workers in a cycle: one labor table
 // per labor that had production, with rows = workers and columns = days.
 // Each cell content depends on labor type — mirrors the CycleDetail grid.
-function buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut) {
+function buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut, catalogs = {}) {
   const rutSet = new Set(groupRuts);
   const wdsCycle = workdays.filter((w) => w.cycleId === cycle.id && rutSet.has(w.workerRut));
   if (wdsCycle.length === 0) return [];
@@ -1530,7 +1604,9 @@ function buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut) {
       if (labor.type === "cosecha") {
         const x = Number(wd.qualityX) || 0;
         const y = Number(wd.containerY) || 0;
-        const ck = `Q${x}/E${y}`;
+        // Clave estructural por combo (calidad_envase). El label visible se
+        // computa al render con `comboLabel(catalogs, x, y)`.
+        const ck = `${x}_${y}`;
         const kg = Number(wd.qty) || 0;
         const amt = Number(wd.amount) || 0;
         c.kilos += kg;
@@ -1646,7 +1722,7 @@ function buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut) {
 
     const priceByDate = {};
     for (const d of sortedDates) {
-      priceByDate[d] = formatLaborDayPrice(labor, d, dayPrices);
+      priceByDate[d] = formatLaborDayPrice(labor, d, dayPrices, catalogs);
     }
 
     out.push({
@@ -1678,7 +1754,10 @@ function fmtMoneyShort(v) {
 
 // Pull the unit price(s) configured for a labor on a given date.
 // Returns a short string suitable for rendering under the day header.
-function formatLaborDayPrice(labor, date, dayPrices) {
+// Las unidades vienen del catálogo: para cosecha usamos el nombre del envase
+// (saco, caja, kilo); para trato el nombre del tratoType (poda, desmalezado).
+// `tratoHE` no muestra precio sugerido (el monto del día lo define la planilla).
+function formatLaborDayPrice(labor, date, dayPrices, catalogs = {}) {
   if (!labor) return "";
   if (labor.type === "cosecha") {
     const combos = getDayCombos(dayPrices, labor.id, date, "unit");
@@ -1686,20 +1765,28 @@ function formatLaborDayPrice(labor, date, dayPrices) {
     if (combos.length === 1) {
       const c = combos[0];
       if (!c.price) return "";
-      return c.mode === "flat" ? `${fmtMoneyShort(c.price)}/día` : `${fmtMoneyShort(c.price)}/kg`;
+      if (c.mode === "flat") return `${fmtMoneyShort(c.price)}/día`;
+      const unit = containerLabel(catalogs, c.y).toLowerCase();
+      return `${fmtMoneyShort(c.price)}/${unit}`;
     }
     return combos
       .filter((c) => c.price)
-      .map((c) => `Q${c.x}/E${c.y}: ${fmtMoneyShort(c.price)}${c.mode === "flat" ? "/día" : "/kg"}`)
+      .map((c) => {
+        const lbl = comboLabel(catalogs, c.x, c.y);
+        if (c.mode === "flat") return `${lbl}: ${fmtMoneyShort(c.price)}/día`;
+        return `${lbl}: ${fmtMoneyShort(c.price)}`;
+      })
       .join(" · ");
   }
   if (labor.type === "trato") {
     const tiers = getTratoTiers(dayPrices, labor.id, date, "unit");
     const used = tiers.filter((t) => t.price);
     if (!used.length) return "";
+    const tratoUnit = tratoTypeLabel(catalogs, labor.tratoType ?? 0).toLowerCase();
     if (used.length === 1) {
       const t = used[0];
-      return `${fmtMoneyShort(t.price)}${t.mode === "flat" ? "/día" : "/jorn."}`;
+      if (t.mode === "flat") return `${fmtMoneyShort(t.price)}/día`;
+      return `${fmtMoneyShort(t.price)}/${tratoUnit}`;
     }
     return used.map((t) => `T${t.index + 1}: ${fmtMoneyShort(t.price)}`).join(" · ");
   }
@@ -1709,12 +1796,7 @@ function formatLaborDayPrice(labor, date, dayPrices) {
     if (!price) return "";
     return fmtMoneyShort(price) + "/día";
   }
-  if (labor.type === "tratoHE") {
-    const cfg = getDaySingle(dayPrices, labor.id, date, "normal");
-    const price = Number(cfg?.price) || Number(labor.baseDayDefault) || 0;
-    if (!price) return "";
-    return `Base sug. ${fmtMoneyShort(price)}`;
-  }
+  // tratoHE: no precio sugerido — el monto lo define la planilla del día.
   return "";
 }
 
@@ -1726,7 +1808,7 @@ function fmtDateShort(dateStr) {
   return `${String(d.getDate()).padStart(2, "0")}-${m}`;
 }
 
-function renderProductionCell(cell, laborType, tratoLabel, kilosUnit) {
+function renderProductionCell(cell, laborType, tratoLabel, kilosUnit, catalogs = {}) {
   if (!cell) return "";
   const fmtMoney = (v) => "$" + (Number(v) || 0).toLocaleString("es-CL");
   const num = (v) => (Number(v) || 0).toLocaleString("es-CL", { maximumFractionDigits: 2 });
@@ -1739,8 +1821,13 @@ function renderProductionCell(cell, laborType, tratoLabel, kilosUnit) {
       .filter(([, b]) => b.kilos || b.amount)
       .sort(([, a], [, b]) => a.x - b.x || a.y - b.y);
     if (combos.length > 1) {
+      // Cada combo se muestra con su label del catálogo (ej. "Premium / Saco")
+      // en vez del antiguo "Q1/E2".
       const lines = combos
-        .map(([ck, b]) => `<div class="muted prod-breakdown">${ck}: ${num(b.kilos)} ${unit}</div>`)
+        .map(([, b]) => {
+          const lbl = comboLabel(catalogs, b.x, b.y);
+          return `<div class="muted prod-breakdown">${lbl}: ${num(b.kilos)}</div>`;
+        })
         .join("");
       return `${lines}<div>${num(cell.kilos)} ${unit}</div>${pisoTag}<div class="muted">${fmtMoney(cell.amount)}</div>`;
     }
@@ -1776,7 +1863,7 @@ function renderProductionCell(cell, laborType, tratoLabel, kilosUnit) {
 
 // Like renderProductionCell, but for total rows/cells: keeps kg/jornadas
 // counts visible alongside the $ instead of letting them collapse into one number.
-function renderProductionTotal(totals, laborType, tratoLabel, kilosUnit) {
+function renderProductionTotal(totals, laborType, tratoLabel, kilosUnit, catalogs = {}) {
   if (!totals) return "";
   const fmtMoney = (v) => "$" + (Number(v) || 0).toLocaleString("es-CL");
   const num = (v) => (Number(v) || 0).toLocaleString("es-CL", { maximumFractionDigits: 2 });
@@ -1792,7 +1879,10 @@ function renderProductionTotal(totals, laborType, tratoLabel, kilosUnit) {
       .filter(([, b]) => b.kilos || b.amount)
       .sort(([, a], [, b]) => a.x - b.x || a.y - b.y);
     const breakdown = combos.length > 1
-      ? combos.map(([ck, b]) => `<div class="muted prod-breakdown">${ck}: ${num(b.kilos)} ${unit}</div>`).join("")
+      ? combos.map(([, b]) => {
+          const lbl = comboLabel(catalogs, b.x, b.y);
+          return `<div class="muted prod-breakdown">${lbl}: ${num(b.kilos)}</div>`;
+        }).join("")
       : "";
     const kHtml = kilos ? `<div>${num(kilos)} ${unit}</div>` : "";
     return `${breakdown}${kHtml}${pisoTag}<div><b>${fmtMoney(amount)}</b></div>`;
@@ -1837,6 +1927,7 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
   const mode = options.mode || "cash"; // "cash" | "detail"
   const isDetail = mode === "detail";
   const summaries = options.summaries || [];
+  const subfaenaSummary = options.subfaenaSummary || null;
   const overviewTitle = isDetail ? "Detalle de pago" : "Comprobante de pago en efectivo";
   const docTitle = isDetail ? `${payroll.name} — Detalle pago` : `${payroll.name} — Efectivo`;
   const cycleLabel = (cycleId) => titleOverrides[cycleId] || cyclesById[cycleId]?.label || cycleDetails.find((c) => c.id === cycleId)?.label || cycleId;
@@ -1965,7 +2056,7 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
                 .map((row) => {
                   const dayCells = ls.dates
                     .map(
-                      (d) => `<td class="prod-cell">${renderProductionCell(row.cells[d], ls.laborType, tratoLabel, kilosUnit)}</td>`,
+                      (d) => `<td class="prod-cell">${renderProductionCell(row.cells[d], ls.laborType, tratoLabel, kilosUnit, catalogs)}</td>`,
                     )
                     .join("");
                   const rowTotalAgg = {
@@ -1978,12 +2069,12 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
                     <tr>
                       <td class="prod-name">${row.name || row.rut}</td>
                       ${dayCells}
-                      <td class="prod-total">${renderProductionTotal(rowTotalAgg, ls.laborType, tratoLabel, kilosUnit)}</td>
+                      <td class="prod-total">${renderProductionTotal(rowTotalAgg, ls.laborType, tratoLabel, kilosUnit, catalogs)}</td>
                     </tr>`;
                 })
                 .join("");
               const dayTotals = ls.dates
-                .map((d) => `<td class="prod-total">${renderProductionTotal(ls.dayTotals[d], ls.laborType, tratoLabel, kilosUnit)}</td>`)
+                .map((d) => `<td class="prod-total">${renderProductionTotal(ls.dayTotals[d], ls.laborType, tratoLabel, kilosUnit, catalogs)}</td>`)
                 .join("");
               const grandTotalAgg = {
                 amount: ls.grandAmount,
@@ -2009,7 +2100,7 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
                       <tr style="background:${leaderFill}">
                         <td class="prod-name"><b>Total día</b></td>
                         ${dayTotals}
-                        <td class="prod-total">${renderProductionTotal(grandTotalAgg, ls.laborType, tratoLabel, kilosUnit)}</td>
+                        <td class="prod-total">${renderProductionTotal(grandTotalAgg, ls.laborType, tratoLabel, kilosUnit, catalogs)}</td>
                       </tr>
                     </tfoot>
                   </table>
@@ -2063,7 +2154,7 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
       <header>
         <div class="hd">
           <div>
-            <h1>${overviewTitle}${copyLabel ? `<span class="copy-tag">${copyLabel}</span>` : ""}</h1>
+            <h1 class="group-h1">${overviewTitle} <span class="group-leader-name">— ${g.leader}</span>${copyLabel ? `<span class="copy-tag">${copyLabel}</span>` : ""}</h1>
             <div class="sub">${payroll.name} · ${cyclesLine}</div>
           </div>
           <div class="meta">
@@ -2116,8 +2207,8 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
         ? `<section class="receipt detail-page">
             <div class="hd">
               <div>
-                <h1>Detalle de producción del grupo</h1>
-                <div class="sub">${payroll.name} · Líder: ${g.leader}</div>
+                <h1 class="group-h1">Detalle de producción <span class="group-leader-name">— ${g.leader}</span></h1>
+                <div class="sub">${payroll.name}</div>
               </div>
               <div class="meta"><div><b>Fecha:</b> ${today}</div></div>
             </div>
@@ -2128,6 +2219,56 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
     })
     .join("");
 
+  // Resumen ejecutivo por subfaena (primera hoja del detalle imprimible).
+  // Filas: subfaena (faena se imprime sólo en la 1ra fila del bloque), cols:
+  // Con cuenta RUT vs Efectivo + TOTAL. Se rinde solo en mode "detail".
+  const subfaenaSummaryHtml = (isDetail && subfaenaSummary && subfaenaSummary.rows.length > 0)
+    ? (() => {
+        let prevFaena = null;
+        const rowsHtml = subfaenaSummary.rows.map((r) => {
+          const showFaena = r.faenaName !== prevFaena;
+          prevFaena = r.faenaName;
+          return `
+            <tr>
+              <td>${showFaena ? r.faenaName : ""}</td>
+              <td>${r.subfaenaName}</td>
+              <td style="text-align:right">${fmt(r.bank)}</td>
+              <td style="text-align:right">${fmt(r.cash)}</td>
+              <td style="text-align:right"><b>${fmt(r.total)}</b></td>
+            </tr>`;
+        }).join("");
+        return `<section class="receipt summary-page">
+          <div class="hd">
+            <div>
+              <h1>Resumen por subfaena</h1>
+              <div class="sub">${payroll.name} · ${cyclesLine}</div>
+            </div>
+            <div class="meta"><div><b>Fecha:</b> ${today}</div></div>
+          </div>
+          <table class="subfaena-summary">
+            <thead>
+              <tr>
+                <th>Faena</th>
+                <th>Subfaena</th>
+                <th style="text-align:right">Con cuenta RUT</th>
+                <th style="text-align:right">Efectivo</th>
+                <th style="text-align:right">TOTAL</th>
+              </tr>
+            </thead>
+            <tbody>${rowsHtml}</tbody>
+            <tfoot>
+              <tr class="summary-total">
+                <td colspan="2"><b>TOTAL</b></td>
+                <td style="text-align:right"><b>${fmt(subfaenaSummary.totals.bank)}</b></td>
+                <td style="text-align:right"><b>${fmt(subfaenaSummary.totals.cash)}</b></td>
+                <td style="text-align:right"><b>${fmt(subfaenaSummary.totals.total)}</b></td>
+              </tr>
+            </tfoot>
+          </table>
+        </section>`;
+      })()
+    : "";
+
   const summariesHtml = (isDetail && summaries.length > 0)
     ? `<section class="receipt summary-page">
         <div class="hd">
@@ -2137,23 +2278,39 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
           </div>
           <div class="meta"><div><b>Fecha:</b> ${today}</div></div>
         </div>
-        ${summaries.map((s) => `
+        ${summaries.map((s) => {
+          const rowsHtml = s.rows.map((r) => {
+            const faenas = (r.byFaena && r.byFaena.length > 0)
+              ? r.byFaena
+              : [{ faenaName: "—", total: r.total }];
+            return faenas.map((f, i) => `
+              <tr>
+                <td>${i === 0 ? `<b>${r.leader}</b>` : ""}</td>
+                <td>${f.faenaName}</td>
+                <td style="text-align:right">${fmt(f.total)}</td>
+              </tr>`).join("");
+          }).join("");
+          return `
           <div class="summary-block">
             <h3>${s.title}</h3>
-            <table class="summary">
-              <tbody>
-                ${s.rows.map((r) => `
-                  <tr>
-                    <td>${r.leader}</td>
-                    <td style="text-align:right">${fmt(r.total)}</td>
-                  </tr>`).join("")}
+            <table class="group-summary">
+              <thead>
+                <tr>
+                  <th>Líder</th>
+                  <th>Faena</th>
+                  <th style="text-align:right">TOTAL</th>
+                </tr>
+              </thead>
+              <tbody>${rowsHtml}</tbody>
+              <tfoot>
                 <tr class="summary-total">
-                  <td><b>Total</b></td>
+                  <td colspan="2"><b>Total ${s.title}</b></td>
                   <td style="text-align:right"><b>${fmt(s.total)}</b></td>
                 </tr>
-              </tbody>
+              </tfoot>
             </table>
-          </div>`).join("")}
+          </div>`;
+        }).join("")}
       </section>`
     : "";
 
@@ -2194,15 +2351,21 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
   .summary-block h3 { font-size: 13px; margin: 0 0 6px; padding: 4px 8px; background: #F2F2F2; border: 1px solid #999; }
   table.summary { width: 60%; min-width: 320px; }
   table.summary .summary-total td { background: #FFE699; }
+  table.group-summary { width: 100%; margin-top: 8px; }
+  table.group-summary .summary-total td { background: #FFE699; }
+  h1.group-h1 { font-size: 22px; }
+  h1.group-h1 .group-leader-name { color: #555; font-weight: 600; }
+  table.subfaena-summary { width: 100%; margin-top: 8px; }
+  table.subfaena-summary .summary-total td { background: #FFE699; }
   table.prod .prod-total { text-align: right; min-width: 70px; }
   @media print { @page { margin: 14mm landscape; } .receipt { padding: 0; } }
 </style>
-</head><body>${summariesHtml}${groupsHtml}
+</head><body>${subfaenaSummaryHtml}${summariesHtml}${groupsHtml}
 <script>window.onload = () => { window.focus(); window.print(); };</script>
 </body></html>`;
 }
 
-async function printPaymentDetails(payroll, allGroups, titleOverrides = {}, summaries = [], catalogs = {}) {
+async function printPaymentDetails(payroll, allGroups, titleOverrides = {}, summaries = [], catalogs = {}, subfaenaSummary = null) {
   if (allGroups.length === 0) return;
   const cycleIds = payroll.cycleIds || (payroll.cycleDetails || []).map((c) => c.id);
   const cycles = await Promise.all(cycleIds.map((id) => cyclesService.getById(id)));
@@ -2227,7 +2390,7 @@ async function printPaymentDetails(payroll, allGroups, titleOverrides = {}, summ
     for (const cid of cycleIds) {
       const cycle = cyclesById[cid];
       if (!cycle) continue;
-      byCycle[cid] = buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut);
+      byCycle[cid] = buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut, catalogs);
     }
     workdaysByGroup[g.leader] = byCycle;
   }
@@ -2239,6 +2402,7 @@ async function printPaymentDetails(payroll, allGroups, titleOverrides = {}, summ
     catalogs,
     mode: "detail",
     summaries,
+    subfaenaSummary,
   });
   const w = window.open("", "_blank", "width=900,height=700");
   if (!w) {
@@ -2279,7 +2443,7 @@ async function printCashReceipts(payroll, cashGroups, titleOverrides = {}, catal
     for (const cid of cycleIds) {
       const cycle = cyclesById[cid];
       if (!cycle) continue;
-      byCycle[cid] = buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut);
+      byCycle[cid] = buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut, catalogs);
     }
     workdaysByGroup[g.leader] = byCycle;
   }
@@ -2314,28 +2478,90 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
     const CRUT_LEADERS = new Set(["CHILENOS", "EXTRANJEROSCONCUENTARUT"]);
     const compact = (s) => normalizeLeader(s).replace(/\s+/g, "");
     const inCrut = (g) => CRUT_LEADERS.has(compact(g.leader));
-    const crut = allGroups.filter(inCrut);
-    const others = allGroups.filter((g) => !inCrut(g));
+
+    // Map cycleId → faenaName (fallback al label del ciclo para nóminas
+    // viejas que no traen info de faena).
+    const faenaByCycle = new Map();
+    for (const cd of payroll.cycleDetails || []) {
+      faenaByCycle.set(cd.id, cd.faenaName || cd.label || "—");
+    }
+    const groupWithFaenas = (g) => {
+      const byFaena = new Map();
+      for (const it of g.items) {
+        for (const [cid, amt] of Object.entries(it.byCycle || {})) {
+          const fName = faenaByCycle.get(cid) || "—";
+          byFaena.set(fName, (byFaena.get(fName) || 0) + (Number(amt) || 0));
+        }
+      }
+      const byFaenaList = [...byFaena.entries()]
+        .map(([faenaName, total]) => ({ faenaName, total }))
+        .filter((f) => f.total > 0)
+        .sort((a, b) => a.faenaName.localeCompare(b.faenaName, "es"));
+      return { leader: g.leader, total: g.total, byFaena: byFaenaList };
+    };
+
+    const crut = allGroups.filter(inCrut).map(groupWithFaenas);
+    const others = allGroups.filter((g) => !inCrut(g)).map(groupWithFaenas);
     const sumOf = (arr) => arr.reduce((s, g) => s + (Number(g.total) || 0), 0);
     const out = [];
     if (crut.length) {
-      out.push({
-        title: "Con cuenta RUT",
-        rows: crut.map((g) => ({ leader: g.leader, total: g.total })),
-        total: sumOf(crut),
-      });
+      out.push({ title: "Con cuenta RUT", rows: crut, total: sumOf(crut) });
     }
     if (others.length) {
-      out.push({
-        title: "Otros grupos",
-        rows: others.map((g) => ({ leader: g.leader, total: g.total })),
-        total: sumOf(others),
-      });
+      out.push({ title: "Otros grupos", rows: others, total: sumOf(others) });
     }
     return out;
   })();
 
   const cycleDetails = payroll.cycleDetails || [];
+
+  // Resumen ejecutivo por subfaena (primera hoja del "Detalle de pago"
+  // imprimible). Filas: subfaenas con monto > 0, ordenadas por faena y
+  // subfaena. Columnas: "Con cuenta RUT" (todas las transferencias) vs
+  // "Efectivo". Si la nómina vieja no trae info de subfaena, los rows
+  // muestran "—" / label del ciclo y de todos modos se rinden.
+  const subfaenaSummary = (() => {
+    const bySubfaena = new Map();
+    for (const cd of cycleDetails) {
+      const sId = cd.subfaenaId || `__${cd.id}__`;
+      if (!bySubfaena.has(sId)) {
+        bySubfaena.set(sId, {
+          subfaenaName: cd.subfaenaName || cd.label || "—",
+          faenaName: cd.faenaName || "—",
+          cycleIds: new Set(),
+        });
+      }
+      bySubfaena.get(sId).cycleIds.add(cd.id);
+    }
+    const sumForCycles = (arr, cycleIds) =>
+      arr.reduce((s, it) => {
+        let row = 0;
+        for (const cid of cycleIds) row += Number(it.byCycle?.[cid]) || 0;
+        return s + row;
+      }, 0);
+    const rows = [...bySubfaena.values()]
+      .map((r) => ({
+        ...r,
+        bank: sumForCycles(bank, r.cycleIds),
+        cash: sumForCycles(cash, r.cycleIds),
+      }))
+      .filter((r) => r.bank + r.cash > 0)
+      .map((r) => ({ ...r, total: r.bank + r.cash }))
+      .sort((a, b) => {
+        const fa = a.faenaName.localeCompare(b.faenaName, "es");
+        if (fa !== 0) return fa;
+        return a.subfaenaName.localeCompare(b.subfaenaName, "es");
+      });
+    const totals = rows.reduce(
+      (acc, r) => ({
+        bank: acc.bank + r.bank,
+        cash: acc.cash + r.cash,
+        total: acc.total + r.total,
+      }),
+      { bank: 0, cash: 0, total: 0 },
+    );
+    return { rows, totals };
+  })();
 
   // Aggregate breakdowns for the summary header.
   const bankTotal = bank.reduce((s, x) => s + (Number(x.amount) || 0), 0);
@@ -2406,7 +2632,7 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
   const handlePrintDetail = async () => {
     setPrintingDetail(true);
     try {
-      await printPaymentDetails(payroll, allGroups, cycleTitleOverrides, detailSummaries, catalogs);
+      await printPaymentDetails(payroll, allGroups, cycleTitleOverrides, detailSummaries, catalogs, subfaenaSummary);
     } finally {
       setPrintingDetail(false);
     }

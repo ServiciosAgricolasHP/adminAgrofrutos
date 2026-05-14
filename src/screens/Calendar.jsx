@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { collection, query, where, getDocs } from "firebase/firestore";
 import { db } from "../firebase";
-import { faenasService, subfaenasService, cyclesService } from "../services";
+import { faenasService, subfaenasService, cyclesService, workersService } from "../services";
 import { tripsService } from "../services/transportsService";
 import { useCarriers } from "../contexts/CarriersContext";
 import { useCatalogs } from "../contexts/CatalogsContext";
-import { tratoTypeLabel, cosechaUnit } from "../utils/cosechaCombos";
+import { tratoTypeLabel, cosechaUnit, qualityLabel, containerLabel } from "../utils/cosechaCombos";
 import { useIsMobile } from "../hooks/useIsMobile";
 
 // ============================================================================
@@ -186,6 +186,10 @@ export default function Calendar() {
   const [cycles, setCycles] = useState([]);
   const [faenas, setFaenas] = useState([]);
   const [subfaenas, setSubfaenas] = useState([]);
+  // Lista completa de trabajadores — necesaria para mostrar nombres en el
+  // drawer del día. Compartido con el módulo Workers via cache 24h en
+  // localStorage; primera carga ~500-2000 reads, después gratis.
+  const [workers, setWorkers] = useState([]);
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -234,15 +238,22 @@ export default function Calendar() {
     let cancelled = false;
     (async () => {
       try {
-        const [c, f, s] = await Promise.all([
+        const [c, f, s, w] = await Promise.all([
           cyclesService.list({ cache: true, ttl: 5 * 60 * 1000 }),
           faenasService.list({ cache: true, persist: true, ttl: 10 * 60 * 1000 }),
           subfaenasService.list({ cache: true, persist: true, ttl: 10 * 60 * 1000 }),
+          workersService.list({
+            order: ["name", "asc"],
+            cache: true,
+            persist: true,
+            ttl: 24 * 60 * 60 * 1000,
+          }),
         ]);
         if (cancelled) return;
         setCycles(c);
         setFaenas(f);
         setSubfaenas(s);
+        setWorkers(w);
       } catch (err) {
         if (!cancelled) setError(err.message || String(err));
       }
@@ -311,6 +322,12 @@ export default function Calendar() {
     for (const c of carriers) m.set(c.id, c);
     return m;
   }, [carriers]);
+
+  const workerById = useMemo(() => {
+    const m = new Map();
+    for (const w of workers) m.set(w.id, w);
+    return m;
+  }, [workers]);
 
   // Para cada día, qué subfaenas trabajaron y con cuánta actividad.
   // Forma: { [date]: { [subfaenaId]: { workerCount, kilos, jornadas, amount, name, faenaName } } }
@@ -489,6 +506,7 @@ export default function Calendar() {
           subfaenaById={subfaenaById}
           faenaById={faenaById}
           carrierById={carrierById}
+          workerById={workerById}
           catalogs={catalogs}
           onClose={() => {
             // Si veníamos del modal de expansión del día (click en zona
@@ -691,7 +709,17 @@ function Legend({ dayIndex, excludedSubfaenas, onToggle, onIsolate, onClear }) {
 // Day detail drawer
 // ============================================================================
 
-function DayDetailDrawer({ date, subfaenaId, workdays, trips, cycleById, subfaenaById, faenaById, carrierById, catalogs, onClose }) {
+function DayDetailDrawer({ date, subfaenaId, workdays, trips, cycleById, subfaenaById, faenaById, carrierById, workerById, catalogs, onClose }) {
+  // Set de labors expandidas para mostrar el desglose por trabajador +
+  // distribución por calidad. Cerrado por default para mantener compacto.
+  const [expandedLabors, setExpandedLabors] = useState(() => new Set());
+  const toggleLabor = (key) =>
+    setExpandedLabors((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
   // Si subfaenaId está set, filtramos workdays/trips a esa subfaena. Caemos
   // por cycle.subfaenaId para workdays; trips heredan via cycle.
   const filteredWorkdays = useMemo(() => {
@@ -776,7 +804,11 @@ function DayDetailDrawer({ date, subfaenaId, workdays, trips, cycleById, subfaen
 
   // Por labor: agrupa workdays por (cycleId, laborId). Mostramos solo las
   // métricas que aplican al tipo de labor (no inventamos kilos en supervisión
-  // ni jornadas en cosecha).
+  // ni jornadas en cosecha). Además guarda dos breakdowns para expandir en
+  // el drawer:
+  //   - `workersMap`: per-trabajador con su producción (kilos / tratoQty /
+  //     jornadas / monto / piso). Se convierte a array `workersBreakdown`.
+  //   - `qualityMap`: para cosecha, totales por combo (calidadX/envaseY).
   const byLabor = useMemo(() => {
     const map = new Map();
     for (const wd of filteredWorkdays) {
@@ -801,40 +833,87 @@ function DayDetailDrawer({ date, subfaenaId, workdays, trips, cycleById, subfaen
           jornadas: 0,
           overtimeHours: 0,
           amount: 0,
+          workersMap: new Map(),
+          qualityMap: new Map(),
         });
       }
       const e = map.get(key);
       e.workers.add(wd.workerRut);
       e.amount += Number(wd.amount) || 0;
+
+      // Inicializar entrada de trabajador en el breakdown.
+      if (!e.workersMap.has(wd.workerRut)) {
+        e.workersMap.set(wd.workerRut, {
+          rut: wd.workerRut,
+          kilos: 0,
+          tratoQty: 0,
+          jornadas: 0,
+          overtimeHours: 0,
+          amount: 0,
+          pisoAmount: 0,
+        });
+      }
+      const wEntry = e.workersMap.get(wd.workerRut);
+      const wdAmount = Number(wd.amount) || 0;
+      wEntry.amount += wdAmount;
+
       if (wd.pisoOnly) {
-        e.pisoAmount = (e.pisoAmount || 0) + (Number(wd.amount) || 0);
+        e.pisoAmount = (e.pisoAmount || 0) + wdAmount;
         e.pisoCount = (e.pisoCount || 0) + 1;
+        wEntry.pisoAmount += wdAmount;
         continue;
       }
       const t = e.laborType;
       if (t === "cosecha") {
-        e.kilos += Number(wd.qty) || 0;
-        e.containers.add(Number(wd.containerY) || 0);
+        const kg = Number(wd.qty) || 0;
+        const qx = Number(wd.qualityX) || 0;
+        const cy = Number(wd.containerY) || 0;
+        e.kilos += kg;
+        e.containers.add(cy);
+        wEntry.kilos += kg;
+        // Distribución por (calidad, envase): kilos + monto.
+        const qk = `${qx}_${cy}`;
+        if (!e.qualityMap.has(qk)) {
+          e.qualityMap.set(qk, { qx, cy, kilos: 0, amount: 0 });
+        }
+        const q = e.qualityMap.get(qk);
+        q.kilos += kg;
+        q.amount += wdAmount;
       } else if (t === "trato") {
         // qty puede venir directo o sumar todos los tiers
+        let q = 0;
         if (wd.tiers && typeof wd.tiers === "object") {
-          for (const tier of Object.values(wd.tiers)) {
-            e.tratoQty += Number(tier?.qty) || 0;
-          }
+          for (const tier of Object.values(wd.tiers)) q += Number(tier?.qty) || 0;
         } else {
-          e.tratoQty += Number(wd.qty) || 0;
+          q = Number(wd.qty) || 0;
         }
+        e.tratoQty += q;
+        wEntry.tratoQty += q;
       } else if (t === "tratoHE") {
-        e.jornadas += Number(wd.qty) || 0;
-        e.overtimeHours += Number(wd.overtimeHours) || 0;
+        const j = Number(wd.qty) || 0;
+        const oh = Number(wd.overtimeHours) || 0;
+        e.jornadas += j;
+        e.overtimeHours += oh;
+        wEntry.jornadas += j;
+        wEntry.overtimeHours += oh;
       } else {
         e.jornadas += 1;
+        wEntry.jornadas += 1;
       }
     }
     return [...map.values()]
-      .map((e) => ({ ...e, workerCount: e.workers.size }))
+      .map((e) => {
+        const workersBreakdown = [...e.workersMap.values()]
+          .map((w) => ({ ...w, name: workerById?.get?.(w.rut)?.name || w.rut }))
+          .sort((a, b) => b.amount - a.amount);
+        const qualityDist = [...e.qualityMap.values()].sort(
+          (a, b) => b.kilos - a.kilos || b.amount - a.amount,
+        );
+        const { workersMap: _wm, qualityMap: _qm, ...rest } = e;
+        return { ...rest, workerCount: e.workers.size, workersBreakdown, qualityDist };
+      })
       .sort((a, b) => b.amount - a.amount);
-  }, [filteredWorkdays, cycleById, subfaenaById, faenaById]);
+  }, [filteredWorkdays, cycleById, subfaenaById, faenaById, workerById]);
 
   // Por transportista — el nombre viene del lookup de carriers, no del id.
   const byCarrier = useMemo(() => {
@@ -912,23 +991,125 @@ function DayDetailDrawer({ date, subfaenaId, workdays, trips, cycleById, subfaen
                     </tr>
                   </thead>
                   <tbody>
-                    {byLabor.map((l) => (
-                      <tr key={l.key} className="border-t border-[var(--color-border)]">
-                        <td className="px-2 py-1.5">
-                          <div className="text-sm font-medium">{l.laborName}</div>
-                          <div className="text-[10px] text-[var(--color-muted)]">
-                            {l.cycleLabel} · {LABOR_TYPE_LABEL[l.laborType] || l.laborType}
-                          </div>
-                        </td>
-                        <td className="px-2 py-1.5 text-right tabular-nums">{l.workerCount}</td>
-                        <td className="px-2 py-1.5 text-right text-xs tabular-nums">
-                          {laborMetricLabel(l, catalogs)}
-                        </td>
-                        <td className="px-2 py-1.5 text-right font-medium tabular-nums">
-                          {fmtCurrency(l.amount)}
-                        </td>
-                      </tr>
-                    ))}
+                    {byLabor.map((l) => {
+                      const isOpen = expandedLabors.has(l.key);
+                      const cosechaUnitForLabor = l.laborType === "cosecha"
+                        ? cosechaUnit(catalogs, l.containers).toLowerCase()
+                        : "";
+                      const tratoUnitForLabor = l.laborType === "trato"
+                        ? tratoTypeLabel(catalogs, l.tratoType ?? 0)
+                        : "";
+                      return (
+                        <Fragment key={l.key}>
+                          <tr
+                            className="cursor-pointer border-t border-[var(--color-border)] hover:bg-[var(--color-accent-soft)]"
+                            onClick={() => toggleLabor(l.key)}
+                          >
+                            <td className="px-2 py-1.5">
+                              <div className="flex items-center gap-1">
+                                <span className="text-[10px] text-[var(--color-muted)]">{isOpen ? "▾" : "▸"}</span>
+                                <div>
+                                  <div className="text-sm font-medium">{l.laborName}</div>
+                                  <div className="text-[10px] text-[var(--color-muted)]">
+                                    {l.cycleLabel} · {LABOR_TYPE_LABEL[l.laborType] || l.laborType}
+                                  </div>
+                                </div>
+                              </div>
+                            </td>
+                            <td className="px-2 py-1.5 text-right tabular-nums">{l.workerCount}</td>
+                            <td className="px-2 py-1.5 text-right text-xs tabular-nums">
+                              {laborMetricLabel(l, catalogs)}
+                            </td>
+                            <td className="px-2 py-1.5 text-right font-medium tabular-nums">
+                              {fmtCurrency(l.amount)}
+                            </td>
+                          </tr>
+                          {isOpen && (
+                            <tr className="border-t border-[var(--color-border)] bg-[var(--color-surface-2)]/40">
+                              <td colSpan={4} className="px-3 py-2">
+                                {l.laborType === "cosecha" && l.qualityDist.length > 0 && (
+                                  <div className="mb-2">
+                                    <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--color-muted)]">
+                                      Distribución por calidad / envase
+                                    </div>
+                                    <div className="flex flex-wrap gap-1.5">
+                                      {l.qualityDist.map((q) => {
+                                        const lblQ = qualityLabel(catalogs, q.qx);
+                                        const lblC = containerLabel(catalogs, q.cy);
+                                        const pct = l.kilos > 0 ? (q.kilos / l.kilos) * 100 : 0;
+                                        return (
+                                          <div
+                                            key={`${q.qx}_${q.cy}`}
+                                            className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-[11px]"
+                                          >
+                                            <div className="font-medium">{lblQ} / {lblC}</div>
+                                            <div className="tabular-nums">
+                                              {fmtNumber(q.kilos)} {lblC.toLowerCase()}
+                                              <span className="ml-1 text-[var(--color-muted)]">
+                                                ({pct.toFixed(0)}%)
+                                              </span>
+                                            </div>
+                                            <div className="text-[10px] tabular-nums text-[var(--color-muted)]">
+                                              {fmtCurrency(q.amount)}
+                                            </div>
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  </div>
+                                )}
+                                <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--color-muted)]">
+                                  Trabajadores ({l.workersBreakdown.length})
+                                </div>
+                                <table className="w-full text-xs">
+                                  <thead className="text-left text-[var(--color-muted)]">
+                                    <tr>
+                                      <th className="px-1 py-1">Nombre</th>
+                                      <th className="px-1 py-1 text-right">Producción</th>
+                                      <th className="px-1 py-1 text-right">Monto</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {l.workersBreakdown.map((w) => {
+                                      const prodParts = [];
+                                      if (l.laborType === "cosecha" && w.kilos > 0) {
+                                        prodParts.push(`${fmtNumber(w.kilos)} ${cosechaUnitForLabor}`);
+                                      }
+                                      if (l.laborType === "trato" && w.tratoQty > 0) {
+                                        prodParts.push(`${fmtNumber(w.tratoQty)} ${tratoUnitForLabor}`);
+                                      }
+                                      if (w.jornadas > 0) {
+                                        prodParts.push(`${fmtNumber(w.jornadas)} j`);
+                                      }
+                                      if (w.overtimeHours > 0) {
+                                        prodParts.push(`${fmtNumber(w.overtimeHours)} HE`);
+                                      }
+                                      if (w.pisoAmount > 0) {
+                                        prodParts.push(`🪙 ${fmtCurrency(w.pisoAmount)}`);
+                                      }
+                                      return (
+                                        <tr key={w.rut} className="border-t border-[var(--color-border)]">
+                                          <td className="px-1 py-1">
+                                            <div>{w.name}</div>
+                                            <div className="font-mono text-[10px] text-[var(--color-muted)]">{w.rut}</div>
+                                          </td>
+                                          <td className="px-1 py-1 text-right tabular-nums">
+                                            {prodParts.join(" · ") || "—"}
+                                          </td>
+                                          <td className="px-1 py-1 text-right font-medium tabular-nums">
+                                            {fmtCurrency(w.amount)}
+                                          </td>
+                                        </tr>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              </td>
+                            </tr>
+                          )}
+                        </Fragment>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

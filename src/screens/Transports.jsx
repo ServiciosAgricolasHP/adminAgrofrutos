@@ -4,6 +4,7 @@ import Modal from "../components/Modal";
 import TextField from "../components/TextField";
 import Select from "../components/Select";
 import ConfirmDialog from "../components/ConfirmDialog";
+import { TripEditModal } from "../components/TransportsModal";
 import { useCarriers } from "../contexts/CarriersContext";
 import { CARRIER_TYPES, validateVehicleAlias } from "../services/carriersService";
 import {
@@ -74,6 +75,7 @@ export default function Transports() {
 function CarriersTab() {
   const { carriers, addCarrier, updateCarrier, softDeleteCarrier, restoreCarrier } = useCarriers();
   const [edit, setEdit] = useState(null); // null | "new" | carrier
+  const [viewingTrips, setViewingTrips] = useState(null); // carrier cuyas vueltas se están viendo
   const [showInactive, setShowInactive] = useState(false);
 
   const visible = showInactive ? carriers : carriers.filter((c) => c.active !== false);
@@ -111,9 +113,19 @@ function CarriersTab() {
           {visible.map((c) => (
             <div
               key={c.id}
-              className={`rounded-lg border bg-[var(--color-surface)] p-3 shadow-sm ${
+              role="button"
+              tabIndex={0}
+              onClick={() => setViewingTrips(c)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setViewingTrips(c);
+                }
+              }}
+              className={`group cursor-pointer rounded-lg border bg-[var(--color-surface)] p-3 shadow-sm transition-colors hover:border-[var(--color-accent)] hover:bg-[var(--color-accent-soft)] ${
                 c.active === false ? "border-[var(--color-border)] opacity-60" : "border-[var(--color-border)]"
               }`}
+              title="Ver vueltas del transportista"
             >
               <div className="flex items-start justify-between">
                 <div>
@@ -146,28 +158,36 @@ function CarriersTab() {
                   <span className="text-[var(--color-muted)]">Sin vehículos</span>
                 )}
               </div>
-              <div className="mt-3 flex justify-end gap-1">
-                <button
-                  onClick={() => setEdit(c)}
-                  className="rounded px-2 py-1 text-xs text-[var(--color-accent)] hover:bg-[var(--color-accent-soft)]"
-                >
-                  Editar
-                </button>
-                {c.active !== false ? (
+              <div
+                className="mt-3 flex items-center justify-between gap-1"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <span className="text-[10px] text-[var(--color-muted)] opacity-0 transition-opacity group-hover:opacity-100">
+                  Click para ver vueltas →
+                </span>
+                <div className="flex gap-1">
                   <button
-                    onClick={() => softDeleteCarrier(c.id)}
-                    className="rounded px-2 py-1 text-xs text-[var(--color-danger)] hover:bg-[var(--color-danger-soft)]"
+                    onClick={() => setEdit(c)}
+                    className="rounded px-2 py-1 text-xs text-[var(--color-accent)] hover:bg-[var(--color-accent-soft)]"
                   >
-                    Desactivar
+                    Editar
                   </button>
-                ) : (
-                  <button
-                    onClick={() => restoreCarrier(c.id)}
-                    className="rounded px-2 py-1 text-xs text-[var(--color-success)] hover:bg-[var(--color-accent-soft)]"
-                  >
-                    Restaurar
-                  </button>
-                )}
+                  {c.active !== false ? (
+                    <button
+                      onClick={() => softDeleteCarrier(c.id)}
+                      className="rounded px-2 py-1 text-xs text-[var(--color-danger)] hover:bg-[var(--color-danger-soft)]"
+                    >
+                      Desactivar
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => restoreCarrier(c.id)}
+                      className="rounded px-2 py-1 text-xs text-[var(--color-success)] hover:bg-[var(--color-accent-soft)]"
+                    >
+                      Restaurar
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           ))}
@@ -175,7 +195,292 @@ function CarriersTab() {
       )}
 
       <CarrierEditModal open={!!edit} carrier={edit === "new" ? null : edit} onClose={() => setEdit(null)} onSave={handleSave} />
+      <CarrierTripsModal
+        open={!!viewingTrips}
+        carrier={viewingTrips}
+        onClose={() => setViewingTrips(null)}
+      />
     </div>
+  );
+}
+
+// Listado de vueltas de un transportista. Carga todas sus vueltas (no
+// filtrado por ciclo). Permite editar via TripEditModal y eliminar las que
+// no estén pagadas. Filtros: estado y rango de fechas.
+function CarrierTripsModal({ open, onClose, carrier }) {
+  const { carriers } = useCarriers();
+  const [trips, setTrips] = useState([]);
+  const [cycles, setCycles] = useState([]);
+  const [faenas, setFaenas] = useState([]);
+  const [subfaenas, setSubfaenas] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [statusFilter, setStatusFilter] = useState("");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [editing, setEditing] = useState(null); // trip object o null
+  const [confirmDel, setConfirmDel] = useState(null);
+
+  const reload = async () => {
+    if (!carrier?.id) return;
+    setLoading(true);
+    try {
+      const [tripList, cyc, fa, sub] = await Promise.all([
+        tripsService.listByCarrier(carrier.id),
+        cyclesService.list({ cache: true, persist: true, ttl: 5 * 60 * 1000 }),
+        faenasService.list({ cache: true, persist: true, ttl: 10 * 60 * 1000 }),
+        subfaenasService.list({ cache: true, persist: true, ttl: 10 * 60 * 1000 }),
+      ]);
+      tripList.sort((a, b) => (a.date < b.date ? 1 : -1));
+      setTrips(tripList);
+      setCycles(cyc);
+      setFaenas(fa);
+      setSubfaenas(sub);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (open) reload();
+    else {
+      setEditing(null);
+      setConfirmDel(null);
+      setStatusFilter("");
+      setDateFrom("");
+      setDateTo("");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, carrier?.id]);
+
+  const cycleById = useMemo(() => new Map(cycles.map((c) => [c.id, c])), [cycles]);
+  const faenaById = useMemo(() => new Map(faenas.map((f) => [f.id, f])), [faenas]);
+  const subfaenaById = useMemo(() => new Map(subfaenas.map((s) => [s.id, s])), [subfaenas]);
+
+  const filtered = useMemo(() => {
+    return trips.filter((t) => {
+      if (statusFilter && t.status !== statusFilter) return false;
+      if (dateFrom && t.date && t.date < dateFrom) return false;
+      if (dateTo && t.date && t.date > dateTo) return false;
+      return true;
+    });
+  }, [trips, statusFilter, dateFrom, dateTo]);
+
+  const totalAmount = filtered.reduce((s, t) => s + (Number(t.amount) || 0), 0);
+  const pendingCount = filtered.filter((t) => t.status === "pending").length;
+  const paidCount = filtered.filter((t) => t.status === "paid").length;
+
+  const handleSave = async (form) => {
+    if (!editing) return;
+    // Preservar contexto del ciclo/faena/subfaena originales (no se editan
+    // desde acá; si el usuario quiere mover la vuelta a otro ciclo lo hace
+    // desde el módulo del ciclo).
+    const payload = {
+      ...form,
+      cycleId: editing.cycleId || null,
+      faenaId: editing.faenaId || null,
+      subfaenaId: editing.subfaenaId || null,
+    };
+    await tripsService.update(editing.id, payload);
+    setEditing(null);
+    await reload();
+  };
+
+  const handleDelete = async () => {
+    if (!confirmDel) return;
+    try {
+      await tripsService.remove(confirmDel.id);
+      setConfirmDel(null);
+      await reload();
+    } catch (err) {
+      alert(err.message || "Error al eliminar");
+    }
+  };
+
+  if (!carrier) return null;
+
+  return (
+    <>
+      <Modal
+        open={open}
+        onClose={onClose}
+        title={`🚐 Vueltas — ${carrier.alias} · ${carrier.name}`}
+        size="xl"
+      >
+        <div className="mb-3 flex flex-wrap items-end justify-between gap-2 text-xs">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex gap-1">
+              {[
+                { v: "", l: "Todas" },
+                { v: "pending", l: "⏳ Pendientes" },
+                { v: "paid", l: "✓ Pagadas" },
+              ].map((o) => (
+                <button
+                  key={o.v}
+                  type="button"
+                  onClick={() => setStatusFilter(o.v)}
+                  className={`rounded-md border px-2 py-1 ${
+                    statusFilter === o.v
+                      ? "border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
+                      : "border-[var(--color-border)] bg-[var(--color-surface-2)] hover:bg-[var(--color-accent-soft)]"
+                  }`}
+                >
+                  {o.l}
+                </button>
+              ))}
+            </div>
+            <label className="flex items-center gap-1">
+              <span className="text-[var(--color-muted)]">Desde</span>
+              <input
+                type="date"
+                value={dateFrom}
+                onChange={(e) => setDateFrom(e.target.value)}
+                className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1"
+              />
+            </label>
+            <label className="flex items-center gap-1">
+              <span className="text-[var(--color-muted)]">Hasta</span>
+              <input
+                type="date"
+                value={dateTo}
+                onChange={(e) => setDateTo(e.target.value)}
+                className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1"
+              />
+            </label>
+            {(statusFilter || dateFrom || dateTo) && (
+              <button
+                type="button"
+                onClick={() => {
+                  setStatusFilter("");
+                  setDateFrom("");
+                  setDateTo("");
+                }}
+                className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 hover:bg-[var(--color-accent-soft)]"
+              >
+                Limpiar
+              </button>
+            )}
+          </div>
+          <div className="text-sm">
+            <span className="text-[var(--color-muted)]">
+              {filtered.length} vuelta{filtered.length === 1 ? "" : "s"} (
+              {pendingCount} pend · {paidCount} pag) ·{" "}
+            </span>
+            <span className="font-semibold tabular-nums">{fmtCurrency(totalAmount)}</span>
+          </div>
+        </div>
+
+        {loading ? (
+          <div className="py-8 text-center text-sm text-[var(--color-muted)]">Cargando...</div>
+        ) : filtered.length === 0 ? (
+          <div className="rounded-md border border-dashed border-[var(--color-border)] py-8 text-center text-sm text-[var(--color-muted)]">
+            {trips.length === 0 ? "Este transportista no tiene vueltas" : "Sin vueltas para los filtros aplicados"}
+          </div>
+        ) : (
+          <div className="max-h-[55vh] overflow-auto rounded-md border border-[var(--color-border)]">
+            <table className="w-full text-sm">
+              <thead className="sticky top-0 bg-[var(--color-surface-2)] text-left text-[var(--color-muted)]">
+                <tr>
+                  <th className="px-2 py-2">Fecha</th>
+                  <th className="px-2 py-2">Vehículo</th>
+                  <th className="px-2 py-2">Ciclo</th>
+                  <th className="px-2 py-2">Faena / Subfaena</th>
+                  <th className="px-2 py-2">Lugar → Destino</th>
+                  <th className="px-2 py-2 text-right">#Pers</th>
+                  <th className="px-2 py-2">Tipo</th>
+                  <th className="px-2 py-2 text-right">Vlts</th>
+                  <th className="px-2 py-2 text-right">Tarifa</th>
+                  <th className="px-2 py-2 text-right">Monto</th>
+                  <th className="px-2 py-2">Estado</th>
+                  <th className="px-2 py-2"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map((t) => {
+                  const cy = cycleById.get(t.cycleId);
+                  const fa = faenaById.get(t.faenaId);
+                  const sb = subfaenaById.get(t.subfaenaId);
+                  const isPaid = t.status === "paid";
+                  return (
+                    <tr key={t.id} className="border-t border-[var(--color-border)] hover:bg-[var(--color-accent-soft)]">
+                      <td className="px-2 py-1.5 tabular-nums">{t.date}</td>
+                      <td className="px-2 py-1.5">{t.vehicleAlias || "—"}</td>
+                      <td className="px-2 py-1.5">{cy?.label || t.cycleId || "—"}</td>
+                      <td className="px-2 py-1.5">
+                        {fa?.name || "—"}
+                        {sb && <span className="text-[var(--color-muted)]"> / {sb.name}</span>}
+                      </td>
+                      <td className="px-2 py-1.5">
+                        {t.lugar || "—"}
+                        {t.destino && <span className="text-[var(--color-muted)]"> → {t.destino}</span>}
+                      </td>
+                      <td className="px-2 py-1.5 text-right tabular-nums">{t.personCount ?? "—"}</td>
+                      <td className="px-2 py-1.5">{t.kind === "approach" ? "acerc." : "vuelta"}</td>
+                      <td className="px-2 py-1.5 text-right tabular-nums">{t.qty}</td>
+                      <td className="px-2 py-1.5 text-right tabular-nums">{fmtCurrency(t.rate)}</td>
+                      <td className="px-2 py-1.5 text-right font-medium tabular-nums">{fmtCurrency(t.amount)}</td>
+                      <td className="px-2 py-1.5">
+                        {isPaid ? (
+                          <span className="rounded-full bg-[var(--color-success-soft)] px-1.5 py-0.5 text-[11px] text-[var(--color-success)]">
+                            pagado
+                          </span>
+                        ) : (
+                          <span className="rounded-full bg-[var(--color-warning-soft)] px-1.5 py-0.5 text-[11px] text-[var(--color-warning)]">
+                            pendiente
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-2 py-1.5">
+                        <div className="flex gap-1">
+                          <button
+                            onClick={() => setEditing(t)}
+                            disabled={isPaid}
+                            title={isPaid ? "No se puede editar una vuelta pagada" : "Editar"}
+                            className="rounded px-2 py-0.5 text-xs text-[var(--color-accent)] hover:bg-[var(--color-accent-soft)] disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            Editar
+                          </button>
+                          <button
+                            onClick={() => setConfirmDel(t)}
+                            disabled={isPaid}
+                            title={isPaid ? "No se puede eliminar una vuelta pagada" : "Eliminar"}
+                            className="rounded px-2 py-0.5 text-xs text-[var(--color-danger)] hover:bg-[var(--color-danger-soft)] disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Modal>
+
+      <TripEditModal
+        open={!!editing}
+        onClose={() => setEditing(null)}
+        trip={editing}
+        carriers={carriers}
+        days={[]}
+        onSave={handleSave}
+      />
+
+      <ConfirmDialog
+        open={!!confirmDel}
+        title="Eliminar vuelta"
+        message={
+          confirmDel
+            ? `¿Eliminar la vuelta del ${confirmDel.date} (${fmtCurrency(confirmDel.amount)})?`
+            : ""
+        }
+        confirmLabel="Eliminar"
+        danger
+        onCancel={() => setConfirmDel(null)}
+        onConfirm={handleDelete}
+      />
+    </>
   );
 }
 
@@ -590,6 +895,7 @@ function PaymentsTab() {
   const [cycles, setCycles] = useState([]);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
+  const [printingMany, setPrintingMany] = useState(false);
   const [viewing, setViewing] = useState(null);
   const [confirmAction, setConfirmAction] = useState(null);
   const [showHistoricPaid, setShowHistoricPaid] = useState(false);
@@ -652,6 +958,13 @@ function PaymentsTab() {
           )}
         </label>
         <button
+          onClick={() => setPrintingMany(true)}
+          className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)]"
+          title="Imprimir o exportar varios resúmenes a la vez"
+        >
+          🖨 Imprimir varios
+        </button>
+        <button
           onClick={() => setGenerating(true)}
           className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-[var(--color-accent-fg)] hover:bg-[var(--color-accent-hover)]"
         >
@@ -696,6 +1009,19 @@ function PaymentsTab() {
           await reload();
           setBalanceVersion((v) => v + 1);
         }}
+      />
+
+      <PrintMultipleModal
+        open={printingMany}
+        onClose={() => setPrintingMany(false)}
+        payments={payments}
+        carriers={carriers}
+        faenas={faenas}
+        subfaenas={subfaenas}
+        carrierById={carrierById}
+        faenaById={faenaById}
+        subfaenaById={subfaenaById}
+        cycleById={cycleById}
       />
 
       <PaymentDetailModal
@@ -743,6 +1069,485 @@ function PaymentsTab() {
         }}
       />
     </div>
+  );
+}
+
+// ============================================================
+// PRINT MULTIPLE — batch print/export of multiple summaries
+// ============================================================
+// Filtros: estado (pending/paid/both), rango de fechas (overlap con
+// periodFrom/periodTo), transportistas (multi-select) y faena/subfaena
+// (requiere cargar trips). Acciones: imprimir todo en una ventana con
+// page-break entre resúmenes, o exportar todos como PNG en un ZIP.
+function PrintMultipleModal({
+  open,
+  onClose,
+  payments,
+  carriers,
+  faenas,
+  subfaenas,
+  carrierById,
+  faenaById,
+  subfaenaById,
+  cycleById,
+}) {
+  const [statusFilter, setStatusFilter] = useState("pending");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [carriersSel, setCarriersSel] = useState(() => new Set());
+  const [faenasSel, setFaenasSel] = useState(() => new Set());
+  const [subfaenasSel, setSubfaenasSel] = useState(() => new Set());
+
+  // Trip data — se carga cuando se aplica filtro avanzado o cuando se
+  // ejecuta una acción. Cacheado en el lifetime del modal.
+  const [allTrips, setAllTrips] = useState(null);
+  const [tripsLoading, setTripsLoading] = useState(false);
+
+  // Acción en curso: "" | "print" | "zip". Mientras hay acción, renderizamos
+  // todos los PrintableSummary en un contenedor offscreen para capturar
+  // outerHTML / PNG.
+  const [busy, setBusy] = useState("");
+  const [renderItems, setRenderItems] = useState(null);
+  const itemRefs = useRef([]);
+
+  useEffect(() => {
+    if (!open) {
+      setStatusFilter("pending");
+      setDateFrom("");
+      setDateTo("");
+      setCarriersSel(new Set());
+      setFaenasSel(new Set());
+      setSubfaenasSel(new Set());
+      setRenderItems(null);
+      setBusy("");
+    }
+  }, [open]);
+
+  const ensureTrips = async () => {
+    if (allTrips) return allTrips;
+    setTripsLoading(true);
+    try {
+      const list = await tripsService.listAll();
+      setAllTrips(list);
+      return list;
+    } finally {
+      setTripsLoading(false);
+    }
+  };
+
+  // Cargar trips automáticamente cuando se activa el filtro avanzado.
+  const advancedActive = faenasSel.size > 0 || subfaenasSel.size > 0;
+  useEffect(() => {
+    if (open && advancedActive && !allTrips && !tripsLoading) ensureTrips();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, advancedActive]);
+
+  // Filtros básicos (no requieren trips).
+  const basicFiltered = useMemo(() => {
+    return payments.filter((p) => {
+      if (statusFilter !== "both" && p.status !== statusFilter) return false;
+      if (carriersSel.size > 0 && !carriersSel.has(p.carrierId)) return false;
+      if (dateFrom || dateTo) {
+        const pFrom = p.periodFrom || p.periodTo || "";
+        const pTo = p.periodTo || p.periodFrom || "";
+        if (pFrom || pTo) {
+          if (dateFrom && pTo && pTo < dateFrom) return false;
+          if (dateTo && pFrom && pFrom > dateTo) return false;
+        }
+      }
+      return true;
+    });
+  }, [payments, statusFilter, dateFrom, dateTo, carriersSel]);
+
+  // Filtros avanzados (faena/subfaena) — un resumen pasa si tiene al menos
+  // una vuelta cuya faena/subfaena está en los sets. El resumen impreso
+  // muestra TODAS las vueltas (el filtro decide qué resúmenes entran, no
+  // qué vueltas dentro del resumen).
+  const finalPayments = useMemo(() => {
+    if (!advancedActive) return basicFiltered;
+    if (!allTrips) return null;
+    const tripById = new Map(allTrips.map((t) => [t.id, t]));
+    return basicFiltered.filter((p) => {
+      const trips = (p.tripIds || []).map((id) => tripById.get(id)).filter(Boolean);
+      return trips.some((t) => {
+        if (faenasSel.size > 0 && !faenasSel.has(t.faenaId)) return false;
+        if (subfaenasSel.size > 0 && !subfaenasSel.has(t.subfaenaId)) return false;
+        return true;
+      });
+    });
+  }, [basicFiltered, advancedActive, allTrips, faenasSel, subfaenasSel]);
+
+  const finalCount = finalPayments?.length ?? "—";
+  const finalTotal = (finalPayments || []).reduce((s, p) => s + (Number(p.total) || 0), 0);
+
+  // Construye los items a renderizar (payment + carrier + trips + periodo).
+  const buildRenderItems = async () => {
+    const trips = await ensureTrips();
+    const tripById = new Map(trips.map((t) => [t.id, t]));
+    const list = finalPayments || basicFiltered;
+    return list.map((p) => {
+      const carrier = carrierById.get(p.carrierId) || null;
+      const myTrips = (p.tripIds || [])
+        .map((id) => tripById.get(id))
+        .filter(Boolean)
+        .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+      const dates = myTrips.map((t) => t.date).filter(Boolean).sort();
+      const periodLabel =
+        p.periodFrom && p.periodTo
+          ? `${p.periodFrom} → ${p.periodTo}`
+          : dates.length
+            ? `${dates[0]} → ${dates[dates.length - 1]}`
+            : "—";
+      return { payment: p, carrier, trips: myTrips, periodLabel };
+    });
+  };
+
+  const waitFor = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  const handlePrint = async () => {
+    setBusy("print");
+    try {
+      const items = await buildRenderItems();
+      if (items.length === 0) {
+        alert("No hay resúmenes que coincidan con los filtros.");
+        return;
+      }
+      itemRefs.current = new Array(items.length).fill(null);
+      setRenderItems(items);
+      await waitFor(80); // esperar el render
+      const nodes = itemRefs.current.filter(Boolean);
+      const html = nodes
+        .map((n, i) => `<div class="page">${n.outerHTML}</div>`)
+        .join("");
+      const win = window.open("", "_blank", "width=1000,height=800");
+      if (!win) {
+        alert("Permite las ventanas emergentes para imprimir.");
+        return;
+      }
+      win.document.write(`<!DOCTYPE html><html><head><title>Resúmenes Transportes</title>
+        <style>
+          * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; color-adjust: exact !important; box-sizing: border-box; }
+          body { font-family: ui-sans-serif, system-ui, sans-serif; color: #000; margin: 0; padding: 0; }
+          .page { padding: 20px; page-break-after: always; }
+          .page:last-child { page-break-after: auto; }
+          table { border-collapse: collapse; width: 100%; }
+          th, td { border: 1px solid #999; padding: 6px 8px; font-size: 12px; }
+          thead th { background: #92d050 !important; text-align: left; }
+          .month-tag { background: #e6c0e0 !important; padding: 2px 8px; font-weight: 600; display: inline-block; }
+          tr.tot-row td, .tot-row td { background: #c6efce !important; font-weight: 700; }
+          @media print { @page { size: landscape; margin: 12mm; } }
+        </style>
+      </head><body>${html}<script>window.onload = () => { window.focus(); window.print(); };</script></body></html>`);
+      win.document.close();
+    } finally {
+      setRenderItems(null);
+      setBusy("");
+    }
+  };
+
+  const handleZip = async () => {
+    setBusy("zip");
+    try {
+      const items = await buildRenderItems();
+      if (items.length === 0) {
+        alert("No hay resúmenes que coincidan con los filtros.");
+        return;
+      }
+      itemRefs.current = new Array(items.length).fill(null);
+      setRenderItems(items);
+      await waitFor(80);
+      const JSZip = (await import("jszip")).default;
+      const zip = new JSZip();
+      const usedNames = new Set();
+      for (let i = 0; i < items.length; i++) {
+        const node = itemRefs.current[i];
+        if (!node) continue;
+        // eslint-disable-next-line no-await-in-loop
+        const blob = await toBlob(node, { backgroundColor: "#ffffff", pixelRatio: 2 });
+        if (!blob) continue;
+        const it = items[i];
+        const base = (it.carrier?.alias || it.payment.carrierId || "resumen")
+          .toString()
+          .replace(/[^a-z0-9_-]+/gi, "_");
+        let name = `${base}_${it.payment.id.slice(-6)}.png`;
+        while (usedNames.has(name)) name = `${base}_${i}.png`;
+        usedNames.add(name);
+        zip.file(name, blob);
+      }
+      const zipBlob = await zip.generateAsync({ type: "blob" });
+      const url = URL.createObjectURL(zipBlob);
+      const a = document.createElement("a");
+      const stamp = new Date().toISOString().slice(0, 10);
+      a.href = url;
+      a.download = `resumenes_transportes_${stamp}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (err) {
+      alert("Error al generar el ZIP: " + (err.message || err));
+    } finally {
+      setRenderItems(null);
+      setBusy("");
+    }
+  };
+
+  const toggleIn = (set, setter) => (id) =>
+    setter((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  const toggleCarrier = toggleIn(carriersSel, setCarriersSel);
+  const toggleFaena = toggleIn(faenasSel, setFaenasSel);
+  const toggleSubfaena = toggleIn(subfaenasSel, setSubfaenasSel);
+
+  const sortedCarriers = useMemo(
+    () => [...carriers].sort((a, b) => (a.alias || a.name).localeCompare(b.alias || b.name, "es")),
+    [carriers],
+  );
+  const sortedFaenas = useMemo(
+    () => [...faenas].sort((a, b) => a.name.localeCompare(b.name, "es")),
+    [faenas],
+  );
+  const sortedSubfaenas = useMemo(() => {
+    let arr = [...subfaenas];
+    if (faenasSel.size > 0) arr = arr.filter((s) => faenasSel.has(s.faenaId));
+    return arr.sort((a, b) => a.name.localeCompare(b.name, "es"));
+  }, [subfaenas, faenasSel]);
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title="Imprimir resúmenes en lote"
+      size="xl"
+      footer={
+        <>
+          <button
+            onClick={onClose}
+            disabled={!!busy}
+            className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm disabled:opacity-50"
+          >
+            Cerrar
+          </button>
+          <button
+            onClick={handleZip}
+            disabled={!!busy || (finalPayments && finalPayments.length === 0)}
+            className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)] disabled:opacity-50"
+          >
+            {busy === "zip" ? "Generando ZIP..." : "📦 ZIP PNGs"}
+          </button>
+          <button
+            onClick={handlePrint}
+            disabled={!!busy || (finalPayments && finalPayments.length === 0)}
+            className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-[var(--color-accent-fg)] hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+          >
+            {busy === "print" ? "Preparando..." : "🖨 Imprimir"}
+          </button>
+        </>
+      }
+    >
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div className="rounded-md border border-[var(--color-border)] p-3">
+          <div className="mb-2 text-xs font-medium text-[var(--color-muted)]">Estado</div>
+          <div className="flex flex-wrap gap-1 text-xs">
+            {[
+              { v: "pending", l: "⏳ Pendientes" },
+              { v: "paid", l: "✓ Pagados" },
+              { v: "both", l: "Ambos" },
+            ].map((o) => (
+              <button
+                key={o.v}
+                type="button"
+                onClick={() => setStatusFilter(o.v)}
+                className={`rounded-md border px-2 py-1 ${
+                  statusFilter === o.v
+                    ? "border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
+                    : "border-[var(--color-border)] bg-[var(--color-surface-2)] hover:bg-[var(--color-accent-soft)]"
+                }`}
+              >
+                {o.l}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="rounded-md border border-[var(--color-border)] p-3">
+          <div className="mb-2 text-xs font-medium text-[var(--color-muted)]">Rango de fechas</div>
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <label className="flex items-center gap-1">
+              <span className="text-[var(--color-muted)]">Desde</span>
+              <input
+                type="date"
+                value={dateFrom}
+                onChange={(e) => setDateFrom(e.target.value)}
+                className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1"
+              />
+            </label>
+            <label className="flex items-center gap-1">
+              <span className="text-[var(--color-muted)]">Hasta</span>
+              <input
+                type="date"
+                value={dateTo}
+                onChange={(e) => setDateTo(e.target.value)}
+                className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1"
+              />
+            </label>
+            {(dateFrom || dateTo) && (
+              <button
+                type="button"
+                onClick={() => {
+                  setDateFrom("");
+                  setDateTo("");
+                }}
+                className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 hover:bg-[var(--color-accent-soft)]"
+              >
+                Limpiar
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="rounded-md border border-[var(--color-border)] p-3 sm:col-span-2">
+          <div className="mb-2 flex items-center justify-between text-xs">
+            <span className="font-medium text-[var(--color-muted)]">
+              Transportistas ({carriersSel.size === 0 ? "todos" : carriersSel.size})
+            </span>
+            {carriersSel.size > 0 && (
+              <button
+                type="button"
+                onClick={() => setCarriersSel(new Set())}
+                className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-0.5 hover:bg-[var(--color-accent-soft)]"
+              >
+                Limpiar
+              </button>
+            )}
+          </div>
+          <div className="grid max-h-32 grid-cols-1 gap-1 overflow-auto sm:grid-cols-2 lg:grid-cols-3">
+            {sortedCarriers.map((c) => (
+              <label key={c.id} className="flex items-center gap-1.5 rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs">
+                <input
+                  type="checkbox"
+                  checked={carriersSel.has(c.id)}
+                  onChange={() => toggleCarrier(c.id)}
+                />
+                <span className="truncate">
+                  <span className="font-medium">{c.alias}</span>
+                  <span className="ml-1 text-[var(--color-muted)]">— {c.name}</span>
+                </span>
+              </label>
+            ))}
+          </div>
+        </div>
+
+        <div className="rounded-md border border-[var(--color-border)] p-3">
+          <div className="mb-2 flex items-center justify-between text-xs">
+            <span className="font-medium text-[var(--color-muted)]">
+              Faenas ({faenasSel.size === 0 ? "todas" : faenasSel.size})
+            </span>
+            {faenasSel.size > 0 && (
+              <button
+                type="button"
+                onClick={() => setFaenasSel(new Set())}
+                className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-0.5 hover:bg-[var(--color-accent-soft)]"
+              >
+                Limpiar
+              </button>
+            )}
+          </div>
+          <div className="grid max-h-28 grid-cols-1 gap-1 overflow-auto">
+            {sortedFaenas.map((f) => (
+              <label key={f.id} className="flex items-center gap-1.5 rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs">
+                <input
+                  type="checkbox"
+                  checked={faenasSel.has(f.id)}
+                  onChange={() => toggleFaena(f.id)}
+                />
+                <span className="truncate">{f.name}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+
+        <div className="rounded-md border border-[var(--color-border)] p-3">
+          <div className="mb-2 flex items-center justify-between text-xs">
+            <span className="font-medium text-[var(--color-muted)]">
+              Subfaenas ({subfaenasSel.size === 0 ? "todas" : subfaenasSel.size})
+            </span>
+            {subfaenasSel.size > 0 && (
+              <button
+                type="button"
+                onClick={() => setSubfaenasSel(new Set())}
+                className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-0.5 hover:bg-[var(--color-accent-soft)]"
+              >
+                Limpiar
+              </button>
+            )}
+          </div>
+          <div className="grid max-h-28 grid-cols-1 gap-1 overflow-auto">
+            {sortedSubfaenas.map((s) => (
+              <label key={s.id} className="flex items-center gap-1.5 rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs">
+                <input
+                  type="checkbox"
+                  checked={subfaenasSel.has(s.id)}
+                  onChange={() => toggleSubfaena(s.id)}
+                />
+                <span className="truncate">{s.name}</span>
+              </label>
+            ))}
+            {sortedSubfaenas.length === 0 && (
+              <span className="px-2 py-1 text-[var(--color-muted)]">
+                {faenasSel.size > 0 ? "Sin subfaenas para la faena seleccionada" : "—"}
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-4 flex items-center justify-between rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-sm">
+        <span>
+          {advancedActive && !allTrips
+            ? tripsLoading
+              ? "Cargando vueltas para filtros avanzados..."
+              : "Esperando datos para filtros avanzados..."
+            : `${finalCount} resumen(es) coinciden`}
+        </span>
+        <span className="font-semibold tabular-nums">{fmtCurrency(finalTotal)}</span>
+      </div>
+
+      {/* Offscreen render container: solo monta durante la acción para que
+          html-to-image / outerHTML lo pueda leer. */}
+      {renderItems && (
+        <div
+          aria-hidden="true"
+          style={{
+            position: "fixed",
+            left: "-10000px",
+            top: 0,
+            width: "1100px",
+            background: "#ffffff",
+          }}
+        >
+          {renderItems.map((it, i) => (
+            <PrintableSummary
+              key={it.payment.id}
+              ref={(el) => {
+                itemRefs.current[i] = el;
+              }}
+              payment={it.payment}
+              carrier={it.carrier}
+              trips={it.trips}
+              periodLabel={it.periodLabel}
+              faenaById={faenaById}
+              subfaenaById={subfaenaById}
+              cycleById={cycleById}
+            />
+          ))}
+        </div>
+      )}
+    </Modal>
   );
 }
 

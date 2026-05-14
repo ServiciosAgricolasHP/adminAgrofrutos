@@ -4,6 +4,7 @@ import Modal from "./Modal";
 import { workdayMapKey, getTratoTierTotals, containerLabel, tratoTypeLabel, cosechaUnit } from "../utils/cosechaCombos";
 import { DEFAULT_OVERTIME_RATE } from "../utils/tratoHE";
 import { cyclesService, faenasService, subfaenasService, workdaysService } from "../services";
+import { listPendingForWorkers, advanceRemaining, ADVANCE_TYPES } from "../services/advancesService";
 import { useCatalogs } from "../contexts/CatalogsContext";
 import { formatRutForDisplay } from "../utils/rutUtils";
 
@@ -133,6 +134,7 @@ export default function WorkerSummaryModal({ open, onClose, worker }) {
   const { catalogs } = useCatalogs();
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState([]); // [{ cycle, faena, subfaena, rows, totals }]
+  const [advances, setAdvances] = useState([]); // pending/partial advances del trabajador
   const [busy, setBusy] = useState("");
   const [titles, setTitles] = useState({ main: "DETALLE DE JORNADA", subtitle: "" });
   const [showTitleEditor, setShowTitleEditor] = useState(false);
@@ -141,13 +143,20 @@ export default function WorkerSummaryModal({ open, onClose, worker }) {
   useEffect(() => {
     if (!open || !worker?.id) {
       setData([]);
+      setAdvances([]);
       return;
     }
     setTitles(loadTitles(worker.id, worker.name || ""));
     (async () => {
       setLoading(true);
       try {
-        const wds = await workdaysService.list({ wheres: [["workerRut", "==", worker.id]] });
+        const [wds, pendingAdvances] = await Promise.all([
+          workdaysService.list({ wheres: [["workerRut", "==", worker.id]] }),
+          listPendingForWorkers([worker.id]).catch(() => []),
+        ]);
+        setAdvances(
+          [...pendingAdvances].sort((a, b) => String(a.date || "").localeCompare(String(b.date || ""))),
+        );
         const cycleIds = [...new Set(wds.map((w) => w.cycleId).filter(Boolean))];
         const cycles = await Promise.all(cycleIds.map((id) => cyclesService.getById(id)));
         const activeCycles = cycles.filter((c) => c && c.status !== "closed");
@@ -221,6 +230,10 @@ export default function WorkerSummaryModal({ open, onClose, worker }) {
   const grandTotal = useMemo(
     () => data.reduce((s, d) => s + (d.totals.amount || 0) + (d.totals.piso || 0), 0),
     [data],
+  );
+  const advancesSaldo = useMemo(
+    () => advances.reduce((s, a) => s + advanceRemaining(a), 0),
+    [advances],
   );
 
   const updateTitles = (patch) => {
@@ -309,10 +322,20 @@ export default function WorkerSummaryModal({ open, onClose, worker }) {
         >
           {showTitleEditor ? "▾" : "▸"} Personalizar títulos
         </button>
-        {!loading && data.length > 0 && (
-          <span className="ml-auto text-sm">
-            <span className="text-[var(--color-muted)]">Total general: </span>
-            <span className="font-semibold tabular-nums">{fmtCurrency(grandTotal)}</span>
+        {!loading && (data.length > 0 || advances.length > 0) && (
+          <span className="ml-auto flex items-baseline gap-3 text-sm">
+            <span>
+              <span className="text-[var(--color-muted)]">Total general: </span>
+              <span className="font-semibold tabular-nums">{fmtCurrency(grandTotal)}</span>
+            </span>
+            {advancesSaldo > 0 && (
+              <span>
+                <span className="text-[var(--color-muted)]">Saldo anticipos: </span>
+                <span className="font-semibold tabular-nums text-[#b45309]">
+                  − {fmtCurrency(advancesSaldo)}
+                </span>
+              </span>
+            )}
           </span>
         )}
       </div>
@@ -372,17 +395,34 @@ export default function WorkerSummaryModal({ open, onClose, worker }) {
 
       {loading ? (
         <div className="py-8 text-center text-sm text-[var(--color-muted)]">Cargando...</div>
-      ) : data.length === 0 ? (
+      ) : data.length === 0 && advances.length === 0 ? (
         <div className="rounded-md border border-dashed border-[var(--color-border)] py-8 text-center text-sm text-[var(--color-muted)]">
-          Sin actividad en ciclos activos
+          Sin actividad en ciclos activos ni anticipos pendientes
         </div>
       ) : null}
-      <PrintableWorkerSummary ref={printRef} worker={worker} data={data} grandTotal={grandTotal} titles={titles} />
+      <PrintableWorkerSummary
+        ref={printRef}
+        worker={worker}
+        data={data}
+        grandTotal={grandTotal}
+        advances={advances}
+        advancesSaldo={advancesSaldo}
+        titles={titles}
+      />
     </Modal>
   );
 }
 
-const PrintableWorkerSummary = forwardRef(function PrintableWorkerSummary({ worker, data, grandTotal, titles }, ref) {
+const advanceTypeLabel = (type) =>
+  ADVANCE_TYPES.find((t) => t.value === type)?.label || type || "—";
+const advanceTypeIcon = (type) =>
+  ADVANCE_TYPES.find((t) => t.value === type)?.icon || "•";
+
+const PrintableWorkerSummary = forwardRef(function PrintableWorkerSummary(
+  { worker, data, grandTotal, advances = [], advancesSaldo = 0, titles },
+  ref,
+) {
+  const neto = grandTotal - advancesSaldo;
   return (
     <div ref={ref} style={{ background: "#ffffff", color: "#000", padding: 20, fontFamily: "ui-sans-serif, system-ui, sans-serif" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 24, marginBottom: 16 }}>
@@ -525,13 +565,95 @@ const PrintableWorkerSummary = forwardRef(function PrintableWorkerSummary({ work
         );
       })}
 
-      {data.length > 1 && (
+      {advances.length > 0 && (
+        <div style={{ marginTop: 16 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 4 }}>
+            Anticipos / Adelantos pendientes
+          </div>
+          <table style={{ borderCollapse: "collapse", width: "100%" }}>
+            <thead>
+              <tr style={{ background: "#f8cbad" }}>
+                <th style={cellH}>Tipo</th>
+                <th style={cellH}>Fecha</th>
+                <th style={{ ...cellH, textAlign: "right" }}>Monto</th>
+                <th style={{ ...cellH, textAlign: "right" }}>Aplicado</th>
+                <th style={{ ...cellH, textAlign: "right" }}>Saldo</th>
+                <th style={cellH}>Nota</th>
+              </tr>
+            </thead>
+            <tbody>
+              {advances.map((a) => {
+                const amount = Number(a.amount) || 0;
+                const paid = Number(a.amountPaid) || 0;
+                const saldo = advanceRemaining(a);
+                return (
+                  <tr key={a.id}>
+                    <td style={cell}>
+                      {advanceTypeIcon(a.type)} {advanceTypeLabel(a.type)}
+                    </td>
+                    <td style={cell}>{dateLabel(a.date)}</td>
+                    <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                      {fmtCurrency(amount)}
+                    </td>
+                    <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums", color: paid > 0 ? "#666" : "#999" }}>
+                      {paid > 0 ? fmtCurrency(paid) : "—"}
+                    </td>
+                    <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums", color: "#b45309" }}>
+                      {fmtCurrency(saldo)}
+                    </td>
+                    <td style={{ ...cell, fontSize: 11, color: "#444" }}>{a.note || ""}</td>
+                  </tr>
+                );
+              })}
+              <tr style={{ background: "#fce4d6" }}>
+                <td style={{ ...cell, fontWeight: 700 }} colSpan={4}>
+                  Saldo total pendiente
+                </td>
+                <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums", color: "#b45309" }}>
+                  − {fmtCurrency(advancesSaldo)}
+                </td>
+                <td style={cell}></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {(data.length > 1 || advances.length > 0) && (
         <table style={{ borderCollapse: "collapse", width: "100%", marginTop: 8 }}>
           <tbody>
-            <tr style={{ background: "#a9d08e" }}>
-              <td style={{ ...cell, fontWeight: 700, fontSize: 13 }}>TOTAL GENERAL</td>
-              <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontSize: 13, fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(grandTotal)}</td>
+            <tr style={{ background: "#dbe7c9" }}>
+              <td style={{ ...cell, fontWeight: 700, fontSize: 12 }}>Total producción</td>
+              <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontSize: 12, fontVariantNumeric: "tabular-nums" }}>
+                {fmtCurrency(grandTotal)}
+              </td>
             </tr>
+            {advancesSaldo > 0 && (
+              <>
+                <tr style={{ background: "#fce4d6" }}>
+                  <td style={{ ...cell, fontWeight: 700, fontSize: 12, color: "#b45309" }}>
+                    Saldo anticipos pendientes
+                  </td>
+                  <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontSize: 12, fontVariantNumeric: "tabular-nums", color: "#b45309" }}>
+                    − {fmtCurrency(advancesSaldo)}
+                  </td>
+                </tr>
+                <tr style={{ background: "#a9d08e" }}>
+                  <td style={{ ...cell, fontWeight: 700, fontSize: 13 }}>NETO ESTIMADO</td>
+                  <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontSize: 13, fontVariantNumeric: "tabular-nums" }}>
+                    {fmtCurrency(neto)}
+                  </td>
+                </tr>
+              </>
+            )}
+            {advancesSaldo === 0 && (
+              <tr style={{ background: "#a9d08e" }}>
+                <td style={{ ...cell, fontWeight: 700, fontSize: 13 }}>TOTAL GENERAL</td>
+                <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontSize: 13, fontVariantNumeric: "tabular-nums" }}>
+                  {fmtCurrency(grandTotal)}
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       )}

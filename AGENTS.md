@@ -134,8 +134,20 @@ Bono adicional configurable por día para trato y cosecha. Pensado para compensa
 
 - Jerarquía: Faena → Subfaena → Ciclo → Labors → Workdays.
 - Label de ciclo = prefijo bloqueado `Faena/Subfaena/` + sufijo editable.
-- Estados: `open` | `closed`. Solo un ciclo abierto por (faena, subfaena).
+- Estados: `open` | `closed`. Se permiten **múltiples ciclos abiertos** por (faena, subfaena) — útil para correr varios frentes en paralelo o para "carve off" temporales.
 - `CycleRow` permite **✏ Renombrar**, abrir, cerrar y eliminar.
+
+### Importar desde otro ciclo abierto
+
+Al crear un ciclo nuevo, si en la misma subfaena hay al menos un ciclo abierto, el form muestra una sección **"Importar desde un ciclo abierto"**. Es opt-in:
+
+- **Ciclo origen**: select con los ciclos abiertos del ámbito (más reciente primero).
+- **Labores a clonar**: checkboxes — copia config completa de cada labor seleccionada (incluyendo tratoType, modos, baseDayDefault, overtimeRate, etc.) con un nuevo `id`.
+- **Días a importar**: chips toggleables con las fechas de `cycle.days[]` del origen (default todos). Definen tanto la `days[]` del nuevo ciclo como el filtro de fechas para mover workdays / copiar precios.
+- **Copiar precios por día** (opcional): copia las entradas de `dayPrices` re-keadas por el nuevo `laborId` y filtradas por días seleccionados.
+- **Mover workdays** (opcional, destructivo): para cada (labor seleccionada × día seleccionado), lee los workdays del origen y los re-crea en el nuevo ciclo con el nuevo `docId` (que encodea cycleId+laborId), luego borra los originales. Workdays con `payrollId` se saltan para no romper snapshots de nómina ya generadas — el usuario recibe un alert con el count de skipped.
+
+Implementación en `submitCycle` (Faenas.jsx). El mapeo `oldLaborId → newLaborId` vive en un `Map` que sirve para re-keear tanto `dayPrices` como los `docId` de workdays movidos.
 
 ### CycleDetail — grid
 
@@ -155,10 +167,10 @@ Bono adicional configurable por día para trato y cosecha. Pensado para compensa
 ## Transports / Transporte
 
 - Pantalla: `src/screens/Transports.jsx` — 4 pestañas:
-  1. **Transportistas** — gestión de carriers.
+  1. **Transportistas** — gestión de carriers. Click en una tarjeta abre `CarrierTripsModal` con todas las vueltas del transportista (cualquier ciclo) y permite editarlas/eliminarlas via `TripEditModal` reutilizado (con input de fecha libre cuando se invoca sin lista `days`). Filtros: estado (pendiente/pagada) y rango de fechas. Las vueltas pagadas no permiten editar/eliminar (consistente con `tripsService.update`/`remove`).
   2. **Vueltas** — listado y CRUD.
   3. **Pago por faena** — selecciona ciclos activos + rango de fechas → genera un `paymentSummary` por transportista con sus vueltas pendientes.
-  4. **Resúmenes / Pagos** — historial; marcar pagado, revertir, imprimir.
+  4. **Resúmenes / Pagos** — historial; marcar pagado, revertir, imprimir uno a uno **y también imprimir varios en lote** (botón `🖨 Imprimir varios` → modal `PrintMultipleModal` con filtros estado/fechas/transportistas/faena-subfaena y dos acciones: 🖨 imprimir todos en una ventana con `page-break-after`, o 📦 descargar ZIP con un PNG por resumen vía `jszip` + `html-to-image`).
 - **Balance general** — sección en la cabecera de la pantalla: rango de fechas + filas por transportista (viajes − pagos). Bumpea `balanceVersion` al pagar/revertir para refrescar. Botón **🖨 Imprimir balance** abre ventana de impresión.
 - Modal: `src/Components/TransportsModal.jsx` — usado en `CycleDetail` para asignar viajes rápidos. Incluye un sub-modal **+ Nuevo transportista** que crea un carrier inline y lo auto-selecciona junto con su primer vehículo (sin salir del modal de viajes).
 - Servicios: `services/transportsService.js` exporta `tripsService` (alias `transportsService`) y `paymentsService` (alias `transportPaymentsService`).
@@ -170,9 +182,10 @@ Bono adicional configurable por día para trato y cosecha. Pensado para compensa
 
 ## Trabajadores / Workers
 
-- Pantalla: `src/screens/Workers.jsx` — carga **una vez** con cache persistente (TTL 5min) y filtra client-side.
-- Búsqueda: substring sobre `id` y `name`, normalizando acentos y mayúsculas. Vacío = todos.
+- Pantalla: `src/screens/Workers.jsx`.
+- Búsqueda **server-side** por prefijo via `searchWorkers` (≥4 caracteres, debounced 250ms, cache por sesión en `cacheRef`). Si arranca con dígito → RUT (queries por `documentId()`); si no → nombre (queries por `name` con varias variantes de casing).
 - Auto-detect badge **RUT** vs **Nombre** (basado en `detectQueryKind`: empieza con dígito → RUT).
+- **Filtros opcionales** (componibles con la búsqueda): dropdown 👥 Líder (con opción "— Sin líder —" + lista única extraída del dataset completo) y chips toggle 💵 Efectivo / 🏦 Transferencia. Activar cualquiera dispara `ensureAllForModal()` (lista completa via `workersService.list` con cache 24h en localStorage) y la regla de ≥4 caracteres se relaja: el dataset se filtra client-side. Si además hay texto, se aplica substring acentos-insensitive sobre nombre y RUT. Al editar o togglear banco desde la grilla, también se patcha `allWorkersForModal` para que el filtro refleje el cambio sin re-fetch.
 - Acciones rápidas: 🆔 Cta. RUT (Banco Estado), 💵 Efec. (banco "EFE"), 📊 Resumen, Editar, ✕.
 - Doc id = RUT. No hay campo `rut` separado en el doc.
 - Bank details = `[paymentRut, accountNumber, accountType, bankCode]` (orden importante).
@@ -194,7 +207,7 @@ Bono adicional configurable por día para trato y cosecha. Pensado para compensa
 
 ### Flujo
 
-1. **Generar** — selector de ciclos activos agrupados por faena. Cada ciclo muestra `Pendiente` y `Pagado` calculados desde workdays.
+1. **Generar** — selector de ciclos activos agrupados por faena. Cada ciclo muestra `Pendiente` y `Pagado` calculados desde workdays. Al chequear un ciclo, debajo aparecen sus labores como chips toggleables: click excluye/incluye esa labor de la nómina. Default: todas seleccionadas. Workdays de labores excluidas quedan disponibles para una nómina futura (no se taggean). Si el usuario destilda todas las labores, el ciclo se marca con "⚠ Sin labores seleccionadas" y no aporta workdays al preview.
 2. **Preview** — agrega por trabajador, cruza con `worker.bankDetails`, busca anticipos pendientes y los aplica.
    - Filtros: 🏦 Banco, 💵 Efectivo, ⚠ Datos faltantes, ⚠ Cuenta sospechosa, 👥 \<líder\>.
    - Bulk actions sobre el subset visible: incluir/excluir, → Efectivo / → Banco.
@@ -236,6 +249,9 @@ Botones de descarga:
 - **🏦 Sólo Nómina** → `downloadNominaOnlyXlsx` (1 hoja, para subir al banco).
 - **📥 XLSX completo** → 4 hojas.
 - **🖨 Comprobantes efectivo** → ventana de impresión, una página por líder con tabla firmable (RUT, Nombre, Monto, Firma) + líneas de firma final.
+- **🖨 Detalle de pago** → ventana de impresión más completa. Abre con un **Resumen por subfaena** (filas = subfaena, columnas `Faena | Subfaena | Con cuenta RUT | Efectivo | TOTAL`, la faena se imprime sólo en la primera fila del bloque); luego el **resumen por grupo** estructurado como 2 tablas grandes (`Con cuenta RUT` y `Otros grupos`) con columnas `Líder | Faena | TOTAL` y subtotal al pie de cada una; finalmente la tabla por líder con el detalle de producción por ciclo. En el header de cada grupo se incluye el nombre del líder con un `h1` más grande para que el inicio de cada grupo se vea claramente al imprimir.
+- **Catálogos en el detalle imprimible**: los precios bajo el día y los breakdowns de celda usan labels del catálogo (no `Q1/E2` ni `/jorn.`). Para cosecha: `Premium / Saco: $1000` (o `$1000/saco` en single-combo). Para trato: `$10000/poda` (la unidad = `tratoTypeLabel`). Para `tratoHE` no se muestra precio sugerido en el header del día (el monto del día lo define la planilla). `byCombo` se indexa por clave estructural `"x_y"` y el label visible se computa al render con `comboLabel(catalogs, x, y)`.
+- **paymentRut vs RUT del trabajador**: la hoja `Nomina` BChile usa **`it.paymentRut`** (de `bankDetails[0]`), no el RUT de la persona. `paymentRut` puede diferir cuando el pago va a una cuenta de un familiar; el portal del banco lo valida contra la titularidad. Preservado en `cleanItems` y en el snapshot.
 
 ### Historial
 
@@ -269,8 +285,8 @@ Botones de descarga:
 
 ## Resúmenes / Summary modals
 
-- `Components/CycleSummaryModal.jsx` — modos **Pagar** y **Cobrar**, day-by-day por labor, persistencia localStorage (cobrar settings + títulos editables `summary_titles_${cycleId}`).
-- `Components/WorkerSummaryModal.jsx` — multi-ciclo activo, day-by-day, títulos editables (`worker_summary_titles_${rut}`).
+- `Components/CycleSummaryModal.jsx` — modos **Pagar** y **Cobrar**, day-by-day por labor, persistencia localStorage (cobrar settings + títulos editables `summary_titles_${cycleId}`). Después del resumen general agrega una **infografía por labor con grilla `Trabajador × Días`** (`LaborWorkerGrid`): nombre+RUT, una columna por fecha con qty grande + monto chico, totales `Total qty` y `Total $` por trabajador, fila `Total día` al pie. Cada labor tiene sus propios botones `📋 / 📥 / 🖨` (capturan solo esa sección via `ref` propio); los botones globales del modal capturan todo (general + grillas). El CSS de impresión incluye `thead { display: table-header-group }` para que el encabezado se repita en cada hoja nueva cuando la tabla excede una página. Sólo se rinden las grillas en modo `pagar` (cobrar es por tarifa pactada, no por desglose por trabajador).
+- `Components/WorkerSummaryModal.jsx` — multi-ciclo activo, day-by-day, títulos editables (`worker_summary_titles_${rut}`). Carga **anticipos pendientes** via `listPendingForWorkers([rut])` y renderiza una sección "Anticipos / Adelantos pendientes" con tipo, fecha, monto, aplicado, saldo y nota. Cuando hay saldo, el bloque de totales muestra `Total producción − Saldo anticipos = NETO ESTIMADO` (en lugar del simple `TOTAL GENERAL`).
 - Ambos: logo desde `${import.meta.env.BASE_URL}logo.png`, modo foto (copiar imagen, descargar PNG, imprimir con `print-color-adjust: exact`).
 - **Headers/totales reflejan el catálogo, no literales**: la columna principal y los "Total" se etiquetan con `cosechaUnit(catalogs, containersDelCiclo)` para cosecha y `tratoTypeLabel(catalogs, labor.tratoType)` para trato. Si un ciclo mezcla varios tipos cae al genérico ("Trato", "Unid.").
 
@@ -283,6 +299,10 @@ Botones de descarga:
   2. Click en la **celda** (zona blanca) → `DayExpandedModal` con todas las subfaenas del día. Click en una subfaena dentro de este modal pasa a `DayDetailDrawer` con `from: "all"` para que al cerrar el drawer se vuelva al modal del día (cadena de modales).
 - **Cache de sesión por mes**: `sessionStorage` con TTL 5 min, key `af.calendar.{year}.{month}`. Reduce reads al navegar atrás/adelante.
 - **Estrategia de lecturas**: hoy lee todos los workdays del rango del mes (~3k reads en mes pico, ~US$0.02). La función `fetchWorkdaysInRange(start, end)` está aislada como el punto de migración: cuando el volumen crezca consistentemente >5k workdays/mes o la carga supere 2s, mover ciclos cerrados a un snapshot agregado y combinar abierto+cerrado en esa misma función — el resto de la UI no cambia.
+- **Workers**: además de workdays/trips, el Calendar pre-carga la lista completa de trabajadores con `workersService.list({ cache: true, persist: true, ttl: 24h })`. Mismo cache que usa la pantalla Trabajadores → 0 reads extra si ya está vivo. Necesario para mostrar nombres (no solo RUT) en los breakdowns por trabajador del drawer.
+- **DayDetailDrawer — fila expandible por labor**: cada fila de la tabla "Por labor" es clickeable (▸/▾). Al expandir se muestra:
+  - Para **cosecha**: cards con `qualityLabel / containerLabel · kg · %` por combo (calidad×envase) — sale del catálogo, no `Q1/E2`.
+  - **Trabajadores** que participaron: nombre + RUT + producción (kilos / tratoQty / jornadas / HE / piso) + monto, ordenados por monto desc. Estado expandido en memoria (no persistido).
 
 ## Consola admin / AdminConsole
 
