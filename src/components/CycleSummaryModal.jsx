@@ -1126,11 +1126,11 @@ function LaborWorkerGrid({
               {dates.map((d) => (
                 <th key={d} style={{ ...cellH, textAlign: "center", minWidth: 70 }}>{dateLabel(d)}</th>
               ))}
-              <th style={{ ...cellH, textAlign: "right", background: "#7eb0d8" }}>Total {unit}</th>
+              <th style={{ ...cellH, textAlign: "right", background: "#7eb0d8", whiteSpace: "nowrap" }}>Total {unit}</th>
               {labor?.type === "tratoHE" && (
-                <th style={{ ...cellH, textAlign: "right", background: "#7eb0d8" }}>Total HE</th>
+                <th style={{ ...cellH, textAlign: "right", background: "#7eb0d8", whiteSpace: "nowrap" }}>Total HE</th>
               )}
-              <th style={{ ...cellH, textAlign: "right", background: "#7eb0d8" }}>Total $</th>
+              <th style={{ ...cellH, textAlign: "right", background: "#7eb0d8", whiteSpace: "nowrap" }}>Total $</th>
             </tr>
           </thead>
           <tbody>
