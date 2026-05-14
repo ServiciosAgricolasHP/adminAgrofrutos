@@ -943,6 +943,10 @@ function LaborWorkerGrid({
 }) {
   const ref = useRef(null);
   const [busy, setBusy] = useState("");
+  // Vista ampliada: la grilla se renderiza en un Modal aparte para que se
+  // pueda ver completa sin que rompa el layout del modal padre. Útil cuando
+  // hay muchos días (>15) y el scroll horizontal inline es incómodo.
+  const [expanded, setExpanded] = useState(false);
 
   const filename = `resumen_trabajadores_${(labor?.name || "labor").replace(/[/\s]+/g, "_")}.png`;
 
@@ -1024,8 +1028,11 @@ function LaborWorkerGrid({
     : null;
 
   // Devuelve el contenido de una celda (worker, date). qty arriba grande,
-  // monto chico abajo. Para tratoHE agrega chips de jornadas/HE. Para piso
-  // muestra un tag dorado discreto.
+  // monto chico abajo. Para piso muestra un tag dorado discreto.
+  //
+  // Para tratoHE: NO mostramos "j" (la jornada está implícita en el día con
+  // trabajo). En su lugar, la línea de monto se muestra como `$amount + Xh`
+  // cuando hay horas extras, o solo `$amount` cuando es jornada limpia.
   const renderCell = (c) => {
     if (!c || (!c.qty && !c.amount && !c.pisoAmount)) return null;
     const lines = [];
@@ -1053,10 +1060,7 @@ function LaborWorkerGrid({
     } else if (t === "trato") {
       lines.push(<div key="qty" style={{ fontWeight: 600 }}>{fmtNumber(c.qty)}</div>);
     } else if (t === "tratoHE") {
-      const parts = [];
-      if (c.jornadas > 0) parts.push(`${fmtNumber(c.jornadas)}j`);
-      if (c.overtimeHours > 0) parts.push(`HE ${fmtNumber(c.overtimeHours)}h`);
-      lines.push(<div key="he" style={{ fontWeight: 600 }}>{parts.join(" · ") || "—"}</div>);
+      // Sin línea de jornada — se renderiza solo en la línea de monto abajo.
     } else {
       lines.push(<div key="j" style={{ fontWeight: 600 }}>{fmtNumber(c.qty)}j</div>);
     }
@@ -1066,11 +1070,133 @@ function LaborWorkerGrid({
       );
     }
     if (c.amount) {
+      const heSuffix = (t === "tratoHE" && c.overtimeHours > 0)
+        ? ` + ${fmtNumber(c.overtimeHours)}h`
+        : "";
+      const fontSize = t === "tratoHE" ? 11 : 9;
+      const fontWeight = t === "tratoHE" ? 600 : 400;
       lines.push(
-        <div key="amt" style={{ fontSize: 9, color: "#555" }}>{fmtCurrency(c.amount)}</div>,
+        <div key="amt" style={{ fontSize, fontWeight, color: t === "tratoHE" ? "#000" : "#555" }}>
+          {fmtCurrency(c.amount)}{heSuffix}
+        </div>,
       );
     }
     return <>{lines}</>;
+  };
+
+  // Contenido visual del grid — extraído para poder renderizarlo tanto inline
+  // (con ref para capturar PNG) como dentro del Modal "Ampliar". Solo una de
+  // las dos instancias está montada a la vez (depende de `expanded`), así el
+  // ref siempre apunta a la única instancia activa.
+  const gridBody = (
+    <>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+        <div>
+          <div style={{ fontWeight: 700, fontSize: 14 }}>{titles?.main || "DETALLE DE JORNADA"}</div>
+          {titles?.subtitle && <div style={{ fontSize: 12, color: "#555" }}>{titles.subtitle}</div>}
+        </div>
+        <div style={{ textAlign: "right" }}>
+          <div style={{ fontWeight: 700, fontSize: 13 }}>{displayName}</div>
+          <div style={{ fontSize: 11, color: "#555" }}>
+            {workers.length} trabajador{workers.length === 1 ? "" : "es"} · {dates.length} día{dates.length === 1 ? "" : "s"} · {unit}
+          </div>
+        </div>
+      </div>
+      <table style={{ borderCollapse: "collapse", width: "100%" }}>
+          <thead>
+            <tr style={{ background: "#9dc3e6" }}>
+              <th style={{ ...cellH, position: "sticky", left: 0 }}>Trabajador</th>
+              {dates.map((d) => (
+                <th key={d} style={{ ...cellH, textAlign: "center", minWidth: 70 }}>{dateLabel(d)}</th>
+              ))}
+              <th style={{ ...cellH, textAlign: "right", background: "#7eb0d8" }}>Total {unit}</th>
+              <th style={{ ...cellH, textAlign: "right", background: "#7eb0d8" }}>Total $</th>
+            </tr>
+          </thead>
+          <tbody>
+            {workers.map((w) => (
+              <tr key={w.rut}>
+                <td style={{ ...cell, fontWeight: 600 }}>
+                  <div>{w.name}</div>
+                  <div style={{ fontSize: 9, color: "#777", fontFamily: "ui-monospace, monospace" }}>{w.rut}</div>
+                </td>
+                {dates.map((d) => (
+                  <td key={d} style={{ ...cell, textAlign: "center", fontVariantNumeric: "tabular-nums" }}>
+                    {renderCell(w.byDate.get(d))}
+                  </td>
+                ))}
+                <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
+                  {labor?.type === "tratoHE"
+                    ? (w.totals.overtimeHours > 0 ? `+${fmtNumber(w.totals.overtimeHours)}h` : "")
+                    : fmtNumber(w.totals.qty)}
+                </td>
+                <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
+                  {labor?.type === "tratoHE" && w.totals.overtimeHours > 0
+                    ? `${fmtCurrency(w.totals.amount)} + ${fmtNumber(w.totals.overtimeHours)}h`
+                    : fmtCurrency(w.totals.amount)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+          <tfoot>
+            <tr style={{ background: "#c6efce", fontWeight: 700 }}>
+              <td style={{ ...cell, fontWeight: 700 }}>Total día</td>
+              {dates.map((d) => {
+                const t = dayTotals.get(d);
+                const isHE = labor?.type === "tratoHE";
+                const amtLine = isHE && t.overtimeHours > 0
+                  ? `${fmtCurrency(t.amount)} + ${fmtNumber(t.overtimeHours)}h`
+                  : fmtCurrency(t.amount);
+                return (
+                  <td key={d} style={{ ...cell, textAlign: "center", fontVariantNumeric: "tabular-nums", fontWeight: 700 }}>
+                    {!isHE && <div>{fmtNumber(t.qty)}</div>}
+                    <div style={{ fontSize: isHE ? 11 : 9, color: "#333" }}>{amtLine}</div>
+                  </td>
+                );
+              })}
+              <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
+                {labor?.type === "tratoHE"
+                  ? (grand.overtimeHours > 0 ? `+${fmtNumber(grand.overtimeHours)}h` : "")
+                  : fmtNumber(grand.qty)}
+              </td>
+              <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
+                {labor?.type === "tratoHE" && grand.overtimeHours > 0
+                  ? `${fmtCurrency(grand.amount)} + ${fmtNumber(grand.overtimeHours)}h`
+                  : fmtCurrency(grand.amount)}
+              </td>
+            </tr>
+          {anyPiso && grand.pisoAmount > 0 && (
+            <tr style={{ background: "#fce4d6" }}>
+              <td style={{ ...cell, fontWeight: 700, color: "#b45309" }} colSpan={dates.length + 1}>
+                🪙 Total pisos
+              </td>
+              <td style={{ ...cell, textAlign: "right", fontWeight: 700, color: "#b45309", fontVariantNumeric: "tabular-nums" }}>—</td>
+              <td style={{ ...cell, textAlign: "right", fontWeight: 700, color: "#b45309", fontVariantNumeric: "tabular-nums" }}>
+                {fmtCurrency(grand.pisoAmount)}
+              </td>
+            </tr>
+          )}
+        </tfoot>
+      </table>
+    </>
+  );
+
+  // Card wrapper compartido para inline y modal — replica los padding y
+  // colores del print. `ref` lo recibe solo cuando se renderiza inline (o
+  // dentro del modal) — pero nunca en ambos lados a la vez (mutuamente
+  // excluyentes vía `expanded`).
+  //
+  // `width: max-content` evita que el navegador trate de hacer caber el
+  // contenido en el ancho del contenedor con overflow. Cada columna conserva
+  // su ancho natural y la tabla puede ser más amplia que el viewport (que es
+  // justo lo que queremos — el scroller exterior se encarga).
+  const cardStyles = {
+    background: "#ffffff",
+    color: "#000",
+    padding: 14,
+    fontFamily: "ui-sans-serif, system-ui, sans-serif",
+    width: "max-content",
+    minWidth: "100%",
   };
 
   return (
@@ -1080,6 +1206,13 @@ function LaborWorkerGrid({
           Resumen por trabajador — <span className="text-[var(--color-muted)]">{displayName}</span>
         </h3>
         <div className="flex gap-1">
+          <button
+            onClick={() => setExpanded(true)}
+            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
+            title="Ver en grande (modal con scroll horizontal)"
+          >
+            🔍 Ampliar
+          </button>
           <button
             onClick={handleCopy}
             disabled={busy === "copy"}
@@ -1105,100 +1238,65 @@ function LaborWorkerGrid({
           </button>
         </div>
       </div>
-      <div
-        ref={ref}
-        style={{
-          background: "#ffffff",
-          color: "#000",
-          padding: 14,
-          fontFamily: "ui-sans-serif, system-ui, sans-serif",
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-          <div>
-            <div style={{ fontWeight: 700, fontSize: 14 }}>{titles?.main || "DETALLE DE JORNADA"}</div>
-            {titles?.subtitle && <div style={{ fontSize: 12, color: "#555" }}>{titles.subtitle}</div>}
-          </div>
-          <div style={{ textAlign: "right" }}>
-            <div style={{ fontWeight: 700, fontSize: 13 }}>{displayName}</div>
-            <div style={{ fontSize: 11, color: "#555" }}>
-              {workers.length} trabajador{workers.length === 1 ? "" : "es"} · {dates.length} día{dates.length === 1 ? "" : "s"} · {unit}
-            </div>
+      {/* Inline: scroll horizontal dentro del modal padre para que la grilla
+          con muchos días no rompa el layout. PNG/print toman desde el ref del
+          div interno (full-width, no recortado por el overflow del wrapper). */}
+      {!expanded && (
+        <div style={{ overflowX: "auto", maxWidth: "100%" }}>
+          <div ref={ref} style={cardStyles}>
+            {gridBody}
           </div>
         </div>
-        <table style={{ borderCollapse: "collapse", width: "100%" }}>
-          <thead>
-            <tr style={{ background: "#9dc3e6" }}>
-              <th style={{ ...cellH, position: "sticky", left: 0 }}>Trabajador</th>
-              {dates.map((d) => (
-                <th key={d} style={{ ...cellH, textAlign: "center", minWidth: 70 }}>{dateLabel(d)}</th>
-              ))}
-              <th style={{ ...cellH, textAlign: "right", background: "#7eb0d8" }}>Total {unit}</th>
-              <th style={{ ...cellH, textAlign: "right", background: "#7eb0d8" }}>Total $</th>
-            </tr>
-          </thead>
-          <tbody>
-            {workers.map((w) => (
-              <tr key={w.rut}>
-                <td style={{ ...cell, fontWeight: 600 }}>
-                  <div>{w.name}</div>
-                  <div style={{ fontSize: 9, color: "#777", fontFamily: "ui-monospace, monospace" }}>{w.rut}</div>
-                </td>
-                {dates.map((d) => (
-                  <td key={d} style={{ ...cell, textAlign: "center", fontVariantNumeric: "tabular-nums" }}>
-                    {renderCell(w.byDate.get(d))}
-                  </td>
-                ))}
-                <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
-                  {labor?.type === "tratoHE"
-                    ? `${fmtNumber(w.totals.jornadas)}j${w.totals.overtimeHours > 0 ? ` · ${fmtNumber(w.totals.overtimeHours)} HE` : ""}`
-                    : fmtNumber(w.totals.qty)}
-                </td>
-                <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
-                  {fmtCurrency(w.totals.amount)}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-          <tfoot>
-            <tr style={{ background: "#c6efce", fontWeight: 700 }}>
-              <td style={{ ...cell, fontWeight: 700 }}>Total día</td>
-              {dates.map((d) => {
-                const t = dayTotals.get(d);
-                return (
-                  <td key={d} style={{ ...cell, textAlign: "center", fontVariantNumeric: "tabular-nums", fontWeight: 700 }}>
-                    <div>
-                      {labor?.type === "tratoHE"
-                        ? `${fmtNumber(t.jornadas)}j${t.overtimeHours > 0 ? `/${fmtNumber(t.overtimeHours)}h` : ""}`
-                        : fmtNumber(t.qty)}
-                    </div>
-                    <div style={{ fontSize: 9, color: "#333" }}>{fmtCurrency(t.amount)}</div>
-                  </td>
-                );
-              })}
-              <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
-                {labor?.type === "tratoHE"
-                  ? `${fmtNumber(grand.jornadas)}j${grand.overtimeHours > 0 ? ` · ${fmtNumber(grand.overtimeHours)} HE` : ""}`
-                  : fmtNumber(grand.qty)}
-              </td>
-              <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
-                {fmtCurrency(grand.amount + (anyPiso ? 0 : 0))}
-              </td>
-            </tr>
-            {anyPiso && grand.pisoAmount > 0 && (
-              <tr style={{ background: "#fce4d6" }}>
-                <td style={{ ...cell, fontWeight: 700, color: "#b45309" }} colSpan={dates.length + 1}>
-                  🪙 Total pisos
-                </td>
-                <td style={{ ...cell, textAlign: "right", fontWeight: 700, color: "#b45309", fontVariantNumeric: "tabular-nums" }}>—</td>
-                <td style={{ ...cell, textAlign: "right", fontWeight: 700, color: "#b45309", fontVariantNumeric: "tabular-nums" }}>
-                  {fmtCurrency(grand.pisoAmount)}
-                </td>
-              </tr>
-            )}
-          </tfoot>
-        </table>
-      </div>
+      )}
+      {/* Modal "Ampliar": cuando hay muchos días, el inline scrollea pero igual
+          es incómodo. Este modal abre la misma grilla en un viewport más
+          grande, también con scroll. Los botones de export/print están afuera
+          (en la action row del card) — siguen funcionando porque `ref` apunta
+          al div que se monta acá cuando `expanded` es true. */}
+      {expanded && (
+        <Modal
+          open={expanded}
+          onClose={() => setExpanded(false)}
+          title={`📊 ${displayName} — Resumen por trabajador`}
+          size="xl"
+          footer={
+            <>
+              <button
+                onClick={() => setExpanded(false)}
+                className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm"
+              >
+                Cerrar
+              </button>
+              <button
+                onClick={handleCopy}
+                disabled={busy === "copy"}
+                className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)] disabled:opacity-60"
+              >
+                {busy === "copy" ? "Copiando..." : "📋 Copiar imagen"}
+              </button>
+              <button
+                onClick={handleDownload}
+                disabled={busy === "download"}
+                className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)] disabled:opacity-60"
+              >
+                {busy === "download" ? "Descargando..." : "📥 Descargar PNG"}
+              </button>
+              <button
+                onClick={handlePrint}
+                className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)]"
+              >
+                🖨 Imprimir
+              </button>
+            </>
+          }
+        >
+          <div style={{ overflow: "auto", maxHeight: "75vh" }}>
+            <div ref={ref} style={cardStyles}>
+              {gridBody}
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
