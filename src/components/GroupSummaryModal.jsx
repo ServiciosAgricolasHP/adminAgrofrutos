@@ -187,17 +187,57 @@ export default function GroupSummaryModal({ open, onClose }) {
     }
   };
 
-  const captureIndividual = async (rut) => {
+  const captureIndividual = async (rut, action = "download") => {
     const refEl = individualRefs.current[rut];
     if (!refEl) return;
-    setBusy(`ind_${rut}`);
+    setBusy(`${action}_${rut}`);
     try {
       const worker = selected.find((s) => s.id === rut);
-      const dataUrl = await toPng(refEl, { backgroundColor: "#ffffff", pixelRatio: 2 });
-      const link = document.createElement("a");
-      link.download = `resumen_${(worker?.name || "trabajador").replace(/\s+/g, "_")}.png`;
-      link.href = dataUrl;
-      link.click();
+      if (action === "copy") {
+        const blob = await toBlob(refEl, { backgroundColor: "#ffffff", pixelRatio: 2 });
+        if (!blob) throw new Error("No se pudo generar la imagen");
+        await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+        alert("Imagen copiada al portapapeles");
+      } else {
+        const dataUrl = await toPng(refEl, { backgroundColor: "#ffffff", pixelRatio: 2 });
+        const link = document.createElement("a");
+        link.download = `resumen_${(worker?.name || "trabajador").replace(/\s+/g, "_")}.png`;
+        link.href = dataUrl;
+        link.click();
+      }
+    } catch (err) {
+      alert("Error: " + (err.message || err));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  // Captura TODO (matriz + cards individuales) como una sola imagen gigante.
+  // El ref vive en el `ResultUI` wrapper para que `toPng` agarre el bloque
+  // entero. Útil para llevarse un screenshot completo del grupo.
+  const everythingRef = useRef(null);
+  const captureEverything = async (action = "copy") => {
+    if (!everythingRef.current) return;
+    setBusy(`all_${action}`);
+    try {
+      if (action === "copy") {
+        const blob = await toBlob(everythingRef.current, {
+          backgroundColor: "#ffffff",
+          pixelRatio: 2,
+        });
+        if (!blob) throw new Error("No se pudo generar la imagen");
+        await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+        alert("Imagen completa copiada al portapapeles");
+      } else {
+        const dataUrl = await toPng(everythingRef.current, {
+          backgroundColor: "#ffffff",
+          pixelRatio: 2,
+        });
+        const link = document.createElement("a");
+        link.download = `grupo_completo_${new Date().toISOString().slice(0, 10)}.png`;
+        link.href = dataUrl;
+        link.click();
+      }
     } catch (err) {
       alert("Error: " + (err.message || err));
     } finally {
@@ -263,8 +303,10 @@ export default function GroupSummaryModal({ open, onClose }) {
           showCycleCols={showCycleCols}
           matrixRef={matrixRef}
           individualRefs={individualRefs}
+          everythingRef={everythingRef}
           captureMatrix={captureMatrix}
           captureIndividual={captureIndividual}
+          captureEverything={captureEverything}
           busy={busy}
         />
       )}
@@ -373,12 +415,15 @@ function ResultUI({
   showCycleCols,
   matrixRef,
   individualRefs,
+  everythingRef,
   captureMatrix,
   captureIndividual,
+  captureEverything,
   busy,
 }) {
   return (
-    <div className="space-y-6">
+    <div>
+      <div className="space-y-6">
       {/* Matrix card */}
       <section>
         <div className="mb-2 flex items-center justify-between">
@@ -414,13 +459,37 @@ function ResultUI({
         </div>
       </section>
 
-      {/* Per-worker individual sections */}
+      {/* Per-worker individual sections. Tiene su propio botón "Copiar todos
+          los detalles" que NO incluye la matriz (la matriz se copia aparte
+          con su propio 📋). Combinar todo solía generar imágenes gigantes
+          con overflow cuando el grupo tenía 5+ personas, así que se split. */}
       <section>
-        <h3 className="mb-2 text-sm font-semibold">Detalle individual</h3>
-        <div className="space-y-4">
+        <div className="mb-2 flex items-center justify-between">
+          <h3 className="text-sm font-semibold">Detalle individual</h3>
+          <div className="flex gap-1">
+            <button
+              onClick={() => captureEverything("copy")}
+              disabled={busy === "all_copy"}
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)] disabled:opacity-60"
+              title="Copiar todos los detalles individuales en una sola imagen"
+            >
+              {busy === "all_copy" ? "Copiando..." : "📋 Copiar todos"}
+            </button>
+            <button
+              onClick={() => captureEverything("download")}
+              disabled={busy === "all_download"}
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)] disabled:opacity-60"
+              title="Descargar PNG con todos los detalles individuales"
+            >
+              {busy === "all_download" ? "..." : "📥 Todos"}
+            </button>
+          </div>
+        </div>
+        <div ref={everythingRef} className="space-y-4 bg-[var(--color-surface)] p-2">
           {selected.map((w) => {
             const wd = workerData[w.id] || {};
-            const tag = `ind_${w.id}`;
+            const copyTag = `copy_${w.id}`;
+            const dlTag = `download_${w.id}`;
             return (
               <div
                 key={w.id}
@@ -433,14 +502,24 @@ function ResultUI({
                       {formatRutForDisplay(w.id)}
                     </span>
                   </div>
-                  <button
-                    onClick={() => captureIndividual(w.id)}
-                    disabled={busy === tag}
-                    className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)] disabled:opacity-60"
-                    title="Bajar PNG de este integrante"
-                  >
-                    {busy === tag ? "..." : "📥 Foto"}
-                  </button>
+                  <div className="flex gap-1">
+                    <button
+                      onClick={() => captureIndividual(w.id, "copy")}
+                      disabled={busy === copyTag}
+                      className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)] disabled:opacity-60"
+                      title="Copiar imagen de este integrante al portapapeles"
+                    >
+                      {busy === copyTag ? "..." : "📋"}
+                    </button>
+                    <button
+                      onClick={() => captureIndividual(w.id, "download")}
+                      disabled={busy === dlTag}
+                      className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)] disabled:opacity-60"
+                      title="Bajar PNG de este integrante"
+                    >
+                      {busy === dlTag ? "..." : "📥"}
+                    </button>
+                  </div>
                 </div>
                 {(wd.data || []).length === 0 && (wd.advances || []).length === 0 ? (
                   <div className="rounded-md border border-dashed border-[var(--color-border)] bg-[var(--color-surface)] py-4 text-center text-xs text-[var(--color-muted)]">
@@ -465,6 +544,7 @@ function ResultUI({
           })}
         </div>
       </section>
+      </div>
     </div>
   );
 }

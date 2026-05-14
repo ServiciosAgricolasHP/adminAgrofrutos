@@ -1,7 +1,7 @@
 import { forwardRef, useEffect, useMemo, useRef, useState } from "react";
 import { toPng, toBlob } from "html-to-image";
 import Modal from "./Modal";
-import { workdayMapKey, getTratoTierTotals, containerLabel, tratoTypeLabel, cosechaUnit } from "../utils/cosechaCombos";
+import { workdayMapKey, getTratoTierTotals, getTratoTiers, containerLabel, tratoTypeLabel, tratoUnitLabel, cosechaUnit } from "../utils/cosechaCombos";
 import { DEFAULT_OVERTIME_RATE } from "../utils/tratoHE";
 import { cyclesService, faenasService, subfaenasService, workdaysService } from "../services";
 import { listPendingForWorkers, advanceRemaining, ADVANCE_TYPES } from "../services/advancesService";
@@ -110,10 +110,19 @@ function buildCycleRows(workerRut, cycle, workdaysByLabor, catalogs) {
         }
       }
       const containerLabels = [...containers].map((y) => containerLabel(catalogs, y)).join("/");
+      // Para trato: la unidad de medida vive en `dayPrices[labor][date].t0.unit`.
+      // Si está configurada queda en `row.tratoUnit` y el display la usa
+      // (sino cae al tipo de trato como antes).
+      let tratoUnit = null;
+      if (labor.type === "trato") {
+        const tiers = getTratoTiers(cycle.dayPrices || {}, labor.id, d);
+        tratoUnit = tiers[0]?.unit ?? null;
+      }
       rows.push({
         laborName: labor.name,
         laborType: labor.type,
         tratoType: labor.tratoType ?? 0,
+        tratoUnit,
         containerLabels,
         date: d,
         kilos,
@@ -403,10 +412,21 @@ export async function loadWorkerSummaryData(workerId, catalogs) {
       trato: rows.some((r) => r.tratoQty > 0),
       piso: rows.some((r) => (r.piso || 0) > 0),
     };
-    const tratoTypes = new Set(rows.filter((r) => r.laborType === "trato").map((r) => r.tratoType));
-    const tratoLabel = tratoTypes.size === 1
-      ? tratoTypeLabel(catalogs, [...tratoTypes][0])
-      : "Trato";
+    // Label del header/total de la columna trato: si todos los días tienen
+    // configurada la MISMA unidad (Árbol, Metro, Polín…), usamos esa. Si no
+    // (o hay mezcla), caemos al tipo de trato como antes.
+    const tratoRows = rows.filter((r) => r.laborType === "trato");
+    const tratoUnits = new Set(tratoRows.map((r) => r.tratoUnit).filter((u) => u != null));
+    let tratoLabel;
+    if (tratoUnits.size === 1) {
+      const u = [...tratoUnits][0];
+      tratoLabel = tratoUnitLabel(catalogs, u) || "Trato";
+    } else {
+      const tratoTypes = new Set(tratoRows.map((r) => r.tratoType));
+      tratoLabel = tratoTypes.size === 1
+        ? tratoTypeLabel(catalogs, [...tratoTypes][0])
+        : "Trato";
+    }
     const kilosLabel = cosechaUnit(catalogs, cosechaContainers);
     return {
       cycle: c,

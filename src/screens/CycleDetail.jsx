@@ -3256,6 +3256,30 @@ export default function CycleDetail() {
                             placeholder="precio"
                             className="w-20 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-1 py-0.5 text-right text-[10px] tabular-nums outline-none focus:border-[var(--color-accent)] disabled:opacity-50"
                           />
+                          {/* Selector de unidad del trato — se guarda junto
+                              al precio del tier. "—" = sin unidad (display
+                              cae a vacío, compat con datos antes del feature). */}
+                          <select
+                            disabled={readOnly}
+                            value={t.unit == null ? "" : String(t.unit)}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              persistComboConfig(
+                                activeLabor.id,
+                                d,
+                                t.key,
+                                { unit: v === "" ? null : Number(v) },
+                                true,
+                              );
+                            }}
+                            title="Unidad de medida — qué representa cada qty (Metro, Polín, Planta, etc.)"
+                            className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-1 py-0.5 text-[10px] outline-none focus:border-[var(--color-accent)] disabled:opacity-50"
+                          >
+                            <option value="">—</option>
+                            {(catalogs.tratoUnits || []).map((u) => (
+                              <option key={u.value} value={u.value}>{u.label}</option>
+                            ))}
+                          </select>
                           <div className="flex overflow-hidden rounded border border-[var(--color-border)] text-[10px]">
                             <button
                               disabled={readOnly}
@@ -3952,27 +3976,51 @@ function AddComboModal({ open, onClose, catalogs, existingCombos, date, onAdd, o
 function CatalogsModal({ open, onClose, catalogs, onAddEntry, onRenameEntry }) {
   return (
     <Modal open={open} onClose={onClose} title="Catálogos globales" size="xl">
-      <p className="mb-4 text-sm text-[var(--color-muted)]">
-        Estos catálogos son compartidos por toda la aplicación. Cualquier supervisor puede agregar entradas; renombrar afecta los datos históricos.
+      <p className="mb-5 text-sm text-[var(--color-muted)]">
+        Estos catálogos son compartidos por toda la aplicación. Cualquier supervisor puede
+        agregar entradas; renombrar afecta los datos históricos (los workdays guardan el
+        número de índice, no el label).
       </p>
-      <div className="grid gap-6 md:grid-cols-3">
+
+      <CatalogGroup
+        emoji="🫐"
+        title="Cosecha"
+        description="Definen cómo se clasifica cada kilo cosechado: a qué calidad y en qué envase se midió. Aparecen como selectores al cargar producción de una labor de tipo cosecha, y se muestran en los resúmenes y comprobantes."
+      >
         <CatalogSection
-          title="Calidades" subtitle="Cosechas"
+          title="Calidades"
+          subtitle="Categoría comercial de cada kilo (Exportación, IQF, Repaso, Consumo, Semilla…)"
           field="qualities" entries={catalogs.qualities || []}
           onAddEntry={onAddEntry} onRenameEntry={onRenameEntry}
         />
         <CatalogSection
-          title="Envases" subtitle="Cosechas"
+          title="Envases"
+          subtitle="Recipiente donde se midió (saco, capacho, bandeja, kilo). Define la unidad en los resúmenes."
           field="containers" entries={catalogs.containers || []}
           onAddEntry={onAddEntry} onRenameEntry={onRenameEntry}
         />
+      </CatalogGroup>
+
+      <CatalogGroup
+        emoji="✂️"
+        title="Trato"
+        description="Definen qué se hace a trato (poda, amarre…) y cómo se cuenta el qty diario (por metro, por polín, por planta…). Aparecen en la configuración de la labor y, la unidad, junto al precio por día."
+      >
         <CatalogSection
-          title="Tipos de trato" subtitle="Labores a trato"
+          title="Tipos de trato"
+          subtitle="Etiqueta de la labor a trato (Poda, Amarre, Desmalezado, Carpas…). Se elige al crear/editar una labor de tipo trato."
           field="tratoTypes" entries={catalogs.tratoTypes || []}
           onAddEntry={onAddEntry} onRenameEntry={onRenameEntry}
         />
-      </div>
-      <div className="mt-4 flex justify-end">
+        <CatalogSection
+          title="Unidades de trato"
+          subtitle="Qué representa el qty cada día (Metro, Polín, Planta, Hilera…). Se elige junto al precio en el panel de Precios por día."
+          field="tratoUnits" entries={catalogs.tratoUnits || []}
+          onAddEntry={onAddEntry} onRenameEntry={onRenameEntry}
+        />
+      </CatalogGroup>
+
+      <div className="mt-6 flex justify-end">
         <button onClick={onClose} className="rounded-md bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)] hover:bg-[var(--color-accent-hover)]">
           Cerrar
         </button>
@@ -3988,7 +4036,7 @@ function CatalogSection({ title, subtitle, field, entries, onAddEntry, onRenameE
   return (
     <div>
       <h3 className="mb-1 text-base font-semibold">{title}</h3>
-      <p className="mb-3 text-xs text-[var(--color-muted)]">{subtitle}</p>
+      <p className="mb-3 text-xs leading-snug text-[var(--color-muted)]">{subtitle}</p>
       <div className="space-y-1.5 max-h-80 overflow-auto pr-1">
         {entries.map((e) => (
           <div key={e.value} className="flex items-center gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2.5 py-1.5 text-sm">
@@ -4051,6 +4099,24 @@ function CatalogSection({ title, subtitle, field, entries, onAddEntry, onRenameE
         </button>
       </div>
     </div>
+  );
+}
+
+// Wrapper visual para agrupar catálogos relacionados (Cosecha / Trato) dentro
+// del modal de catálogos. Pone un header con emoji + título + descripción del
+// dominio, y un fondo sutil para separar visualmente del bloque siguiente.
+function CatalogGroup({ emoji, title, description, children }) {
+  return (
+    <section className="mb-5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)]/50 p-4">
+      <div className="mb-3">
+        <h2 className="flex items-center gap-2 text-lg font-semibold tracking-tight">
+          <span aria-hidden>{emoji}</span>
+          <span>{title}</span>
+        </h2>
+        <p className="mt-1 text-xs leading-relaxed text-[var(--color-muted)]">{description}</p>
+      </div>
+      <div className="grid gap-5 md:grid-cols-2">{children}</div>
+    </section>
   );
 }
 

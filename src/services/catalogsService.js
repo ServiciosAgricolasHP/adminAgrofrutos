@@ -4,7 +4,7 @@ import { logAction } from "./logger";
 
 const COLLECTION = "catalogs";
 
-export const CATALOG_NAMES = ["qualities", "containers", "tratoTypes"];
+export const CATALOG_NAMES = ["qualities", "containers", "tratoTypes", "tratoUnits"];
 
 export const CATALOG_DEFAULTS = {
   qualities: [
@@ -23,6 +23,17 @@ export const CATALOG_DEFAULTS = {
     { value: 1, label: "Amarre" },
     { value: 2, label: "Desmalezado" },
     { value: 3, label: "Carpas" },
+  ],
+  // Unidad de medida que representa el `qty` de un workday de trato en un día
+  // dado. Convive con el precio en `dayPrices[labor][date].tN.unit`. El valor 0
+  // ("Unidad") es el default genérico — se usa cuando no se elige otra cosa
+  // (mantiene compat con cycles previos al feature).
+  tratoUnits: [
+    { value: 0, label: "Unidad" },
+    { value: 1, label: "Metro" },
+    { value: 2, label: "Polín" },
+    { value: 3, label: "Planta" },
+    { value: 4, label: "Hilera" },
   ],
 };
 

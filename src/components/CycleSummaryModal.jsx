@@ -7,9 +7,12 @@ import {
   comboLabel,
   getDaySingle,
   getTratoTierTotals,
+  getTratoTiers,
+  tratoUnitLabel,
   workdayMapKey,
   tratoTypeLabel,
   cosechaUnit,
+  formatLaborDayPrice,
 } from "../utils/cosechaCombos";
 import { isRedDay } from "../utils/tratoHE";
 import { tripsService } from "../services/transportsService";
@@ -38,12 +41,22 @@ const LOGO_URL = `${import.meta.env.BASE_URL}logo.png`;
 
 // Encabezado de la columna principal según tipo de labor. tratoHE muestra
 // "Jornadas / HE" porque agrega dos métricas en la misma columna. Para trato
-// y cosecha tomamos la unidad del catálogo (ej. "Poda", "Saco") en vez de
-// literales fijos.
-function laborQtyUnit(labor, catalogs, containers) {
+// y cosecha tomamos la unidad del catálogo en vez de literales fijos.
+//
+// Para trato: si todos los días del ciclo usan la MISMA unidad configurada
+// (ej. "Árbol", "Metro", "Polín"), usamos esa. Si hay mezcla o ningún día
+// tiene unidad, caemos al tipo de trato (Poda, Amarre…) como fallback.
+function laborQtyUnit(labor, catalogs, containers, tratoUnitsSet) {
   const type = labor?.type;
   if (type === "cosecha") return cosechaUnit(catalogs, containers);
-  if (type === "trato") return tratoTypeLabel(catalogs, labor?.tratoType ?? 0);
+  if (type === "trato") {
+    if (tratoUnitsSet && tratoUnitsSet.size === 1) {
+      const u = [...tratoUnitsSet][0];
+      const label = u == null ? null : tratoUnitLabel(catalogs, u);
+      if (label) return label;
+    }
+    return tratoTypeLabel(catalogs, labor?.tratoType ?? 0);
+  }
   // Para tratoHE el unit primario son jornadas. Las horas extras viven
   // adentro de la línea de monto ($amount + Xh), no en una columna aparte.
   if (type === "tratoHE") return "Jornadas";
@@ -51,9 +64,16 @@ function laborQtyUnit(labor, catalogs, containers) {
 }
 
 // Texto a mostrar en la celda de métrica según tipo de labor.
-function formatRowMetric(row, type) {
+function formatRowMetric(row, type, catalogs) {
   if (type === "cosecha") return fmtNumber(row.qty);
-  if (type === "trato") return fmtNumber(row.qty);
+  if (type === "trato") {
+    // La unidad sale del config del día (`row.unit`). Si no hay, solo qty.
+    if (row.unit != null) {
+      const label = tratoUnitLabel(catalogs, row.unit) || "";
+      return `${fmtNumber(row.qty)} ${label}`.trim();
+    }
+    return fmtNumber(row.qty);
+  }
   if (type === "tratoHE") {
     const parts = [];
     if (row.qty > 0) parts.push(`${fmtNumber(row.qty)} j`);
@@ -63,12 +83,31 @@ function formatRowMetric(row, type) {
   return fmtNumber(row.qty);
 }
 
-function formatTotalsMetric(totals, type) {
+// Total agrupado por unidad para trato: si todos los rows comparten la
+// misma unidad, devuelve "20 metros". Si hay mezcla, "12 metros + 8 polines".
+// Si nadie tiene unidad configurada, cae al qty plano.
+function formatTotalsMetric(totals, type, rows, catalogs) {
   if (type === "tratoHE") {
     const parts = [];
     if (totals.qty > 0) parts.push(`${fmtNumber(totals.qty)} j`);
     if (totals.overtimeHours > 0) parts.push(`${fmtNumber(totals.overtimeHours)} HE`);
     return parts.join(" + ");
+  }
+  if (type === "trato" && rows) {
+    const anyHasUnit = rows.some((r) => r.unit != null);
+    if (anyHasUnit) {
+      const byUnit = new Map();
+      for (const r of rows) {
+        const u = r.unit ?? null;
+        byUnit.set(u, (byUnit.get(u) || 0) + (Number(r.qty) || 0));
+      }
+      return [...byUnit.entries()]
+        .map(([u, q]) => {
+          const label = u == null ? "" : tratoUnitLabel(catalogs, u) || "";
+          return `${fmtNumber(q)}${label ? ` ${label}` : ""}`;
+        })
+        .join(" + ");
+    }
   }
   return fmtNumber(totals.qty);
 }
@@ -77,14 +116,27 @@ function formatTotalsMetric(totals, type) {
 // Cada row trae además `pisoAmount` (suma de workdays pisoOnly del día) y
 // `pisoCount` (cuántas personas tuvieron piso). El `amount` total incluye
 // la producción + piso.
-function buildDailyRows(labor, wdMap) {
+//
+// Para trato: si el día/labor tiene una `unit` configurada en
+// `dayPrices[labor.id][date].t0.unit`, queda en `row.unit` (índice del
+// catálogo `tratoUnits`). Display la convierte a label vía `tratoUnitLabel`.
+function buildDailyRows(labor, wdMap, dayPrices = {}) {
   const byDate = new Map();
   const containers = new Set();
+  const isTrato = labor?.type === "trato";
   for (const k in wdMap) {
     const wd = wdMap[k];
     const d = wd.date;
     if (!byDate.has(d)) {
-      byDate.set(d, { date: d, qty: 0, overtimeHours: 0, amount: 0, pisoAmount: 0, pisoCount: 0, workersSet: new Set(), pisoWorkersSet: new Set() });
+      const row = { date: d, qty: 0, overtimeHours: 0, amount: 0, pisoAmount: 0, pisoCount: 0, workersSet: new Set(), pisoWorkersSet: new Set() };
+      if (isTrato) {
+        // Lee la unidad del primer tier — en práctica cada día usa una
+        // sola unidad. Si más adelante un tier diferente del mismo día
+        // usara otra, el display lo trata como mixto (formatRowMetric).
+        const tiers = getTratoTiers(dayPrices, labor.id, d);
+        row.unit = tiers[0]?.unit ?? null;
+      }
+      byDate.set(d, row);
     }
     const g = byDate.get(d);
     if (wd.pisoOnly) {
@@ -337,11 +389,23 @@ export default function CycleSummaryModal({
     if (!cycle?.labors) return [];
     return cycle.labors.map((l) => {
       const wdMap = workdaysByLabor[l.id] || {};
-      const { rows, containers } = buildDailyRows(l, wdMap);
+      const { rows, containers } = buildDailyRows(l, wdMap, dayPrices);
       const totals = laborTotals(rows);
-      return { labor: l, rows, totals, unit: laborQtyUnit(l, catalogs, containers) };
+      // Set de unidades únicas usadas en este ciclo para esta labor de trato.
+      // Si todas las filas comparten una sola unidad, laborQtyUnit la elige
+      // como header de columna en vez del tratoType.
+      const tratoUnitsSet =
+        l.type === "trato"
+          ? new Set(rows.map((r) => r.unit).filter((u) => u != null))
+          : null;
+      return {
+        labor: l,
+        rows,
+        totals,
+        unit: laborQtyUnit(l, catalogs, containers, tratoUnitsSet),
+      };
     });
-  }, [cycle?.labors, workdaysByLabor, catalogs]);
+  }, [cycle?.labors, workdaysByLabor, catalogs, dayPrices]);
 
   // Grilla workers × dates por labor — segunda sección imprimible. Cada
   // labor rinde su propia infografía con botones de copiar/imprimir.
@@ -554,6 +618,7 @@ export default function CycleSummaryModal({
           carriers={mode === "cobrar" ? cobrarCarriers : transportData}
           carrierById={carrierById}
           grandTotal={mode === "cobrar" ? grandTotalCobrar : grandTotalPagar}
+          catalogs={catalogs}
         />
         {/* Resumen por trabajador (workers × dates), una infografía por
             labor. Solo se muestra en modo "pagar" — el cobrar es por
@@ -570,6 +635,7 @@ export default function CycleSummaryModal({
             dates={g.dates}
             anyPiso={g.anyPiso}
             titles={titles}
+            dayPrices={dayPrices}
           />
         ))}
       </div>
@@ -737,7 +803,7 @@ function CobrarEditor({ labors, carriers, carrierById, onLaborChange, onCarrierC
 // ============================================================
 
 const PrintableSummary = forwardRef(function PrintableSummary(
-  { mode, titles, labors, carriers, carrierById, grandTotal },
+  { mode, titles, labors, carriers, carrierById, grandTotal, catalogs },
   ref,
 ) {
   return (
@@ -767,6 +833,7 @@ const PrintableSummary = forwardRef(function PrintableSummary(
             totals={ld.totals}
             mode={mode}
             chargeRate={mode === "cobrar" ? ld.rate : null}
+            catalogs={catalogs}
           />
         );
       })}
@@ -807,7 +874,7 @@ const PrintableSummary = forwardRef(function PrintableSummary(
   );
 });
 
-function LaborTable({ displayName, unit, laborType, rows, totals, mode, chargeRate }) {
+function LaborTable({ displayName, unit, laborType, rows, totals, mode, chargeRate, catalogs }) {
   if (rows.length === 0) return null;
   const showPiso = (totals.pisoAmount || 0) > 0;
   const colSpanForUnit = 1;
@@ -842,7 +909,7 @@ function LaborTable({ displayName, unit, laborType, rows, totals, mode, chargeRa
                 <td style={cell}>{displayName}</td>
                 <td style={cell}>{dateLabel(r.date)}</td>
                 <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
-                  {formatRowMetric(r, laborType)}
+                  {formatRowMetric(r, laborType, catalogs)}
                 </td>
                 <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{rate > 0 ? fmtCurrency(rate) : ""}</td>
                 <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(valorTotal)}</td>
@@ -859,7 +926,7 @@ function LaborTable({ displayName, unit, laborType, rows, totals, mode, chargeRa
           <tr style={{ background: "#c6efce" }}>
             <td style={{ ...cell, fontWeight: 700 }} colSpan={2}>Subtotal {displayName}</td>
             <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }} colSpan={colSpanForUnit}>
-              {formatTotalsMetric(totals, laborType)}
+              {formatTotalsMetric(totals, laborType, rows, catalogs)}
             </td>
             <td style={cell}></td>
             <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(totals.amount)}</td>
@@ -946,6 +1013,7 @@ function LaborWorkerGrid({
   dates,
   anyPiso,
   titles,
+  dayPrices = {},
 }) {
   const ref = useRef(null);
   const [busy, setBusy] = useState("");
@@ -1130,7 +1198,20 @@ function LaborWorkerGrid({
             <tr style={{ background: "#9dc3e6" }}>
               <th style={cellH}>Trabajador</th>
               {dates.map((d) => (
-                <th key={d} style={{ ...cellH, textAlign: "center", minWidth: 70 }}>{dateLabel(d)}</th>
+                <th key={d} style={{ ...cellH, textAlign: "center", minWidth: 70 }}>
+                  <div>{dateLabel(d)}</div>
+                  {(() => {
+                    // Precio + unidad configurado para ese día (ej. "$300/árbol",
+                    // "$45/saco"). Vacío si no hay precio o si es tratoHE.
+                    const priceLine = formatLaborDayPrice(labor, d, dayPrices, catalogs);
+                    if (!priceLine) return null;
+                    return (
+                      <div style={{ fontSize: 9, fontWeight: 400, color: "#555", marginTop: 2 }}>
+                        {priceLine}
+                      </div>
+                    );
+                  })()}
+                </th>
               ))}
               <th style={{ ...cellH, textAlign: "right", background: "#7eb0d8", whiteSpace: "nowrap" }}>Total {unit}</th>
               {labor?.type === "tratoHE" && (

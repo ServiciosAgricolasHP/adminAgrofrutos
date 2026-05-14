@@ -24,7 +24,7 @@ import {
 } from "../services/advancesService";
 import { formatRutForDisplay } from "../utils/rutUtils";
 import { bankName, ACCOUNT_TYPES, isCashBank, CASH_BANK_CODE } from "../utils/banks";
-import { getTratoTierTotals, getDayCombos, getDaySingle, getTratoTiers, tratoTypeLabel, cosechaUnit, comboLabel, containerLabel } from "../utils/cosechaCombos";
+import { getTratoTierTotals, getDayCombos, getDaySingle, getTratoTiers, tratoTypeLabel, tratoUnitLabel, cosechaUnit, comboLabel, containerLabel, formatLaborDayPrice } from "../utils/cosechaCombos";
 import { useCatalogs } from "../contexts/CatalogsContext";
 import {
   aggregateWorkerAmounts,
@@ -1713,6 +1713,7 @@ function buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut, catalogs
     const dates = new Set();
     const workersInLabor = new Set();
     const containers = new Set(); // envases vistos en cosecha — define la unidad
+    const tratoUnits = new Set(); // unidades del tier-day para trato (Árbol, Metro…)
     let anyPiso = false;
     for (const wd of wdsLabor) {
       const key = `${wd.workerRut}|${wd.date}`;
@@ -1759,6 +1760,13 @@ function buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut, catalogs
         const t = getTratoTierTotals(wd);
         c.jornadas += t.qty;
         c.amount += t.amount;
+        // Recolectar las unidades configuradas en los tiers del día — se
+        // denormalizan al snapshot para que el render del comprobante use
+        // la unidad (Árbol, Metro, …) en vez del tipo (Poda) cuando haya.
+        const tiersForDay = getTratoTiers(dayPrices, labor.id, wd.date);
+        for (const tier of tiersForDay) {
+          if (tier.unit != null) tratoUnits.add(tier.unit);
+        }
         if (wd.tiers) {
           for (const [idx, tt] of Object.entries(wd.tiers)) {
             const i = Number(idx);
@@ -1871,6 +1879,7 @@ function buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut, catalogs
       laborType: labor.type,
       tratoType: labor.tratoType ?? 0,
       cosechaContainers: [...containers],
+      tratoUnits: [...tratoUnits],
       anyPiso,
       dates: sortedDates,
       rows,
@@ -1892,53 +1901,8 @@ function fmtMoneyShort(v) {
   return "$" + (Number(v) || 0).toLocaleString("es-CL");
 }
 
-// Pull the unit price(s) configured for a labor on a given date.
-// Returns a short string suitable for rendering under the day header.
-// Las unidades vienen del catálogo: para cosecha usamos el nombre del envase
-// (saco, caja, kilo); para trato el nombre del tratoType (poda, desmalezado).
-// `tratoHE` no muestra precio sugerido (el monto del día lo define la planilla).
-function formatLaborDayPrice(labor, date, dayPrices, catalogs = {}) {
-  if (!labor) return "";
-  if (labor.type === "cosecha") {
-    const combos = getDayCombos(dayPrices, labor.id, date, "unit");
-    if (!combos.length) return "";
-    if (combos.length === 1) {
-      const c = combos[0];
-      if (!c.price) return "";
-      if (c.mode === "flat") return `${fmtMoneyShort(c.price)}/día`;
-      const unit = containerLabel(catalogs, c.y).toLowerCase();
-      return `${fmtMoneyShort(c.price)}/${unit}`;
-    }
-    return combos
-      .filter((c) => c.price)
-      .map((c) => {
-        const lbl = comboLabel(catalogs, c.x, c.y);
-        if (c.mode === "flat") return `${lbl}: ${fmtMoneyShort(c.price)}/día`;
-        return `${lbl}: ${fmtMoneyShort(c.price)}`;
-      })
-      .join(" · ");
-  }
-  if (labor.type === "trato") {
-    const tiers = getTratoTiers(dayPrices, labor.id, date, "unit");
-    const used = tiers.filter((t) => t.price);
-    if (!used.length) return "";
-    const tratoUnit = tratoTypeLabel(catalogs, labor.tratoType ?? 0).toLowerCase();
-    if (used.length === 1) {
-      const t = used[0];
-      if (t.mode === "flat") return `${fmtMoneyShort(t.price)}/día`;
-      return `${fmtMoneyShort(t.price)}/${tratoUnit}`;
-    }
-    return used.map((t) => `T${t.index + 1}: ${fmtMoneyShort(t.price)}`).join(" · ");
-  }
-  if (labor.type === "main" || labor.type === "supervision" || labor.type === "extra") {
-    const cfg = getDaySingle(dayPrices, labor.id, date, "normal");
-    const price = Number(cfg?.price) || Number(labor.baseDayDefault) || 0;
-    if (!price) return "";
-    return fmtMoneyShort(price) + "/día";
-  }
-  // tratoHE: no precio sugerido — el monto lo define la planilla del día.
-  return "";
-}
+// `formatLaborDayPrice` se exporta desde `utils/cosechaCombos` para que
+// CycleSummaryModal lo comparta con el comprobante de pago.
 
 function fmtDateShort(dateStr) {
   if (!dateStr) return "";
@@ -2170,13 +2134,19 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
           if (laborSnapshots.length === 0) return "";
           const laborTables = laborSnapshots
             .map((ls) => {
-              // Para trato usamos el label del catálogo (ej. "Poda") en vez
-              // del genérico "A trato" / "jorn." que oscurece de qué labor se
-              // trata cuando hay varias del mismo tipo. Para cosecha la
-              // unidad sale del envase del catálogo (ej. "Saco" vs "Kilo").
-              const tratoLabel = ls.laborType === "trato"
-                ? tratoTypeLabel(catalogs, ls.tratoType ?? 0)
-                : "";
+              // Para trato priorizamos la unidad de medida del tier-day
+              // (Árbol, Metro, Polín…) cuando esté configurada. Si no, o si
+              // el ciclo tiene mezcla de unidades, caemos al tipo de trato
+              // (Poda, Amarre…). Para cosecha la unidad sale del envase.
+              let tratoLabel = "";
+              if (ls.laborType === "trato") {
+                const units = ls.tratoUnits || [];
+                if (units.length === 1) {
+                  tratoLabel = tratoUnitLabel(catalogs, units[0]) || tratoTypeLabel(catalogs, ls.tratoType ?? 0);
+                } else {
+                  tratoLabel = tratoTypeLabel(catalogs, ls.tratoType ?? 0);
+                }
+              }
               const kilosUnit = ls.laborType === "cosecha"
                 ? cosechaUnit(catalogs, new Set(ls.cosechaContainers || []))
                 : "";

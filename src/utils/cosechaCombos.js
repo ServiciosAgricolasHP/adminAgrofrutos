@@ -53,6 +53,16 @@ export const tratoTypeLabel = (catalogs, t) => {
   return cat.find((e) => e.value === t)?.label || `Trato ${t}`;
 };
 
+// Unidad de medida de un workday de trato (Metro / Polín / Planta / etc.). La
+// unidad vive en el config de precios del día (`dayPrices[labor][date].tN.unit`)
+// junto al precio. Devuelve el índice si está, o `null` si no fue configurada
+// — el display puede caer a "Unidad" o simplemente omitirla.
+export const tratoUnitLabel = (catalogs, u) => {
+  if (u == null) return null;
+  const cat = catalogs?.tratoUnits || [];
+  return cat.find((e) => e.value === u)?.label || `Unidad ${u}`;
+};
+
 export const comboLabel = (catalogs, x, y) =>
   `${qualityLabel(catalogs, x)} / ${containerLabel(catalogs, y)}`;
 
@@ -143,7 +153,15 @@ export function getTratoTiers(dayPrices, laborId, date, defaultMode = "unit") {
   const normalized = normalizeTratoDayPrices(entry, defaultMode);
   return Object.entries(normalized)
     .filter(([k]) => k.startsWith("t") && /^\d+$/.test(k.slice(1)))
-    .map(([k, v]) => ({ key: k, index: Number(k.slice(1)), price: Number(v?.price) || 0, mode: v?.mode || defaultMode }))
+    .map(([k, v]) => ({
+      key: k,
+      index: Number(k.slice(1)),
+      price: Number(v?.price) || 0,
+      mode: v?.mode || defaultMode,
+      // Unidad de medida del trato para ese día/tier. `null` o `undefined` =
+      // sin unidad configurada (display ocultará la etiqueta).
+      unit: v?.unit ?? null,
+    }))
     .sort((a, b) => a.index - b.index);
 }
 
@@ -156,6 +174,63 @@ export function normalizeTratoWorkday(wd) {
   const qty = Number(wd.qty) || 0;
   const amount = Number(wd.amount) || 0;
   return { ...wd, tiers: { "0": { qty, amount } }, totalAmount: amount };
+}
+
+// Formato compacto del precio configurado para (labor, día). Devuelve un
+// string corto tipo "$300/árbol" para mostrar bajo el header de la fecha en
+// los resúmenes / comprobantes. Para cosecha cubre combos calidad×envase.
+// Para trato prioriza la `unit` del tier (Árbol/Metro/…) sobre el tratoType
+// (Poda/Amarre/…). Devuelve "" si no hay precio configurado.
+//
+// Convención: el resultado NO incluye prefijo de moneda mas allá del $ — se
+// pega tal cual a una etiqueta visual sin necesitar reformatear.
+const _fmtMoneyShort = (v) => "$" + (Number(v) || 0).toLocaleString("es-CL");
+
+export function formatLaborDayPrice(labor, date, dayPrices, catalogs = {}) {
+  if (!labor) return "";
+  if (labor.type === "cosecha") {
+    const combos = getDayCombos(dayPrices, labor.id, date, "unit");
+    if (!combos.length) return "";
+    if (combos.length === 1) {
+      const c = combos[0];
+      if (!c.price) return "";
+      if (c.mode === "flat") return `${_fmtMoneyShort(c.price)}/día`;
+      const unit = containerLabel(catalogs, c.y).toLowerCase();
+      return `${_fmtMoneyShort(c.price)}/${unit}`;
+    }
+    return combos
+      .filter((c) => c.price)
+      .map((c) => {
+        const lbl = comboLabel(catalogs, c.x, c.y);
+        if (c.mode === "flat") return `${lbl}: ${_fmtMoneyShort(c.price)}/día`;
+        return `${lbl}: ${_fmtMoneyShort(c.price)}`;
+      })
+      .join(" · ");
+  }
+  if (labor.type === "trato") {
+    const tiers = getTratoTiers(dayPrices, labor.id, date, "unit");
+    const used = tiers.filter((t) => t.price);
+    if (!used.length) return "";
+    const unitFor = (t) => {
+      const u = t.unit;
+      const label = u == null ? null : tratoUnitLabel(catalogs, u);
+      if (label) return label.toLowerCase();
+      return tratoTypeLabel(catalogs, labor.tratoType ?? 0).toLowerCase();
+    };
+    if (used.length === 1) {
+      const t = used[0];
+      if (t.mode === "flat") return `${_fmtMoneyShort(t.price)}/día`;
+      return `${_fmtMoneyShort(t.price)}/${unitFor(t)}`;
+    }
+    return used.map((t) => `T${t.index + 1}: ${_fmtMoneyShort(t.price)}/${unitFor(t)}`).join(" · ");
+  }
+  if (labor.type === "main" || labor.type === "supervision" || labor.type === "extra") {
+    const cfg = getDaySingle(dayPrices, labor.id, date, "normal");
+    const price = Number(cfg?.price) || Number(labor.baseDayDefault) || 0;
+    if (!price) return "";
+    return _fmtMoneyShort(price) + "/día";
+  }
+  return "";
 }
 
 // Get total qty and amount from a workday record (supports both legacy and new format)
