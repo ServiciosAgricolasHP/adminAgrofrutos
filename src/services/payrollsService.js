@@ -1,4 +1,4 @@
-import { writeBatch, doc, serverTimestamp } from "firebase/firestore";
+import { doc, serverTimestamp, updateDoc } from "firebase/firestore";
 import { db, auth } from "../firebase";
 import { createService } from "./firestoreBase";
 import { workdaysService } from "./index";
@@ -36,16 +36,40 @@ export async function unmarkWorkdaysPaid(workdayIds) {
   await batchUpdateWorkdays(workdayIds, { paidAt: null, paidBy: null });
 }
 
+// Aplica un patch a una lista de workdays. Usa `updateDoc` individual con
+// concurrencia controlada en vez de `writeBatch.update`. Motivo: si algún
+// workday ya no existe (caso típico: un admin eliminó el ciclo en cascada y
+// los workdays se borraron, pero la nómina sigue refernciándolos en
+// `workdayIds`), `batch.update` falla atómicamente con "No document to
+// update". Con `updateDoc` por doc podemos tragar el `not-found` puntual y
+// seguir limpiando el resto, permitiendo borrar/revertir la nómina sin
+// dejarla huérfana. Para los survivors, esto sigue siendo rápido por la
+// concurrencia (Promise.all en chunks).
 async function batchUpdateWorkdays(ids, patch) {
   if (!ids || ids.length === 0) return;
-  const chunkSize = 450;
-  for (let i = 0; i < ids.length; i += chunkSize) {
-    const batch = writeBatch(db);
-    const chunk = ids.slice(i, i + chunkSize);
-    for (const id of chunk) {
-      batch.update(doc(db, "workdays", id), patch);
-    }
-    await batch.commit();
+  const concurrency = 20;
+  let skipped = 0;
+  for (let i = 0; i < ids.length; i += concurrency) {
+    const chunk = ids.slice(i, i + concurrency);
+    await Promise.all(
+      chunk.map(async (id) => {
+        try {
+          await updateDoc(doc(db, "workdays", id), patch);
+        } catch (err) {
+          const msg = String(err?.message || "");
+          if (err?.code === "not-found" || /No document to update/.test(msg)) {
+            skipped += 1;
+            return;
+          }
+          throw err;
+        }
+      }),
+    );
+  }
+  if (skipped > 0) {
+    console.warn(
+      `batchUpdateWorkdays: ${skipped}/${ids.length} workdays ya no existen (probablemente borrados con su ciclo). Continuando con los demás.`,
+    );
   }
   workdaysService.invalidate();
 }

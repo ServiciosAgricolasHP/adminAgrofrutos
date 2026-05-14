@@ -617,12 +617,20 @@ export default function Payroll() {
   };
   const onDelete = async () => {
     if (!confirmDelete) return;
-    await untagWorkdaysFromPayroll(confirmDelete.workdayIds || []);
-    await restoreAdvancesFromPayroll(confirmDelete.advanceIds || [], confirmDelete.id);
-    await payrollsService.remove(confirmDelete.id);
-    // Best-effort cleanup of the snapshot. Old nominas may not have one.
-    try { await payrollSnapshotsService.remove(confirmDelete.id); } catch { /* noop */ }
-    setConfirmDelete(null);
+    const id = confirmDelete.id;
+    try {
+      await untagWorkdaysFromPayroll(confirmDelete.workdayIds || []);
+      await restoreAdvancesFromPayroll(confirmDelete.advanceIds || [], id);
+      await payrollsService.remove(id);
+      // Best-effort cleanup of the snapshot. Old nominas may not have one.
+      try { await payrollSnapshotsService.remove(id); } catch { /* noop */ }
+    } catch (err) {
+      console.error("Error al eliminar nómina:", err);
+      alert(`Error al eliminar la nómina: ${err?.message || err}`);
+      return;
+    } finally {
+      setConfirmDelete(null);
+    }
     await load();
   };
   const onRedownload = async (p) => {
