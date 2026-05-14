@@ -44,7 +44,9 @@ function laborQtyUnit(labor, catalogs, containers) {
   const type = labor?.type;
   if (type === "cosecha") return cosechaUnit(catalogs, containers);
   if (type === "trato") return tratoTypeLabel(catalogs, labor?.tratoType ?? 0);
-  if (type === "tratoHE") return "Jornadas / HE";
+  // Para tratoHE el unit primario son jornadas. Las horas extras viven
+  // adentro de la línea de monto ($amount + Xh), no en una columna aparte.
+  if (type === "tratoHE") return "Jornadas";
   return "Jornadas";
 }
 
@@ -1105,7 +1107,7 @@ function LaborWorkerGrid({
       <table style={{ borderCollapse: "collapse", width: "100%" }}>
           <thead>
             <tr style={{ background: "#9dc3e6" }}>
-              <th style={{ ...cellH, position: "sticky", left: 0 }}>Trabajador</th>
+              <th style={cellH}>Trabajador</th>
               {dates.map((d) => (
                 <th key={d} style={{ ...cellH, textAlign: "center", minWidth: 70 }}>{dateLabel(d)}</th>
               ))}
@@ -1126,9 +1128,7 @@ function LaborWorkerGrid({
                   </td>
                 ))}
                 <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
-                  {labor?.type === "tratoHE"
-                    ? (w.totals.overtimeHours > 0 ? `+${fmtNumber(w.totals.overtimeHours)}h` : "")
-                    : fmtNumber(w.totals.qty)}
+                  {fmtNumber(w.totals.qty)}
                 </td>
                 <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
                   {labor?.type === "tratoHE" && w.totals.overtimeHours > 0
@@ -1155,9 +1155,7 @@ function LaborWorkerGrid({
                 );
               })}
               <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
-                {labor?.type === "tratoHE"
-                  ? (grand.overtimeHours > 0 ? `+${fmtNumber(grand.overtimeHours)}h` : "")
-                  : fmtNumber(grand.qty)}
+                {fmtNumber(grand.qty)}
               </td>
               <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
                 {labor?.type === "tratoHE" && grand.overtimeHours > 0
