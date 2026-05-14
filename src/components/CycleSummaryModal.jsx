@@ -952,11 +952,22 @@ function LaborWorkerGrid({
 
   const filename = `resumen_trabajadores_${(labor?.name || "labor").replace(/[/\s]+/g, "_")}.png`;
 
+  // Cuando la grilla es más ancha que el viewport, `html-to-image` puede
+  // truncar al `offsetWidth` del elemento. Forzamos `width` / `height` desde
+  // `scrollWidth` / `scrollHeight` para garantizar que el PNG contenga la
+  // tabla completa, incluyendo las columnas de la derecha.
+  const fullCaptureOpts = () => ({
+    backgroundColor: "#ffffff",
+    pixelRatio: 2,
+    width: ref.current?.scrollWidth || undefined,
+    height: ref.current?.scrollHeight || undefined,
+  });
+
   const handleCopy = async () => {
     if (!ref.current) return;
     setBusy("copy");
     try {
-      const blob = await toBlob(ref.current, { backgroundColor: "#ffffff", pixelRatio: 2 });
+      const blob = await toBlob(ref.current, fullCaptureOpts());
       if (!blob) throw new Error("No se pudo generar la imagen");
       await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
       alert("Imagen copiada al portapapeles");
@@ -970,7 +981,7 @@ function LaborWorkerGrid({
     if (!ref.current) return;
     setBusy("download");
     try {
-      const dataUrl = await toPng(ref.current, { backgroundColor: "#ffffff", pixelRatio: 2 });
+      const dataUrl = await toPng(ref.current, fullCaptureOpts());
       const link = document.createElement("a");
       link.download = filename;
       link.href = dataUrl;
@@ -1112,6 +1123,9 @@ function LaborWorkerGrid({
                 <th key={d} style={{ ...cellH, textAlign: "center", minWidth: 70 }}>{dateLabel(d)}</th>
               ))}
               <th style={{ ...cellH, textAlign: "right", background: "#7eb0d8" }}>Total {unit}</th>
+              {labor?.type === "tratoHE" && (
+                <th style={{ ...cellH, textAlign: "right", background: "#7eb0d8" }}>Total HE</th>
+              )}
               <th style={{ ...cellH, textAlign: "right", background: "#7eb0d8" }}>Total $</th>
             </tr>
           </thead>
@@ -1130,6 +1144,11 @@ function LaborWorkerGrid({
                 <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
                   {fmtNumber(w.totals.qty)}
                 </td>
+                {labor?.type === "tratoHE" && (
+                  <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
+                    {w.totals.overtimeHours > 0 ? `${fmtNumber(w.totals.overtimeHours)}h` : ""}
+                  </td>
+                )}
                 <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
                   {labor?.type === "tratoHE" && w.totals.overtimeHours > 0
                     ? `${fmtCurrency(w.totals.amount)} + ${fmtNumber(w.totals.overtimeHours)}h`
@@ -1157,6 +1176,11 @@ function LaborWorkerGrid({
               <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
                 {fmtNumber(grand.qty)}
               </td>
+              {labor?.type === "tratoHE" && (
+                <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
+                  {grand.overtimeHours > 0 ? `${fmtNumber(grand.overtimeHours)}h` : ""}
+                </td>
+              )}
               <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
                 {labor?.type === "tratoHE" && grand.overtimeHours > 0
                   ? `${fmtCurrency(grand.amount)} + ${fmtNumber(grand.overtimeHours)}h`
@@ -1169,6 +1193,9 @@ function LaborWorkerGrid({
                 🪙 Total pisos
               </td>
               <td style={{ ...cell, textAlign: "right", fontWeight: 700, color: "#b45309", fontVariantNumeric: "tabular-nums" }}>—</td>
+              {labor?.type === "tratoHE" && (
+                <td style={{ ...cell, textAlign: "right", fontWeight: 700, color: "#b45309", fontVariantNumeric: "tabular-nums" }}>—</td>
+              )}
               <td style={{ ...cell, textAlign: "right", fontWeight: 700, color: "#b45309", fontVariantNumeric: "tabular-nums" }}>
                 {fmtCurrency(grand.pisoAmount)}
               </td>
