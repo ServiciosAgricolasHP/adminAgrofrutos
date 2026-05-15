@@ -9,7 +9,7 @@ const navItems = [
   { to: "/calendar", label: "Calendario", icon: "📅" },
   { to: "/workers", label: "Trabajadores", icon: "👷" },
   { to: "/transports", label: "Transportes", icon: "🚛" },
-  { to: "/advances", label: "Anticipos", icon: "🪙" },
+  { to: "/advances", label: "Anticipos / Bonos", icon: "🪙" },
   { to: "/payroll", label: "Nómina", icon: "💰" },
   { to: "/links", label: "Links útiles", icon: "🔗" },
 ];

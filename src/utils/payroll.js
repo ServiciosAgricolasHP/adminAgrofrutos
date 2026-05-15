@@ -127,6 +127,8 @@ const STYLE_BANK_TOTAL = { font: { bold: true }, fill: fill("FFD9E1F2"), border:
 const STYLE_CELL = { border: BORDER_ALL };
 
 // ─────────────────────────── BChile sheet ───────────────────────────
+const BCHILE_DEFAULT_EMAIL = "remuneracionesis@gmail.com";
+
 function buildBchileSheet(wb, items) {
   const ws = wb.addWorksheet("Nomina");
   const headers = [
@@ -143,7 +145,12 @@ function buildBchileSheet(wb, items) {
     "Campo Libre 2 (Glosa 2)",
   ];
   ws.addRow(headers);
-  for (const it of items) {
+  // Orden alfabético por nombre para que el correlativo A001…A999 sea estable.
+  const sorted = [...items].sort((a, b) =>
+    cleanText(a.name || "").localeCompare(cleanText(b.name || ""), "es", { sensitivity: "base" }),
+  );
+  sorted.forEach((it, idx) => {
+    const identifier = `A${String(idx + 1).padStart(3, "0")}`;
     // `paymentRut` viene de bankDetails[0] (la cuenta destino del banco) y
     // puede diferir del RUT de la persona — p.ej. cuando el pago va a una
     // cuenta de un familiar. El portal de BChile lo valida contra la
@@ -155,13 +162,13 @@ function buildBchileSheet(wb, items) {
       String(it.bankCode || ""),
       Math.round(Number(it.amount) || 0),
       bchileAccountTypeCode(it.accountType),
+      identifier,
       "",
-      "",
-      it.email || "",
+      it.email || BCHILE_DEFAULT_EMAIL,
       "",
       "",
     ]);
-  }
+  });
   ws.getRow(1).eachCell((c) => (c.style = STYLE_HEADER));
   ws.columns.forEach((col, i) => {
     col.width = i === 1 ? 30 : i === 8 ? 28 : 16;

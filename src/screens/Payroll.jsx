@@ -21,6 +21,7 @@ import {
   applyAdvancesToPayroll,
   restoreAdvancesFromPayroll,
   advanceRemaining,
+  advanceSign,
 } from "../services/advancesService";
 import { formatRutForDisplay } from "../utils/rutUtils";
 import { bankName, ACCOUNT_TYPES, isCashBank, CASH_BANK_CODE } from "../utils/banks";
@@ -266,9 +267,9 @@ export default function Payroll() {
       previewAdvancesRef.current = pendingAdvances;
       const advancesByRut = new Map();
       for (const adv of pendingAdvances) {
-        const e = advancesByRut.get(adv.workerRut) || { anticipos: [], adelantos: [] };
-        if (adv.type === "anticipo") e.anticipos.push(adv);
-        else if (adv.type === "adelanto") e.adelantos.push(adv);
+        const e = advancesByRut.get(adv.workerRut) || { anticipos: [], bonos: [] };
+        if (advanceSign(adv) > 0) e.bonos.push(adv);
+        else e.anticipos.push(adv);
         advancesByRut.set(adv.workerRut, e);
       }
 
@@ -284,41 +285,43 @@ export default function Payroll() {
             byCycle[cid] = Math.round(a.byCycle[cid] || 0);
           }
           const accountIssue = validateAccountNumber(bd[1] || "", bankCode);
-          const adv = advancesByRut.get(a.rut) || { anticipos: [], adelantos: [] };
-          // Allocate the worker's gross to advances oldest-first, partial-aware.
-          // Anticipos before adelantos within the same date.
-          const allAdvs = [...adv.anticipos, ...adv.adelantos]
-            .map((x) => ({ ...x, _typeOrder: x.type === "anticipo" ? 0 : 1 }))
-            .sort((x, y) => {
-              const da = (x.date || ""), dbb = (y.date || "");
-              if (da !== dbb) return da < dbb ? -1 : 1;
-              return x._typeOrder - y._typeOrder;
-            });
+          const adv = advancesByRut.get(a.rut) || { anticipos: [], bonos: [] };
+
+          // Anticipos: oldest-first, descuentan, capados por el bruto.
+          const sortedAnticipos = [...adv.anticipos].sort((x, y) => {
+            const da = (x.date || ""), dbb = (y.date || "");
+            return da < dbb ? -1 : da > dbb ? 1 : 0;
+          });
           const grossInt = Math.round(a.total);
           let remainingGross = grossInt;
-          const applications = []; // [{advanceId, type, amount}]
-          for (const advItem of allAdvs) {
+          const anticipoApplications = [];
+          for (const advItem of sortedAnticipos) {
             if (remainingGross <= 0) break;
             const advRem = Math.round(advanceRemaining(advItem));
             if (advRem <= 0) continue;
             const apply = Math.min(remainingGross, advRem);
             if (apply <= 0) continue;
-            applications.push({ advanceId: advItem.id, type: advItem.type, amount: apply });
+            anticipoApplications.push({ advanceId: advItem.id, amount: apply });
             remainingGross -= apply;
           }
-          const anticiposTotal = applications
-            .filter((x) => x.type === "anticipo")
-            .reduce((s, x) => s + x.amount, 0);
-          const adelantosTotal = applications
-            .filter((x) => x.type === "adelanto")
-            .reduce((s, x) => s + x.amount, 0);
-          const totalAdvance = anticiposTotal + adelantosTotal;
-          const advanceIds = applications.map((x) => x.advanceId);
+
+          // Bonos: se aplican completos (suman, sin tope contra el bruto).
+          const sortedBonos = [...adv.bonos].sort((x, y) => {
+            const da = (x.date || ""), dbb = (y.date || "");
+            return da < dbb ? -1 : da > dbb ? 1 : 0;
+          });
+          const bonoApplications = [];
+          for (const advItem of sortedBonos) {
+            const advRem = Math.round(advanceRemaining(advItem));
+            if (advRem <= 0) continue;
+            bonoApplications.push({ advanceId: advItem.id, amount: advRem });
+          }
+
+          const anticiposTotal = anticipoApplications.reduce((s, x) => s + x.amount, 0);
+          const bonosTotal = bonoApplications.reduce((s, x) => s + x.amount, 0);
           const advanceNoteParts = [];
-          const anticiposCount = applications.filter((x) => x.type === "anticipo").length;
-          const adelantosCount = applications.filter((x) => x.type === "adelanto").length;
-          if (anticiposTotal) advanceNoteParts.push(`Anticipos ${anticiposCount}`);
-          if (adelantosTotal) advanceNoteParts.push(`Adelantos ${adelantosCount}`);
+          if (anticiposTotal) advanceNoteParts.push(`Anticipos ${anticipoApplications.length}`);
+          if (bonosTotal) advanceNoteParts.push(`Bonos ${bonoApplications.length}`);
           return {
             rut: a.rut,
             name: w?.name || "(sin nombre)",
@@ -329,13 +332,16 @@ export default function Payroll() {
             email: w?.email || "",
             groupLeader: normalizeLeader(w?.groupLeader?.[0]),
             grossAmount: grossInt,
-            advance: totalAdvance,
+            advance: anticiposTotal,
+            bonus: bonosTotal,
             advanceNote: advanceNoteParts.join(" · "),
-            advanceIds,
-            advanceApplications: applications.map(({ advanceId, amount }) => ({ advanceId, amount })),
+            anticipoApplications,
+            bonoApplications,
             anticiposTotal,
-            adelantosTotal,
-            amount: Math.max(0, grossInt - totalAdvance),
+            bonosTotal,
+            // adelantosTotal kept for legacy snapshot read-back; always 0 going forward.
+            adelantosTotal: 0,
+            amount: Math.max(0, grossInt - anticiposTotal + bonosTotal),
             byCycle,
             workdayIds: a.workdayIds || [],
             include: true,
@@ -373,23 +379,43 @@ export default function Payroll() {
       prev.map((p) => {
         if (p.rut !== rut) return p;
         const next = { ...p, ...patch };
-        if (Object.prototype.hasOwnProperty.call(patch, "advance")) {
-          const adv = Math.max(0, Number(patch.advance) || 0);
+        const touchesAdvance = Object.prototype.hasOwnProperty.call(patch, "advance");
+        const touchesBonus = Object.prototype.hasOwnProperty.call(patch, "bonus");
+        if (touchesAdvance || touchesBonus) {
+          const adv = Math.max(0, Number(next.advance) || 0);
+          const bon = Math.max(0, Number(next.bonus) || 0);
           next.advance = adv;
-          next.amount = Math.max(0, Math.round((p.grossAmount || 0) - adv));
-          // Re-clip advanceApplications oldest-first so the per-advance
-          // breakdown stays consistent with the (possibly reduced) total.
-          const apps = (p.advanceApplications || []).map((x) => ({ ...x }));
-          let remaining = adv;
-          const out = [];
-          for (const ap of apps) {
-            if (remaining <= 0) break;
-            const take = Math.min(ap.amount, remaining);
-            if (take > 0) out.push({ advanceId: ap.advanceId, amount: take });
-            remaining -= take;
+          next.bonus = bon;
+          next.amount = Math.max(0, Math.round((p.grossAmount || 0) - adv + bon));
+          if (touchesAdvance) {
+            // Re-clip anticipoApplications oldest-first so per-advance
+            // breakdown stays consistent with the (possibly reduced) total.
+            const apps = (p.anticipoApplications || []).map((x) => ({ ...x }));
+            let remaining = adv;
+            const out = [];
+            for (const ap of apps) {
+              if (remaining <= 0) break;
+              const take = Math.min(ap.amount, remaining);
+              if (take > 0) out.push({ advanceId: ap.advanceId, amount: take });
+              remaining -= take;
+            }
+            next.anticipoApplications = out;
+            next.anticiposTotal = out.reduce((s, x) => s + x.amount, 0);
           }
-          next.advanceApplications = out;
-          next.advanceIds = out.map((x) => x.advanceId);
+          if (touchesBonus) {
+            // Bonos: re-clip oldest-first too. User can lower the bono total if desired.
+            const apps = (p.bonoApplications || []).map((x) => ({ ...x }));
+            let remaining = bon;
+            const out = [];
+            for (const ap of apps) {
+              if (remaining <= 0) break;
+              const take = Math.min(ap.amount, remaining);
+              if (take > 0) out.push({ advanceId: ap.advanceId, amount: take });
+              remaining -= take;
+            }
+            next.bonoApplications = out;
+            next.bonosTotal = out.reduce((s, x) => s + x.amount, 0);
+          }
         }
         return next;
       }),
@@ -442,29 +468,41 @@ export default function Payroll() {
         };
       });
 
-      const cleanItems = items.map((p) => ({
-        rut: p.rut,
-        paymentRut: p.paymentRut || p.rut,
-        name: p.name,
-        accountNumber: p.accountNumber,
-        bankCode: p.bankCode,
-        accountType: p.accountType,
-        email: p.email || "",
-        groupLeader: p.groupLeader || "",
-        grossAmount: Math.round(Number(p.grossAmount) || Number(p.amount) || 0),
-        advance: Math.round(Number(p.advance) || 0),
-        advanceNote: p.advanceNote || "",
-        advanceIds: p.advanceIds || [],
-        advanceApplications: (p.advanceApplications || []).map((x) => ({
+      const cleanItems = items.map((p) => {
+        const anticipoApps = (p.anticipoApplications || []).map((x) => ({
           advanceId: x.advanceId,
           amount: Math.round(Number(x.amount) || 0),
-        })),
-        anticiposTotal: Math.round(Number(p.anticiposTotal) || 0),
-        adelantosTotal: Math.round(Number(p.adelantosTotal) || 0),
-        amount: Math.round(Number(p.amount) || 0),
-        byCycle: p.byCycle || {},
-        workdayIds: p.workdayIds || [],
-      }));
+        }));
+        const bonoApps = (p.bonoApplications || []).map((x) => ({
+          advanceId: x.advanceId,
+          amount: Math.round(Number(x.amount) || 0),
+        }));
+        const advanceApplications = [...anticipoApps, ...bonoApps];
+        return {
+          rut: p.rut,
+          paymentRut: p.paymentRut || p.rut,
+          name: p.name,
+          accountNumber: p.accountNumber,
+          bankCode: p.bankCode,
+          accountType: p.accountType,
+          email: p.email || "",
+          groupLeader: p.groupLeader || "",
+          grossAmount: Math.round(Number(p.grossAmount) || Number(p.amount) || 0),
+          advance: Math.round(Number(p.advance) || 0),
+          bonus: Math.round(Number(p.bonus) || 0),
+          advanceNote: p.advanceNote || "",
+          advanceIds: advanceApplications.map((x) => x.advanceId),
+          advanceApplications,
+          anticipoApplications: anticipoApps,
+          bonoApplications: bonoApps,
+          anticiposTotal: Math.round(Number(p.anticiposTotal) || 0),
+          bonosTotal: Math.round(Number(p.bonosTotal) || 0),
+          adelantosTotal: Math.round(Number(p.adelantosTotal) || 0),
+          amount: Math.round(Number(p.amount) || 0),
+          byCycle: p.byCycle || {},
+          workdayIds: p.workdayIds || [],
+        };
+      });
 
       const allWorkdayIds = cleanItems.flatMap((p) => p.workdayIds);
       const allAdvanceIds = cleanItems.flatMap((p) => p.advanceIds || []);
@@ -475,6 +513,7 @@ export default function Payroll() {
       const bankTotal = bankItems.reduce((s, x) => s + x.amount, 0);
       const cashTotal = cashItems.reduce((s, x) => s + x.amount, 0);
       const advanceTotalSum = cleanItems.reduce((s, x) => s + (Number(x.advance) || 0), 0);
+      const bonusTotalSum = cleanItems.reduce((s, x) => s + (Number(x.bonus) || 0), 0);
       const finalName = payrollName || payrollSuggestedName();
 
       // Static snapshot: stores everything needed to re-render this payroll
@@ -495,6 +534,7 @@ export default function Payroll() {
           bankCount: bankItems.length,
           cashCount: cashItems.length,
           advanceTotal: advanceTotalSum,
+          bonusTotal: bonusTotalSum,
         },
         cycles: cycleDetails.map((cd) => {
           const cycle = cycles.find((c) => c.id === cd.id);
@@ -1197,6 +1237,7 @@ function PreviewTable({
               <th className="px-3 py-2">Tipo</th>
               <th className="px-3 py-2 text-right">Bruto</th>
               <th className="px-3 py-2 text-right">Anticipo</th>
+              <th className="px-3 py-2 text-right">Bono</th>
               <th className="px-3 py-2 text-right">A pagar</th>
               <th className="px-3 py-2 text-center">Pago</th>
             </tr>
@@ -1267,6 +1308,16 @@ function PreviewTable({
                   <td className="px-3 py-2 text-right">
                     <input
                       type="number"
+                      value={p.bonus || ""}
+                      placeholder="0"
+                      title="Bono a sumar"
+                      onChange={(e) => updatePreview(p.rut, { bonus: Number(e.target.value) || 0 })}
+                      className={`w-24 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-right text-sm tabular-nums outline-none focus:border-[var(--color-accent)] ${Number(p.bonus) > 0 ? "text-[var(--color-success)]" : ""}`}
+                    />
+                  </td>
+                  <td className="px-3 py-2 text-right">
+                    <input
+                      type="number"
                       value={p.amount || ""}
                       placeholder="0"
                       onChange={(e) => updatePreview(p.rut, { amount: Number(e.target.value) || 0 })}
@@ -1291,7 +1342,7 @@ function PreviewTable({
             })}
             {filteredItems.length === 0 && (
               <tr>
-                <td colSpan={10} className="px-3 py-6 text-center text-[var(--color-muted)]">
+                <td colSpan={11} className="px-3 py-6 text-center text-[var(--color-muted)]">
                   {items.length === 0
                     ? "No hay trabajadores con monto en los ciclos seleccionados."
                     : "Ningún trabajador coincide con el filtro."}
@@ -2073,8 +2124,12 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
       // Show the Anticipo column whenever ANY worker in this group has an
       // advance deduction. Otherwise hide it to keep the layout clean.
       const groupHasAdvance = g.items.some((it) => (Number(it.advance) || 0) > 0);
+      const groupHasBonus = g.items.some((it) => (Number(it.bonus) || 0) > 0);
       const advanceHeader = groupHasAdvance
         ? `<th style="width:110px;text-align:right">Anticipo</th>`
+        : "";
+      const bonusHeader = groupHasBonus
+        ? `<th style="width:110px;text-align:right">Bono</th>`
         : "";
 
       const rows = g.items
@@ -2094,6 +2149,11 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
                 Number(it.advance) > 0 ? `− ${fmt(it.advance)}` : "—"
               }</td>`
             : "";
+          const bonusCell = groupHasBonus
+            ? `<td style="text-align:right;color:#166534">${
+                Number(it.bonus) > 0 ? `+ ${fmt(it.bonus)}` : "—"
+              }</td>`
+            : "";
           return `
             <tr style="background:${itemFill}">
               <td>${i + 1}</td>
@@ -2101,6 +2161,7 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
               <td class="mono">${fmtRut(it.rut)}</td>
               ${cellsByCycle}
               ${advanceCell}
+              ${bonusCell}
               <td style="text-align:right"><b>${fmt(it.amount)}</b></td>
               <td></td>
             </tr>`;
@@ -2120,6 +2181,14 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
             (() => {
               const sum = g.items.reduce((s, it) => s + (Number(it.advance) || 0), 0);
               return sum > 0 ? `− ${fmt(sum)}` : "—";
+            })()
+          }</b></td>`
+        : "";
+      const bonusSubtotalCell = groupHasBonus
+        ? `<td style="text-align:right;background:${leaderFill};color:#166534"><b>${
+            (() => {
+              const sum = g.items.reduce((s, it) => s + (Number(it.bonus) || 0), 0);
+              return sum > 0 ? `+ ${fmt(sum)}` : "—";
             })()
           }</b></td>`
         : "";
@@ -2245,6 +2314,11 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
                     Number(it.advance) > 0 ? `− ${fmt(it.advance)}` : "—"
                   }</td>`
                 : "";
+              const bonusCell = groupHasBonus
+                ? `<td style="text-align:right;color:#166534">${
+                    Number(it.bonus) > 0 ? `+ ${fmt(it.bonus)}` : "—"
+                  }</td>`
+                : "";
               return `
                 <tr style="background:${itemFill}">
                   <td>${i + 1}</td>
@@ -2253,6 +2327,7 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
                   <td style="font-size:10px;color:#555">${bankTag}</td>
                   ${cellsByCycle}
                   ${advanceCell}
+                  ${bonusCell}
                   <td style="text-align:right"><b>${fmt(it.amount)}</b></td>
                 </tr>`;
             })
@@ -2283,6 +2358,7 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
             ${isDetail ? '<th style="width:90px">Forma pago</th>' : ""}
             ${cycleHeaders}
             ${advanceHeader}
+            ${bonusHeader}
             <th style="width:120px;text-align:right">TOTAL</th>
             ${isDetail ? "" : '<th style="width:200px">Firma</th>'}
           </tr>
@@ -2295,6 +2371,7 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
             <td colspan="${isDetail ? totalColSpan + 1 : totalColSpan}" style="text-align:right"><b>Subtotal ${g.leader}</b></td>
             ${subtotalCells}
             ${advanceSubtotalCell}
+            ${bonusSubtotalCell}
             <td style="text-align:right"><b>${fmt(g.total)}</b></td>
             ${isDetail ? "" : "<td></td>"}
           </tr>
@@ -2715,6 +2792,7 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
   const cashTotal = cash.reduce((s, x) => s + (Number(x.amount) || 0), 0);
   const grossTotal = items.reduce((s, x) => s + (Number(x.grossAmount) || Number(x.amount) || 0), 0);
   const advanceTotal = items.reduce((s, x) => s + (Number(x.advance) || 0), 0);
+  const bonusTotal = items.reduce((s, x) => s + (Number(x.bonus) || 0), 0);
   const totalsByCycle = (cycleDetails || []).map((c) => {
     const bankSum = bank.reduce((s, x) => s + (x.byCycle?.[c.id] || 0), 0);
     const cashSum = cash.reduce((s, x) => s + (x.byCycle?.[c.id] || 0), 0);
@@ -2893,8 +2971,14 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
               {advanceTotal > 0 && (
                 <div>
                   <div className="text-xs text-[var(--color-muted)]">↩ Anticipos aplicados</div>
-                  <div className="text-lg font-semibold">{fmtCurrency(advanceTotal)}</div>
+                  <div className="text-lg font-semibold text-[var(--color-warning)]">− {fmtCurrency(advanceTotal)}</div>
                   <div className="text-[10px] text-[var(--color-muted)]">Bruto: {fmtCurrency(grossTotal)}</div>
+                </div>
+              )}
+              {bonusTotal > 0 && (
+                <div>
+                  <div className="text-xs text-[var(--color-muted)]">🎁 Bonos aplicados</div>
+                  <div className="text-lg font-semibold text-[var(--color-success)]">+ {fmtCurrency(bonusTotal)}</div>
                 </div>
               )}
               <div>

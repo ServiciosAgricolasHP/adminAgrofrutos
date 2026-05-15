@@ -1,5 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { advancesService, ADVANCE_TYPES } from "../services/advancesService";
+import {
+  advancesService,
+  ADVANCE_TYPES,
+  normalizeAdvanceType,
+  advanceTypeMeta,
+  advanceSign,
+} from "../services/advancesService";
 import { searchWorkers } from "../services/workersService";
 import { formatRutForDisplay } from "../utils/rutUtils";
 import ConfirmDialog from "../components/ConfirmDialog";
@@ -37,7 +43,7 @@ const APPLIED_DEFAULT_DAYS = 90;
 
 export default function Advances() {
   const isMobile = useIsMobile();
-  const [tab, setTab] = useState("anticipo"); // anticipo | adelanto
+  const [typeFilter, setTypeFilter] = useState("all"); // all | anticipo | bono
   const [statusFilter, setStatusFilter] = useState("pending");
   const [search, setSearch] = useState("");
   const [items, setItems] = useState([]);
@@ -74,7 +80,8 @@ export default function Advances() {
     const q = search.trim().toLowerCase();
     const showApplied = statusFilter === "applied" || statusFilter === "all";
     return items.filter((a) => {
-      if (a.type !== tab) return false;
+      const normType = normalizeAdvanceType(a.type);
+      if (typeFilter !== "all" && normType !== typeFilter) return false;
       const status = a.status || "pending";
       if (statusFilter !== "all" && status !== statusFilter) return false;
       // For applied/all view, allow user to bound the historical range by date.
@@ -85,15 +92,23 @@ export default function Advances() {
       }
       return true;
     });
-  }, [items, tab, statusFilter, search, appliedSince]);
+  }, [items, typeFilter, statusFilter, search, appliedSince]);
 
+  // Pending/applied totals split by sign — bonos suman, anticipos descuentan.
   const totals = useMemo(() => {
-    let pending = 0, applied = 0;
+    let pendingAnticipos = 0, pendingBonos = 0;
+    let appliedAnticipos = 0, appliedBonos = 0;
     for (const a of filtered) {
-      if ((a.status || "pending") === "applied") applied += Number(a.amount) || 0;
-      else if ((a.status || "pending") === "pending") pending += Number(a.amount) || 0;
+      const amount = Number(a.amount) || 0;
+      const status = a.status || "pending";
+      const isBonus = advanceSign(a) > 0;
+      if (status === "applied") {
+        if (isBonus) appliedBonos += amount; else appliedAnticipos += amount;
+      } else if (status === "pending") {
+        if (isBonus) pendingBonos += amount; else pendingAnticipos += amount;
+      }
     }
-    return { pending, applied };
+    return { pendingAnticipos, pendingBonos, appliedAnticipos, appliedBonos };
   }, [filtered]);
 
   const onSaved = async () => {
@@ -108,7 +123,7 @@ export default function Advances() {
       confirmDelete.status === "partial" ||
       (Number(confirmDelete.amountPaid) || 0) > 0;
     if (locked) {
-      alert("No se puede eliminar un anticipo/adelanto con pagos aplicados. Elimina la nómina primero.");
+      alert("No se puede eliminar un anticipo/bono con pagos aplicados. Elimina la nómina primero.");
       setConfirmDelete(null);
       return;
     }
@@ -117,33 +132,47 @@ export default function Advances() {
     await load();
   };
 
-  const tabLabel = (t) => ADVANCE_TYPES.find((x) => x.value === t);
-
   return (
     <div className="flex h-full flex-col">
       <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Anticipos y Adelantos</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">Anticipos y Bonos</h1>
           <p className="text-sm text-[var(--color-muted)]">
-            Se descuentan automáticamente al generar la próxima nómina
+            Se aplican automáticamente al generar la próxima nómina · 🪙 anticipo descuenta · 🎁 bono suma
           </p>
         </div>
-        <button
-          onClick={() => setEditing({ type: tab, mode: "create" })}
-          className="rounded-md bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)] shadow-sm hover:bg-[var(--color-accent-hover)]"
-        >
-          + Nuevo {tabLabel(tab).label.toLowerCase()}
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={() => setEditing({ type: "anticipo", mode: "create" })}
+            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-sm font-medium hover:bg-[var(--color-warning-soft)]"
+          >
+            🪙 + Anticipo
+          </button>
+          <button
+            onClick={() => setEditing({ type: "bono", mode: "create" })}
+            className="rounded-md bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)] shadow-sm hover:bg-[var(--color-accent-hover)]"
+          >
+            🎁 + Bono
+          </button>
+        </div>
       </div>
 
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <div className="flex gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] p-1 text-sm">
+          <button
+            onClick={() => setTypeFilter("all")}
+            className={`rounded px-3 py-1 ${
+              typeFilter === "all" ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]" : "text-[var(--color-muted)]"
+            }`}
+          >
+            Todos
+          </button>
           {ADVANCE_TYPES.map((t) => (
             <button
               key={t.value}
-              onClick={() => setTab(t.value)}
+              onClick={() => setTypeFilter(t.value)}
               className={`rounded px-3 py-1 ${
-                tab === t.value ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]" : "text-[var(--color-muted)]"
+                typeFilter === t.value ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]" : "text-[var(--color-muted)]"
               }`}
             >
               {t.icon} {t.label}
@@ -177,9 +206,16 @@ export default function Advances() {
             />
           </label>
         )}
-        <div className="ml-auto flex gap-3 text-xs">
-          <span><span className="text-[var(--color-muted)]">Pendientes:</span> <span className="font-semibold text-[var(--color-warning)]">{fmtCurrency(totals.pending)}</span></span>
-          <span><span className="text-[var(--color-muted)]">Aplicados:</span> <span className="font-semibold text-[var(--color-success)]">{fmtCurrency(totals.applied)}</span></span>
+        <div className="ml-auto flex flex-wrap gap-3 text-xs">
+          {totals.pendingAnticipos > 0 && (
+            <span><span className="text-[var(--color-muted)]">🪙 Anticipos pend.:</span> <span className="font-semibold text-[var(--color-warning)]">− {fmtCurrency(totals.pendingAnticipos)}</span></span>
+          )}
+          {totals.pendingBonos > 0 && (
+            <span><span className="text-[var(--color-muted)]">🎁 Bonos pend.:</span> <span className="font-semibold text-[var(--color-success)]">+ {fmtCurrency(totals.pendingBonos)}</span></span>
+          )}
+          {(totals.appliedAnticipos > 0 || totals.appliedBonos > 0) && (
+            <span><span className="text-[var(--color-muted)]">Aplicados:</span> <span className="font-semibold text-[var(--color-success)]">{fmtCurrency(totals.appliedAnticipos + totals.appliedBonos)}</span></span>
+          )}
         </div>
       </div>
 
@@ -188,13 +224,17 @@ export default function Advances() {
           <div className="flex h-40 items-center justify-center text-[var(--color-muted)]">Cargando...</div>
         ) : filtered.length === 0 ? (
           <div className="flex h-40 items-center justify-center text-[var(--color-muted)]">
-            Sin {tabLabel(tab).label.toLowerCase()}s.
+            Sin movimientos.
           </div>
         ) : isMobile ? (
           <div className="space-y-2">
             {filtered.map((a) => {
               const status = a.status || "pending";
               const isApplied = status === "applied" || status === "partial" || (Number(a.amountPaid) || 0) > 0;
+              const meta = advanceTypeMeta(a.type);
+              const sign = advanceSign(a);
+              const amountColor = sign > 0 ? "text-[var(--color-success)]" : "text-[var(--color-warning)]";
+              const signLabel = sign > 0 ? "+" : "−";
               return (
                 <div
                   key={a.id}
@@ -202,6 +242,7 @@ export default function Advances() {
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
+                      <div className="text-xs">{meta.icon} <span className="font-medium">{meta.label}</span></div>
                       <div className="font-medium leading-tight">{a.workerName}</div>
                       <div className="font-mono text-xs text-[var(--color-muted)]">
                         {formatRutForDisplay(a.workerRut)}
@@ -209,8 +250,8 @@ export default function Advances() {
                       <div className="font-mono text-xs text-[var(--color-muted)]">{a.date}</div>
                     </div>
                     <div className="text-right">
-                      <div className="text-base font-semibold tabular-nums">
-                        {fmtCurrency(a.amount)}
+                      <div className={`text-base font-semibold tabular-nums ${amountColor}`}>
+                        {signLabel} {fmtCurrency(a.amount)}
                       </div>
                       {(Number(a.amountPaid) || 0) > 0 && (Number(a.amountPaid) || 0) < (Number(a.amount) || 0) && (
                         <div className="text-[10px] text-[var(--color-muted)]">
@@ -253,6 +294,7 @@ export default function Advances() {
           <table className="w-full text-sm">
             <thead className="sticky top-0 bg-[var(--color-surface-2)] text-left">
               <tr>
+                <th className="px-3 py-2">Tipo</th>
                 <th className="px-3 py-2">Fecha</th>
                 <th className="px-3 py-2">Trabajador</th>
                 <th className="px-3 py-2">RUT</th>
@@ -263,13 +305,23 @@ export default function Advances() {
               </tr>
             </thead>
             <tbody>
-              {filtered.map((a) => (
+              {filtered.map((a) => {
+                const meta = advanceTypeMeta(a.type);
+                const sign = advanceSign(a);
+                const amountColor = sign > 0 ? "text-[var(--color-success)]" : "text-[var(--color-warning)]";
+                const signLabel = sign > 0 ? "+" : "−";
+                return (
                 <tr key={a.id} className="border-t border-[var(--color-border)]">
+                  <td className="px-3 py-2 text-xs">
+                    <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 ${sign > 0 ? "bg-[var(--color-success-soft)] text-[var(--color-success)]" : "bg-[var(--color-warning-soft)] text-[var(--color-warning)]"}`}>
+                      {meta.icon} {meta.label}
+                    </span>
+                  </td>
                   <td className="px-3 py-2 font-mono text-xs">{a.date}</td>
                   <td className="px-3 py-2">{a.workerName}</td>
                   <td className="px-3 py-2 font-mono text-xs">{formatRutForDisplay(a.workerRut)}</td>
-                  <td className="px-3 py-2 text-right font-medium tabular-nums">
-                    <div>{fmtCurrency(a.amount)}</div>
+                  <td className={`px-3 py-2 text-right font-medium tabular-nums ${amountColor}`}>
+                    <div>{signLabel} {fmtCurrency(a.amount)}</div>
                     {(Number(a.amountPaid) || 0) > 0 && (Number(a.amountPaid) || 0) < (Number(a.amount) || 0) && (
                       <div className="text-[10px] font-normal text-[var(--color-muted)]">
                         Pagado: {fmtCurrency(a.amountPaid)} · Resta: {fmtCurrency(Math.max(0, (Number(a.amount) || 0) - (Number(a.amountPaid) || 0)))}
@@ -310,7 +362,8 @@ export default function Advances() {
                     </div>
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         )}
@@ -352,7 +405,7 @@ function AdvanceFormModal({ open, item, onClose, onSaved }) {
   useEffect(() => {
     if (open) {
       setForm({
-        type: item?.type || "anticipo",
+        type: normalizeAdvanceType(item?.type) || "anticipo",
         workerRut: item?.workerRut || "",
         workerName: item?.workerName || "",
         amount: item?.amount || 0,
@@ -401,7 +454,7 @@ function AdvanceFormModal({ open, item, onClose, onSaved }) {
     <Modal
       open={open}
       onClose={onClose}
-      title={`${isEdit ? "Editar" : "Nuevo"} ${form.type === "anticipo" ? "anticipo" : "adelanto"}`}
+      title={`${isEdit ? "Editar" : "Nuevo"} ${advanceTypeMeta(form.type).label.toLowerCase()}`}
       size="md"
       footer={
         <>

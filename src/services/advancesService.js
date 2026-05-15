@@ -1,6 +1,8 @@
-// Anticipos & Adelantos — single collection with type discriminator.
-// type "anticipo": adelanto pequeño / vale (suele ir contra el ciclo en curso).
-// type "adelanto": préstamo o adelanto mayor contra futuras nóminas.
+// Anticipos & Bonos — single collection with type discriminator.
+// type "anticipo": descuento sobre la próxima nómina (sign = -1).
+// type "bono":     suma sobre la próxima nómina (sign = +1).
+//
+// Legacy "adelanto" se normaliza a "anticipo" al leer (mismo signo, mismo flujo).
 //
 // Doc shape:
 //   id, type, workerRut, workerName, amount, date, note,
@@ -18,9 +20,29 @@ import { db, auth } from "../firebase";
 import { createService } from "./firestoreBase";
 
 export const ADVANCE_TYPES = [
-  { value: "anticipo", label: "Anticipo", icon: "🪙" },
-  { value: "adelanto", label: "Adelanto", icon: "💸" },
+  { value: "anticipo", label: "Anticipo", icon: "🪙", sign: -1 },
+  { value: "bono",     label: "Bono",     icon: "🎁", sign: +1 },
 ];
+
+const LEGACY_TYPE_MAP = { adelanto: "anticipo" };
+
+export function normalizeAdvanceType(type) {
+  return LEGACY_TYPE_MAP[type] || type || "anticipo";
+}
+
+export function advanceSign(advOrType) {
+  const t = typeof advOrType === "string" ? advOrType : advOrType?.type;
+  return normalizeAdvanceType(t) === "bono" ? +1 : -1;
+}
+
+export function isBono(advOrType) {
+  return advanceSign(advOrType) > 0;
+}
+
+export function advanceTypeMeta(type) {
+  const t = normalizeAdvanceType(type);
+  return ADVANCE_TYPES.find((x) => x.value === t) || ADVANCE_TYPES[0];
+}
 
 export const advancesService = createService("advance", "advances");
 

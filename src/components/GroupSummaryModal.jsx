@@ -127,7 +127,7 @@ export default function GroupSummaryModal({ open, onClose }) {
     return [...m.values()].sort((a, b) => (a.label || "").localeCompare(b.label || ""));
   }, [selected, workerData]);
 
-  // Filas de la matriz: { worker, byCycle, advance, total, neto, index }
+  // Filas de la matriz: { worker, byCycle, advance, bonus, total, neto, index }
   const matrixRows = useMemo(() => {
     return selected.map((w, i) => {
       const wd = workerData[w.id] || {};
@@ -138,19 +138,24 @@ export default function GroupSummaryModal({ open, onClose }) {
         byCycle[d.cycle.id] = amt;
         total += amt;
       }
-      const advance = wd.advancesSaldo || 0;
-      const neto = total - advance;
-      return { worker: w, byCycle, advance, total, neto, index: i + 1 };
+      // anticiposSaldo/bonosSaldo nuevos; fallback al legacy advancesSaldo
+      // (todo el saldo cuenta como anticipo).
+      const advance = wd.anticiposSaldo != null ? wd.anticiposSaldo : (wd.advancesSaldo || 0);
+      const bonus = wd.bonosSaldo || 0;
+      const neto = total - advance + bonus;
+      return { worker: w, byCycle, advance, bonus, total, neto, index: i + 1 };
     });
   }, [selected, workerData]);
 
   const hasAdvances = matrixRows.some((r) => r.advance > 0);
+  const hasBonuses = matrixRows.some((r) => r.bonus > 0);
   const showCycleCols = activeCycles.length > 1;
 
   // Totales por columna + grand totals.
   const totals = useMemo(() => {
     const cycleTotals = {};
     let advanceTotal = 0,
+      bonusTotal = 0,
       totalTotal = 0,
       netoTotal = 0;
     for (const r of matrixRows) {
@@ -158,10 +163,11 @@ export default function GroupSummaryModal({ open, onClose }) {
         cycleTotals[cid] = (cycleTotals[cid] || 0) + r.byCycle[cid];
       }
       advanceTotal += r.advance;
+      bonusTotal += r.bonus;
       totalTotal += r.total;
       netoTotal += r.neto;
     }
-    return { cycleTotals, advanceTotal, totalTotal, netoTotal };
+    return { cycleTotals, advanceTotal, bonusTotal, totalTotal, netoTotal };
   }, [matrixRows]);
 
   const captureMatrix = async (action) => {
@@ -300,6 +306,7 @@ export default function GroupSummaryModal({ open, onClose }) {
           matrixRows={matrixRows}
           totals={totals}
           hasAdvances={hasAdvances}
+          hasBonuses={hasBonuses}
           showCycleCols={showCycleCols}
           matrixRef={matrixRef}
           individualRefs={individualRefs}
@@ -412,6 +419,7 @@ function ResultUI({
   matrixRows,
   totals,
   hasAdvances,
+  hasBonuses,
   showCycleCols,
   matrixRef,
   individualRefs,
@@ -454,6 +462,7 @@ function ResultUI({
             cycles={activeCycles}
             totals={totals}
             hasAdvances={hasAdvances}
+            hasBonuses={hasBonuses}
             showCycleCols={showCycleCols}
           />
         </div>
@@ -536,6 +545,8 @@ function ResultUI({
                     grandTotal={wd.grandTotal || 0}
                     advances={wd.advances || []}
                     advancesSaldo={wd.advancesSaldo || 0}
+                    anticiposSaldo={wd.anticiposSaldo || 0}
+                    bonosSaldo={wd.bonosSaldo || 0}
                     titles={{ main: "DETALLE DE JORNADA", subtitle: w.name || "" }}
                   />
                 )}
@@ -555,7 +566,7 @@ function ResultUI({
 // general ya cubre el caso). Anticipo se oculta si nadie del grupo tiene
 // saldo pendiente.
 const MatrixTable = forwardRef(function MatrixTable(
-  { rows, cycles, totals, hasAdvances, showCycleCols },
+  { rows, cycles, totals, hasAdvances, hasBonuses, showCycleCols },
   ref,
 ) {
     const today = new Date().toLocaleDateString("es-CL");
@@ -592,6 +603,9 @@ const MatrixTable = forwardRef(function MatrixTable(
               {hasAdvances && (
                 <th style={{ ...cellH, textAlign: "right", width: 110 }}>Anticipo</th>
               )}
+              {hasBonuses && (
+                <th style={{ ...cellH, textAlign: "right", width: 110 }}>Bono</th>
+              )}
               <th style={{ ...cellH, textAlign: "right", width: 120 }}>Total</th>
               <th style={{ ...cellH, width: 140 }}>Firma</th>
             </tr>
@@ -618,6 +632,13 @@ const MatrixTable = forwardRef(function MatrixTable(
                     style={{ ...cell, textAlign: "right", color: "#b45309", fontVariantNumeric: "tabular-nums" }}
                   >
                     {r.advance > 0 ? `− ${fmtCurrency(r.advance)}` : "—"}
+                  </td>
+                )}
+                {hasBonuses && (
+                  <td
+                    style={{ ...cell, textAlign: "right", color: "#166534", fontVariantNumeric: "tabular-nums" }}
+                  >
+                    {r.bonus > 0 ? `+ ${fmtCurrency(r.bonus)}` : "—"}
                   </td>
                 )}
                 <td
@@ -647,6 +668,13 @@ const MatrixTable = forwardRef(function MatrixTable(
                   style={{ ...cell, textAlign: "right", fontWeight: 700, color: "#b45309", fontVariantNumeric: "tabular-nums" }}
                 >
                   {totals.advanceTotal > 0 ? `− ${fmtCurrency(totals.advanceTotal)}` : "—"}
+                </td>
+              )}
+              {hasBonuses && (
+                <td
+                  style={{ ...cell, textAlign: "right", fontWeight: 700, color: "#166534", fontVariantNumeric: "tabular-nums" }}
+                >
+                  {totals.bonusTotal > 0 ? `+ ${fmtCurrency(totals.bonusTotal)}` : "—"}
                 </td>
               )}
               <td
