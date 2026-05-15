@@ -10,6 +10,7 @@ import { CARRIER_TYPES, validateVehicleAlias } from "../services/carriersService
 import {
   tripsService,
   paymentsService,
+  transportPayrollsService,
   TRIP_KINDS,
   groupTripsByDay,
   groupTripsByFaena,
@@ -33,7 +34,8 @@ const TABS = [
   { value: "carriers", label: "Transportistas" },
   { value: "trips", label: "Vueltas" },
   { value: "byFaena", label: "Pago por faena" },
-  { value: "payments", label: "Resúmenes / Pagos" },
+  { value: "payments", label: "Resúmenes" },
+  { value: "payrolls", label: "Quincenas" },
 ];
 
 export default function Transports() {
@@ -64,6 +66,7 @@ export default function Transports() {
       {tab === "trips" && <TripsTab />}
       {tab === "byFaena" && <FaenaBatchTab />}
       {tab === "payments" && <PaymentsTab />}
+      {tab === "payrolls" && <PayrollsTab />}
     </div>
   );
 }
@@ -2221,28 +2224,14 @@ function PaymentDetailModal({ open, onClose, payment, carrier, faenaById, subfae
           >
             🖨 Imprimir
           </button>
+          {/* Marcar pagado / Revertir movieron a la pestaña "Quincenas".
+              Desde acá solo se crea, edita o elimina el resumen suelto. */}
           {!isPaid && (
-            <>
-              <button
-                onClick={onDelete}
-                className="rounded-md border border-[var(--color-danger)] px-3 py-1.5 text-sm text-[var(--color-danger)]"
-              >
-                Eliminar
-              </button>
-              <button
-                onClick={onPay}
-                className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-[var(--color-accent-fg)] hover:bg-[var(--color-accent-hover)]"
-              >
-                Marcar pagado
-              </button>
-            </>
-          )}
-          {isPaid && (
             <button
-              onClick={onRevert}
-              className="rounded-md border border-[var(--color-warning)] px-3 py-1.5 text-sm text-[var(--color-warning)]"
+              onClick={onDelete}
+              className="rounded-md border border-[var(--color-danger)] px-3 py-1.5 text-sm text-[var(--color-danger)]"
             >
-              Revertir pago
+              Eliminar
             </button>
           )}
         </>
@@ -2746,5 +2735,660 @@ function FaenaBatchTab() {
         </div>
       )}
     </div>
+  );
+}
+
+// ============================================================
+// PAYROLLS (QUINCENAS) TAB
+// ============================================================
+//
+// Una "quincena" es un payroll que agrupa N resúmenes (`transportPayments`)
+// de varios transportistas. No es estricto a 15 días — es un agrupamiento
+// con nombre + rango opcional. Es la vista PRINCIPAL para pagar: cada item
+// (resumen) se puede marcar pagado individual o todos juntos vía el botón
+// "Marcar quincena pagada". Toda acción de pago requiere doble confirm
+// (tipear "Pagada" en un input) para evitar taps accidentales.
+
+function PayrollsTab() {
+  const { carriers } = useCarriers();
+  const carriersById = useMemo(() => new Map(carriers.map((c) => [c.id, c])), [carriers]);
+
+  const [payrolls, setPayrolls] = useState([]);
+  const [payments, setPayments] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [detailId, setDetailId] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(null);
+  const [confirmPay, setConfirmPay] = useState(null);
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const [pr, py] = await Promise.all([
+        transportPayrollsService.listAll(),
+        paymentsService.listAll(),
+      ]);
+      const sortDesc = (a, b) => {
+        const ta = a.createdAt?.toMillis?.() ?? a.createdAt?.seconds ?? 0;
+        const tb = b.createdAt?.toMillis?.() ?? b.createdAt?.seconds ?? 0;
+        return tb - ta;
+      };
+      setPayrolls(pr.sort(sortDesc));
+      setPayments(py);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const paymentsById = useMemo(() => new Map(payments.map((p) => [p.id, p])), [payments]);
+
+  const looseSummaries = useMemo(
+    () => payments.filter((p) => p.status !== "paid" && !p.payrollId),
+    [payments],
+  );
+
+  const askMarkPayrollPaid = (payroll) => {
+    setConfirmPay({
+      verb: "Pagada",
+      label: `Marcar la quincena "${payroll.name}" como PAGADA. Esto marca todos sus resúmenes (${(payroll.paymentIds || []).length}) y sus vueltas como pagados.`,
+      onConfirm: async () => {
+        await transportPayrollsService.markPaid(payroll.id);
+        setConfirmPay(null);
+        await load();
+      },
+    });
+  };
+  const askRevertPayroll = (payroll) => {
+    setConfirmPay({
+      verb: "Revertir",
+      label: `Revertir el pago de la quincena "${payroll.name}". Esto vuelve a pendiente todos los resúmenes y vueltas.`,
+      onConfirm: async () => {
+        await transportPayrollsService.revertPaid(payroll.id);
+        setConfirmPay(null);
+        await load();
+      },
+    });
+  };
+  const askMarkItemPaid = (payment) => {
+    setConfirmPay({
+      verb: "Pagada",
+      label: `Marcar el resumen "${carriersById.get(payment.carrierId)?.alias || payment.carrierId}" (${fmtCurrency(payment.total)}) como pagado.`,
+      onConfirm: async () => {
+        await paymentsService.markPaid(payment.id);
+        setConfirmPay(null);
+        await load();
+      },
+    });
+  };
+  const askRevertItem = (payment) => {
+    setConfirmPay({
+      verb: "Revertir",
+      label: `Revertir el pago del resumen "${carriersById.get(payment.carrierId)?.alias || payment.carrierId}".`,
+      onConfirm: async () => {
+        await paymentsService.revertPaid(payment.id);
+        setConfirmPay(null);
+        await load();
+      },
+    });
+  };
+
+  const detail = detailId ? payrolls.find((p) => p.id === detailId) : null;
+
+  return (
+    <div>
+      <div className="mb-3 flex items-center justify-between">
+        <div className="text-sm text-[var(--color-muted)]">
+          Quincenas — agrupan resúmenes de varios transportistas para pagar en bloque.
+        </div>
+        <button
+          onClick={() => setCreating(true)}
+          className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-[var(--color-accent-fg)] hover:bg-[var(--color-accent-hover)]"
+        >
+          + Nueva quincena
+        </button>
+      </div>
+
+      {loading ? (
+        <div className="rounded-lg border border-dashed border-[var(--color-border)] py-10 text-center text-sm text-[var(--color-muted)]">
+          Cargando...
+        </div>
+      ) : payrolls.length === 0 ? (
+        <div className="rounded-lg border border-dashed border-[var(--color-border)] py-10 text-center text-sm text-[var(--color-muted)]">
+          Aún no hay quincenas. Creá la primera con + Nueva quincena.
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {payrolls.map((p) => {
+            const isPaid = p.status === "paid";
+            const items = (p.paymentIds || []).map((pid) => paymentsById.get(pid)).filter(Boolean);
+            const paidCount = items.filter((it) => it.status === "paid").length;
+            const period = (p.periodFrom || p.periodTo) ? `${p.periodFrom || "?"} → ${p.periodTo || "?"}` : "—";
+            return (
+              <div
+                key={p.id}
+                onClick={() => setDetailId(p.id)}
+                className="flex cursor-pointer items-center gap-3 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 hover:border-[var(--color-accent)]"
+              >
+                <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                  isPaid
+                    ? "bg-[var(--color-success-soft)] text-[var(--color-success)]"
+                    : "bg-[var(--color-warning-soft)] text-[var(--color-warning)]"
+                }`}>
+                  {isPaid ? "Pagada" : "Pendiente"}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <div className="font-medium truncate">{p.name}</div>
+                  <div className="text-xs text-[var(--color-muted)]">{period}</div>
+                </div>
+                <div className="text-right text-xs">
+                  <div className="text-[var(--color-muted)]">
+                    {items.length} resumen{items.length === 1 ? "" : "es"} · {paidCount} pagado{paidCount === 1 ? "" : "s"}
+                  </div>
+                  <div className="font-semibold tabular-nums">{fmtCurrency(p.total)}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {creating && (
+        <PayrollCreateModal
+          looseSummaries={looseSummaries}
+          carriersById={carriersById}
+          onClose={() => setCreating(false)}
+          onCreate={async (form) => {
+            try {
+              await transportPayrollsService.create(form);
+              setCreating(false);
+              await load();
+            } catch (err) { alert(err?.message || "Error"); }
+          }}
+        />
+      )}
+
+      {detail && (
+        <PayrollDetailModal
+          payroll={detail}
+          items={(detail.paymentIds || []).map((pid) => paymentsById.get(pid)).filter(Boolean)}
+          carriersById={carriersById}
+          looseSummaries={looseSummaries}
+          onClose={() => setDetailId(null)}
+          onEditMeta={() => setEditingId(detail.id)}
+          onDeletePayroll={() => setConfirmDelete(detail)}
+          onAddSummaries={async (ids) => { try { await transportPayrollsService.addPayments(detail.id, ids); await load(); } catch (err) { alert(err?.message || "Error"); } }}
+          onRemoveSummary={async (pid) => { try { await transportPayrollsService.removePayments(detail.id, [pid]); await load(); } catch (err) { alert(err?.message || "Error"); } }}
+          onMarkPayrollPaid={() => askMarkPayrollPaid(detail)}
+          onRevertPayroll={() => askRevertPayroll(detail)}
+          onMarkItemPaid={askMarkItemPaid}
+          onRevertItem={askRevertItem}
+        />
+      )}
+
+      {editingId && (
+        <PayrollMetaEditModal
+          payroll={payrolls.find((p) => p.id === editingId)}
+          onClose={() => setEditingId(null)}
+          onSave={async (patch) => {
+            try { await transportPayrollsService.update(editingId, patch); setEditingId(null); await load(); }
+            catch (err) { alert(err?.message || "Error"); }
+          }}
+        />
+      )}
+
+      <ConfirmDialog
+        open={!!confirmDelete}
+        title="Eliminar quincena"
+        message={confirmDelete ? `¿Eliminar la quincena "${confirmDelete.name}"? Los resúmenes vuelven a estar sueltos (no se borran).` : ""}
+        confirmLabel="Eliminar"
+        danger
+        onCancel={() => setConfirmDelete(null)}
+        onConfirm={async () => {
+          try { await transportPayrollsService.delete(confirmDelete.id); setDetailId(null); setConfirmDelete(null); await load(); }
+          catch (err) { alert(err?.message || "Error"); }
+        }}
+      />
+
+      {confirmPay && (
+        <TypeToConfirmModal
+          word={confirmPay.verb}
+          title={confirmPay.verb === "Revertir" ? "Revertir pago" : "Marcar como pagada"}
+          message={confirmPay.label}
+          confirmLabel={confirmPay.verb === "Revertir" ? "Revertir" : "Confirmar pago"}
+          danger={confirmPay.verb === "Revertir"}
+          onCancel={() => setConfirmPay(null)}
+          onConfirm={confirmPay.onConfirm}
+        />
+      )}
+    </div>
+  );
+}
+
+// Modal de doble seguridad — el usuario debe escribir exactamente la palabra
+// `word` (case-insensitive) para habilitar el botón de confirmar.
+function TypeToConfirmModal({ word, title, message, confirmLabel, danger = false, onCancel, onConfirm }) {
+  const [typed, setTyped] = useState("");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { setTyped(""); setBusy(false); }, [word]);
+  const ok = typed.trim().toLowerCase() === String(word || "").toLowerCase();
+  return (
+    <Modal
+      open
+      onClose={() => !busy && onCancel()}
+      title={title}
+      size="md"
+      footer={
+        <>
+          <button onClick={() => !busy && onCancel()} className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm" disabled={busy}>
+            Cancelar
+          </button>
+          <button
+            onClick={async () => {
+              if (!ok || busy) return;
+              setBusy(true);
+              try { await onConfirm(); } catch (err) { alert(err?.message || "Error"); setBusy(false); }
+            }}
+            disabled={!ok || busy}
+            className={`rounded-md px-3 py-1.5 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50 ${
+              danger ? "bg-[var(--color-danger)] hover:opacity-90" : "bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)]"
+            }`}
+          >
+            {busy ? "Procesando..." : confirmLabel}
+          </button>
+        </>
+      }
+    >
+      <p className="mb-3 text-sm">{message}</p>
+      <label className="block text-xs text-[var(--color-muted)]">
+        Para confirmar, escribí <b>{word}</b> abajo:
+      </label>
+      <input
+        autoFocus
+        value={typed}
+        onChange={(e) => setTyped(e.target.value)}
+        placeholder={word}
+        disabled={busy}
+        className={`mt-1 w-full rounded-md border bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)] ${
+          ok ? "border-[var(--color-accent)]" : "border-[var(--color-border)]"
+        }`}
+      />
+    </Modal>
+  );
+}
+
+function PayrollCreateModal({ looseSummaries, carriersById, onClose, onCreate }) {
+  const [name, setName] = useState("");
+  const [periodFrom, setPeriodFrom] = useState("");
+  const [periodTo, setPeriodTo] = useState("");
+  const [notes, setNotes] = useState("");
+  const [selected, setSelected] = useState(new Set());
+  const [busy, setBusy] = useState(false);
+
+  const total = useMemo(
+    () => looseSummaries.filter((s) => selected.has(s.id)).reduce((acc, s) => acc + (Number(s.total) || 0), 0),
+    [looseSummaries, selected],
+  );
+
+  const toggle = (id) => {
+    setSelected((prev) => {
+      const n = new Set(prev);
+      if (n.has(id)) n.delete(id); else n.add(id);
+      return n;
+    });
+  };
+
+  const onSubmit = async () => {
+    if (!name.trim() || selected.size === 0) return;
+    setBusy(true);
+    try {
+      await onCreate({ name, periodFrom: periodFrom || null, periodTo: periodTo || null, paymentIds: [...selected], notes });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      open
+      onClose={() => !busy && onClose()}
+      title="Nueva quincena"
+      size="xl"
+      footer={
+        <>
+          <button onClick={() => !busy && onClose()} disabled={busy} className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm">
+            Cancelar
+          </button>
+          <button
+            onClick={onSubmit}
+            disabled={!name.trim() || selected.size === 0 || busy}
+            className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-[var(--color-accent-fg)] hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+          >
+            {busy ? "Creando..." : `Crear (${selected.size} resúmenes)`}
+          </button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        <div className="grid gap-2 md:grid-cols-2">
+          <label className="block">
+            <span className="block text-xs text-[var(--color-muted)]">Nombre *</span>
+            <input
+              autoFocus
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder='ej. "Quincena 1 de Mayo 2026"'
+              className="mt-1 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)]"
+            />
+          </label>
+          <div className="grid grid-cols-2 gap-1">
+            <label className="block">
+              <span className="block text-xs text-[var(--color-muted)]">Desde</span>
+              <input
+                type="date"
+                value={periodFrom}
+                onChange={(e) => setPeriodFrom(e.target.value)}
+                className="mt-1 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-2 text-sm outline-none focus:border-[var(--color-accent)]"
+              />
+            </label>
+            <label className="block">
+              <span className="block text-xs text-[var(--color-muted)]">Hasta</span>
+              <input
+                type="date"
+                value={periodTo}
+                onChange={(e) => setPeriodTo(e.target.value)}
+                className="mt-1 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-2 text-sm outline-none focus:border-[var(--color-accent)]"
+              />
+            </label>
+          </div>
+        </div>
+        <label className="block">
+          <span className="block text-xs text-[var(--color-muted)]">Notas (opcional)</span>
+          <input
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            className="mt-1 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)]"
+          />
+        </label>
+
+        <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] p-2">
+          <div className="mb-2 flex items-center justify-between text-xs">
+            <span className="font-medium uppercase tracking-wide text-[var(--color-muted)]">
+              Resúmenes sueltos para incluir
+            </span>
+            <span className="font-semibold tabular-nums">{fmtCurrency(total)}</span>
+          </div>
+          {looseSummaries.length === 0 ? (
+            <div className="rounded-md border border-dashed border-[var(--color-border)] bg-[var(--color-surface)] py-6 text-center text-xs text-[var(--color-muted)]">
+              No hay resúmenes pendientes sueltos. Generá uno desde la pestaña "Resúmenes".
+            </div>
+          ) : (
+            <div className="max-h-72 space-y-1 overflow-auto">
+              {looseSummaries.map((s) => {
+                const isSel = selected.has(s.id);
+                const carrier = carriersById.get(s.carrierId);
+                const period = (s.periodFrom || s.periodTo) ? `${s.periodFrom || "?"} → ${s.periodTo || "?"}` : "—";
+                return (
+                  <button
+                    key={s.id}
+                    onClick={() => toggle(s.id)}
+                    className={`flex w-full items-center gap-2 rounded-md border px-2 py-1.5 text-left text-sm ${
+                      isSel
+                        ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)]"
+                        : "border-[var(--color-border)] bg-[var(--color-surface)] hover:bg-[var(--color-accent-soft)]"
+                    }`}
+                  >
+                    <input type="checkbox" checked={isSel} readOnly className="pointer-events-none" />
+                    <span className="flex-1 truncate">
+                      <span className="font-medium">{carrier?.alias || s.carrierId}</span>
+                      <span className="ml-1 text-[10px] text-[var(--color-muted)]">{period}</span>
+                    </span>
+                    <span className="tabular-nums">{fmtCurrency(s.total)}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function PayrollMetaEditModal({ payroll, onClose, onSave }) {
+  const [name, setName] = useState(payroll?.name || "");
+  const [periodFrom, setPeriodFrom] = useState(payroll?.periodFrom || "");
+  const [periodTo, setPeriodTo] = useState(payroll?.periodTo || "");
+  const [notes, setNotes] = useState(payroll?.notes || "");
+  const [busy, setBusy] = useState(false);
+  const onSubmit = async () => {
+    if (!name.trim()) return;
+    setBusy(true);
+    try {
+      await onSave({ name, periodFrom: periodFrom || null, periodTo: periodTo || null, notes });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Modal
+      open
+      onClose={() => !busy && onClose()}
+      title="Editar quincena"
+      size="md"
+      footer={
+        <>
+          <button onClick={() => !busy && onClose()} disabled={busy} className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm">
+            Cancelar
+          </button>
+          <button onClick={onSubmit} disabled={!name.trim() || busy} className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-[var(--color-accent-fg)] hover:bg-[var(--color-accent-hover)] disabled:opacity-50">
+            {busy ? "Guardando..." : "Guardar"}
+          </button>
+        </>
+      }
+    >
+      <div className="space-y-2">
+        <label className="block">
+          <span className="block text-xs text-[var(--color-muted)]">Nombre</span>
+          <input value={name} onChange={(e) => setName(e.target.value)} className="mt-1 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)]" />
+        </label>
+        <div className="grid grid-cols-2 gap-2">
+          <label className="block">
+            <span className="block text-xs text-[var(--color-muted)]">Desde</span>
+            <input type="date" value={periodFrom} onChange={(e) => setPeriodFrom(e.target.value)} className="mt-1 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-2 text-sm outline-none focus:border-[var(--color-accent)]" />
+          </label>
+          <label className="block">
+            <span className="block text-xs text-[var(--color-muted)]">Hasta</span>
+            <input type="date" value={periodTo} onChange={(e) => setPeriodTo(e.target.value)} className="mt-1 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-2 text-sm outline-none focus:border-[var(--color-accent)]" />
+          </label>
+        </div>
+        <label className="block">
+          <span className="block text-xs text-[var(--color-muted)]">Notas</span>
+          <input value={notes} onChange={(e) => setNotes(e.target.value)} className="mt-1 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)]" />
+        </label>
+      </div>
+    </Modal>
+  );
+}
+
+function PayrollDetailModal({
+  payroll, items, carriersById, looseSummaries,
+  onClose, onEditMeta, onDeletePayroll, onAddSummaries, onRemoveSummary,
+  onMarkPayrollPaid, onRevertPayroll, onMarkItemPaid, onRevertItem,
+}) {
+  const [addingOpen, setAddingOpen] = useState(false);
+  const [adding, setAdding] = useState(new Set());
+  const isPaid = payroll.status === "paid";
+
+  const onAddConfirm = async () => {
+    await onAddSummaries([...adding]);
+    setAdding(new Set());
+    setAddingOpen(false);
+  };
+
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title={`📅 ${payroll.name}`}
+      size="xl"
+      footer={
+        <>
+          <button onClick={onClose} className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm">
+            Cerrar
+          </button>
+          {!isPaid && (
+            <>
+              <button onClick={onEditMeta} className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)]">
+                ✏️ Editar
+              </button>
+              <button onClick={onDeletePayroll} className="rounded-md border border-[var(--color-danger)] px-3 py-1.5 text-sm text-[var(--color-danger)]">
+                Eliminar
+              </button>
+              <button onClick={onMarkPayrollPaid} className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-[var(--color-accent-fg)] hover:bg-[var(--color-accent-hover)]">
+                💰 Marcar quincena pagada
+              </button>
+            </>
+          )}
+          {isPaid && (
+            <button onClick={onRevertPayroll} className="rounded-md border border-[var(--color-warning)] px-3 py-1.5 text-sm text-[var(--color-warning)]">
+              ↶ Revertir pago
+            </button>
+          )}
+        </>
+      }
+    >
+      <div className="mb-3 flex flex-wrap items-baseline gap-3 text-sm">
+        <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+          isPaid
+            ? "bg-[var(--color-success-soft)] text-[var(--color-success)]"
+            : "bg-[var(--color-warning-soft)] text-[var(--color-warning)]"
+        }`}>
+          {isPaid ? "Pagada" : "Pendiente"}
+        </span>
+        {(payroll.periodFrom || payroll.periodTo) && (
+          <span className="text-[var(--color-muted)]">
+            {payroll.periodFrom || "?"} → {payroll.periodTo || "?"}
+          </span>
+        )}
+        <span className="ml-auto">
+          <span className="text-[var(--color-muted)]">Total: </span>
+          <span className="font-semibold tabular-nums">{fmtCurrency(payroll.total)}</span>
+        </span>
+      </div>
+      {payroll.notes && (
+        <div className="mb-3 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-sm">
+          {payroll.notes}
+        </div>
+      )}
+
+      <div className="mb-2 flex items-center justify-between">
+        <h4 className="text-sm font-semibold">Resúmenes ({items.length})</h4>
+        {!isPaid && looseSummaries.length > 0 && (
+          <button
+            onClick={() => setAddingOpen((v) => !v)}
+            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
+          >
+            {addingOpen ? "▾" : "▸"} + Agregar resumen
+          </button>
+        )}
+      </div>
+
+      {addingOpen && (
+        <div className="mb-3 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] p-2">
+          <div className="mb-2 max-h-48 space-y-1 overflow-auto">
+            {looseSummaries.map((s) => {
+              const isSel = adding.has(s.id);
+              const carrier = carriersById.get(s.carrierId);
+              return (
+                <button
+                  key={s.id}
+                  onClick={() => {
+                    setAdding((prev) => {
+                      const n = new Set(prev);
+                      if (n.has(s.id)) n.delete(s.id); else n.add(s.id);
+                      return n;
+                    });
+                  }}
+                  className={`flex w-full items-center gap-2 rounded-md border px-2 py-1.5 text-left text-xs ${
+                    isSel ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)]" : "border-[var(--color-border)] bg-[var(--color-surface)]"
+                  }`}
+                >
+                  <input type="checkbox" checked={isSel} readOnly className="pointer-events-none" />
+                  <span className="flex-1 truncate font-medium">{carrier?.alias || s.carrierId}</span>
+                  <span className="tabular-nums">{fmtCurrency(s.total)}</span>
+                </button>
+              );
+            })}
+          </div>
+          <button
+            onClick={onAddConfirm}
+            disabled={adding.size === 0}
+            className="rounded-md bg-[var(--color-accent)] px-3 py-1 text-xs font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
+          >
+            Agregar {adding.size} a la quincena
+          </button>
+        </div>
+      )}
+
+      <div className="space-y-1.5">
+        {items.length === 0 && (
+          <div className="rounded-md border border-dashed border-[var(--color-border)] py-4 text-center text-xs text-[var(--color-muted)]">
+            La quincena está vacía. Agregá resúmenes con el botón de arriba.
+          </div>
+        )}
+        {items.map((it) => {
+          const carrier = carriersById.get(it.carrierId);
+          const itemPaid = it.status === "paid";
+          return (
+            <div key={it.id} className="flex items-center gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2">
+              <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                itemPaid ? "bg-[var(--color-success-soft)] text-[var(--color-success)]" : "bg-[var(--color-warning-soft)] text-[var(--color-warning)]"
+              }`}>
+                {itemPaid ? "Pagado" : "Pendiente"}
+              </span>
+              <div className="flex-1 min-w-0">
+                <div className="text-sm font-medium truncate">{carrier?.alias || it.carrierId}</div>
+                <div className="text-[10px] text-[var(--color-muted)]">
+                  {it.periodFrom || "?"} → {it.periodTo || "?"} · {(it.tripIds || []).length} vueltas
+                </div>
+              </div>
+              <span className="font-semibold tabular-nums text-sm">{fmtCurrency(it.total)}</span>
+              {!isPaid && (
+                <div className="flex gap-1">
+                  {!itemPaid && (
+                    <>
+                      <button
+                        onClick={() => onMarkItemPaid(it)}
+                        className="rounded-md bg-[var(--color-accent)] px-2 py-1 text-[10px] font-medium text-[var(--color-accent-fg)] hover:bg-[var(--color-accent-hover)]"
+                      >
+                        💰 Pagar
+                      </button>
+                      <button
+                        onClick={() => onRemoveSummary(it.id)}
+                        title="Sacar de la quincena (vuelve a estar suelto)"
+                        className="rounded-md border border-[var(--color-border)] px-2 py-1 text-[10px] text-[var(--color-danger)] hover:bg-[var(--color-accent-soft)]"
+                      >
+                        ✕
+                      </button>
+                    </>
+                  )}
+                  {itemPaid && (
+                    <button
+                      onClick={() => onRevertItem(it)}
+                      className="rounded-md border border-[var(--color-warning)] px-2 py-1 text-[10px] text-[var(--color-warning)]"
+                    >
+                      ↶
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </Modal>
   );
 }
