@@ -11,6 +11,9 @@ import {
   ACCOUNT_TYPES,
   ACCOUNT_TYPE_RUT,
   DEFAULT_BANK_CODE,
+  CASH_BANK_CODE,
+  isCashBank,
+  bankName,
   rutWithoutDv,
 } from "../utils/banks";
 
@@ -90,6 +93,28 @@ export default function WorkerEditModal({ open, mode, worker, allWorkers = [], o
 
   const accType = Number(form.bd_accountType);
   const isCuentaRutSelected = accType === ACCOUNT_TYPE_RUT;
+  const isCash = isCashBank(form.bd_bankCode);
+
+  const switchToCash = () => {
+    setForm((f) => ({
+      ...f,
+      // Recordamos el banco previo para poder volver con un click sin
+      // perder los datos.
+      bd_prevBankCode: isCashBank(f.bd_bankCode) ? (f.bd_prevBankCode || DEFAULT_BANK_CODE) : f.bd_bankCode,
+      bd_prevAccountType: isCashBank(f.bd_bankCode) ? (f.bd_prevAccountType ?? ACCOUNT_TYPE_RUT) : f.bd_accountType,
+      bd_prevAccountNumber: isCashBank(f.bd_bankCode) ? (f.bd_prevAccountNumber ?? "") : f.bd_accountNumber,
+      bd_bankCode: CASH_BANK_CODE,
+    }));
+  };
+
+  const switchToBank = () => {
+    setForm((f) => ({
+      ...f,
+      bd_bankCode: f.bd_prevBankCode || DEFAULT_BANK_CODE,
+      bd_accountType: f.bd_prevAccountType != null ? Number(f.bd_prevAccountType) : ACCOUNT_TYPE_RUT,
+      bd_accountNumber: f.bd_prevAccountNumber || rutWithoutDv(f.bd_paymentRut || f.rut),
+    }));
+  };
 
   const onAccountTypeChange = (v) => {
     const t = Number(v);
@@ -132,11 +157,19 @@ export default function WorkerEditModal({ open, mode, worker, allWorkers = [], o
     const payRut = normalizeRut(form.bd_paymentRut || rut);
     if (!validateRut(payRut)) return setError("RUT de pago inválido");
 
-    const accNumber =
-      accType === ACCOUNT_TYPE_RUT ? rutWithoutDv(payRut) : String(form.bd_accountNumber || "").trim();
-    if (!accNumber) return setError("Número de cuenta requerido");
-    const bankCode = accType === ACCOUNT_TYPE_RUT ? DEFAULT_BANK_CODE : form.bd_bankCode;
-    if (!bankCode) return setError("Selecciona el banco");
+    // Efectivo: no requiere cuenta/banco propio, se guarda con bankCode "EFE"
+    // y el resto puede quedar como placeholder. Salteamos las validaciones.
+    let bankCode, accNumber;
+    if (isCash) {
+      bankCode = CASH_BANK_CODE;
+      accNumber = String(form.bd_accountNumber || "").trim() || rutWithoutDv(payRut);
+    } else {
+      accNumber =
+        accType === ACCOUNT_TYPE_RUT ? rutWithoutDv(payRut) : String(form.bd_accountNumber || "").trim();
+      if (!accNumber) return setError("Número de cuenta requerido");
+      bankCode = accType === ACCOUNT_TYPE_RUT ? DEFAULT_BANK_CODE : form.bd_bankCode;
+      if (!bankCode) return setError("Selecciona el banco");
+    }
 
     const newLeader = form.groupLeader.trim().toUpperCase();
     if (newLeader && !existingLeaders.includes(newLeader) && !allowNewLeader) {
@@ -286,46 +319,98 @@ export default function WorkerEditModal({ open, mode, worker, allWorkers = [], o
         </div>
 
         <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)] p-4">
-          <div className="mb-3 flex items-center justify-between">
-            <h3 className="text-sm font-semibold">Datos bancarios</h3>
-            {isCuentaRutSelected && (
-              <span className="rounded bg-[var(--color-accent-soft)] px-2 py-0.5 text-xs text-[var(--color-accent)]">
-                Cuenta RUT (Banco Estado)
-              </span>
-            )}
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-sm font-semibold">Forma de pago</h3>
+            <div className="flex gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-0.5 text-xs">
+              <button
+                type="button"
+                onClick={switchToBank}
+                className={`rounded px-3 py-1 font-medium transition-colors ${
+                  !isCash
+                    ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
+                    : "text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)]"
+                }`}
+                title="Pago por transferencia"
+              >
+                🏦 Banco
+              </button>
+              <button
+                type="button"
+                onClick={switchToCash}
+                className={`rounded px-3 py-1 font-medium transition-colors ${
+                  isCash
+                    ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
+                    : "text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)]"
+                }`}
+                title="Pago en efectivo"
+              >
+                💵 Efectivo
+              </button>
+            </div>
           </div>
 
-          <div className="grid gap-4 sm:grid-cols-2">
-            <TextField
-              label="RUT de pago"
-              required
-              value={form.bd_paymentRut}
-              onChange={onPaymentRutChange}
-              placeholder="Puede diferir del trabajador"
-            />
-            <Select
-              label="Tipo de cuenta"
-              required
-              value={String(form.bd_accountType)}
-              onChange={onAccountTypeChange}
-              options={ACCOUNT_TYPES.map((t) => ({ value: String(t.value), label: t.label }))}
-              placeholder="Selecciona"
-            />
-            <TextField
-              label="Número de cuenta"
-              required
-              value={form.bd_accountNumber}
-              onChange={(v) => setForm((f) => ({ ...f, bd_accountNumber: v }))}
-            />
-            <Select
-              label="Banco"
-              required
-              value={form.bd_bankCode}
-              onChange={(v) => setForm((f) => ({ ...f, bd_bankCode: v }))}
-              options={BANKS.map((b) => ({ value: b.code, label: `${b.code} · ${b.name}` }))}
-              placeholder="Selecciona"
-            />
-          </div>
+          {isCash ? (
+            <div className="space-y-3">
+              <div className="rounded-md border border-[var(--color-accent)] bg-[var(--color-accent-soft)] px-3 py-2 text-xs text-[var(--color-accent)]">
+                💵 Este trabajador cobra en efectivo. No se envía a la nómina del banco.
+              </div>
+              <TextField
+                label="RUT de pago"
+                required
+                value={form.bd_paymentRut}
+                onChange={onPaymentRutChange}
+                placeholder="Puede diferir del trabajador"
+              />
+              {(form.bd_prevBankCode || form.bd_prevAccountNumber) && (
+                <p className="text-[10px] text-[var(--color-muted)]">
+                  Datos bancarios guardados (se restauran si volvés a Banco):
+                  {form.bd_prevBankCode && ` ${bankName(form.bd_prevBankCode)}`}
+                  {form.bd_prevAccountNumber && ` · ${form.bd_prevAccountNumber}`}
+                </p>
+              )}
+            </div>
+          ) : (
+            <>
+              {isCuentaRutSelected && (
+                <div className="mb-3">
+                  <span className="rounded bg-[var(--color-accent-soft)] px-2 py-0.5 text-xs text-[var(--color-accent)]">
+                    Cuenta RUT (Banco Estado)
+                  </span>
+                </div>
+              )}
+              <div className="grid gap-4 sm:grid-cols-2">
+                <TextField
+                  label="RUT de pago"
+                  required
+                  value={form.bd_paymentRut}
+                  onChange={onPaymentRutChange}
+                  placeholder="Puede diferir del trabajador"
+                />
+                <Select
+                  label="Tipo de cuenta"
+                  required
+                  value={String(form.bd_accountType)}
+                  onChange={onAccountTypeChange}
+                  options={ACCOUNT_TYPES.map((t) => ({ value: String(t.value), label: t.label }))}
+                  placeholder="Selecciona"
+                />
+                <TextField
+                  label="Número de cuenta"
+                  required
+                  value={form.bd_accountNumber}
+                  onChange={(v) => setForm((f) => ({ ...f, bd_accountNumber: v }))}
+                />
+                <Select
+                  label="Banco"
+                  required
+                  value={form.bd_bankCode}
+                  onChange={(v) => setForm((f) => ({ ...f, bd_bankCode: v }))}
+                  options={BANKS.filter((b) => b.code !== CASH_BANK_CODE).map((b) => ({ value: b.code, label: `${b.code} · ${b.name}` }))}
+                  placeholder="Selecciona"
+                />
+              </div>
+            </>
+          )}
         </div>
 
         {error && (

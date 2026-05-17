@@ -3,6 +3,12 @@ import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 import { useTheme } from "../contexts/ThemeContext";
 
+// Inyectado por Vite en build-time desde el count de commits de HEAD.
+// Visible en el header para confirmar que el bundle no quedó en caché vieja
+// (PWA/Service Worker). Si el usuario ve una versión menor a la última
+// desplegada → hard refresh.
+export const APP_VERSION = typeof __APP_VERSION__ !== "undefined" ? __APP_VERSION__ : "dev";
+
 const navItems = [
   { to: "/", label: "Dashboard", icon: "🏠", end: true },
   { to: "/faenas", label: "Faenas", icon: "🌾" },
@@ -177,6 +183,8 @@ export default function Layout() {
               ☰
             </button>
             <div className="truncate text-xs text-[var(--color-muted)] sm:text-sm">
+              <span className="font-semibold text-[var(--color-text)]">Agrofrutos {APP_VERSION}</span>
+              <span className="mx-1.5 text-[var(--color-border)]">·</span>
               <span className="truncate">{user?.email}</span>
               <span className="ml-2 rounded bg-[var(--color-accent-soft)] px-2 py-0.5 text-[10px] text-[var(--color-accent)] sm:text-xs">
                 {user?.role}

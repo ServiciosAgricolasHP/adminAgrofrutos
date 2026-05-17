@@ -67,6 +67,27 @@ const MONTH_NAMES = [
   "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
 ];
 
+// Sábado/domingo — la convención del proyecto los marca en rojo (igual que
+// los grids de tratoHE). Los feriados configurados a nivel labor viven en
+// dayPrices y no están disponibles acá, así que solo cubrimos finde.
+function isWeekendDate(dateStr) {
+  if (!dateStr) return false;
+  const d = new Date(dateStr + "T00:00:00");
+  if (isNaN(d.getTime())) return false;
+  const dow = d.getDay();
+  return dow === 0 || dow === 6;
+}
+
+const WEEKDAY_SHORT = ["dom", "lun", "mar", "mié", "jue", "vie", "sáb"];
+const MONTH_SHORT_LIST = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
+// "vie 16-may-2026" — más leíble que la ISO cruda en los headers de modales.
+function humanDate(dateStr) {
+  if (!dateStr) return "";
+  const d = new Date(dateStr + "T00:00:00");
+  if (isNaN(d.getTime())) return dateStr;
+  return `${WEEKDAY_SHORT[d.getDay()]} ${String(d.getDate()).padStart(2, "0")}-${MONTH_SHORT_LIST[d.getMonth()]}-${d.getFullYear()}`;
+}
+
 const LABOR_TYPE_LABEL = {
   cosecha: "cosecha",
   trato: "a trato",
@@ -580,7 +601,11 @@ function MonthGrid({ year, month, dayIndex, loading, onCellClick, onBarClick }) 
             >
               <div
                 className={`text-xs ${
-                  isToday ? "font-semibold text-[var(--color-accent)]" : "text-[var(--color-muted)]"
+                  isToday
+                    ? "font-semibold text-[var(--color-accent)]"
+                    : isWeekendDate(c.date)
+                      ? "font-medium text-[#dc2626]"
+                      : "text-[var(--color-muted)]"
                 }`}
               >
                 {c.day}
@@ -947,7 +972,9 @@ function DayDetailDrawer({ date, subfaenaId, workdays, trips, cycleById, subfaen
       >
         <header className="flex shrink-0 items-start justify-between border-b border-[var(--color-border)] px-4 py-3">
           <div>
-            <h2 className="text-lg font-semibold">{date}</h2>
+            <h2 className={`text-lg font-semibold ${isWeekendDate(date) ? "text-[#dc2626]" : ""}`}>
+              {humanDate(date)}
+            </h2>
             <p className="text-xs text-[var(--color-muted)]">{subfaenaLabel}</p>
           </div>
           <button
@@ -1018,7 +1045,24 @@ function DayDetailDrawer({ date, subfaenaId, workdays, trips, cycleById, subfaen
                             </td>
                             <td className="px-2 py-1.5 text-right tabular-nums">{l.workerCount}</td>
                             <td className="px-2 py-1.5 text-right text-xs tabular-nums">
-                              {laborMetricLabel(l, catalogs)}
+                              {l.laborType === "tratoHE" ? (
+                                <div className="flex flex-col items-end leading-tight">
+                                  {l.jornadas > 0 && (
+                                    <span>
+                                      {fmtNumber(l.jornadas)}{" "}
+                                      <span className="text-[var(--color-muted)]">jorn.</span>
+                                    </span>
+                                  )}
+                                  {l.overtimeHours > 0 && (
+                                    <span>
+                                      {fmtNumber(l.overtimeHours)}{" "}
+                                      <span className="text-[var(--color-muted)]">HE</span>
+                                    </span>
+                                  )}
+                                </div>
+                              ) : (
+                                laborMetricLabel(l, catalogs)
+                              )}
                             </td>
                             <td className="px-2 py-1.5 text-right font-medium tabular-nums">
                               {fmtCurrency(l.amount)}
@@ -1094,7 +1138,28 @@ function DayDetailDrawer({ date, subfaenaId, workdays, trips, cycleById, subfaen
                                             <div className="font-mono text-[10px] text-[var(--color-muted)]">{w.rut}</div>
                                           </td>
                                           <td className="px-1 py-1 text-right tabular-nums">
-                                            {prodParts.join(" · ") || "—"}
+                                            {l.laborType === "tratoHE" ? (
+                                              <div className="flex flex-col items-end leading-tight">
+                                                {w.jornadas > 0 && (
+                                                  <span>
+                                                    {fmtNumber(w.jornadas)}{" "}
+                                                    <span className="text-[var(--color-muted)]">jorn.</span>
+                                                  </span>
+                                                )}
+                                                {w.overtimeHours > 0 && (
+                                                  <span>
+                                                    {fmtNumber(w.overtimeHours)}{" "}
+                                                    <span className="text-[var(--color-muted)]">HE</span>
+                                                  </span>
+                                                )}
+                                                {w.pisoAmount > 0 && (
+                                                  <span>🪙 {fmtCurrency(w.pisoAmount)}</span>
+                                                )}
+                                                {w.jornadas === 0 && w.overtimeHours === 0 && w.pisoAmount === 0 && "—"}
+                                              </div>
+                                            ) : (
+                                              prodParts.join(" · ") || "—"
+                                            )}
                                           </td>
                                           <td className="px-1 py-1 text-right font-medium tabular-nums">
                                             {fmtCurrency(w.amount)}
@@ -1198,7 +1263,9 @@ function DayExpandedModal({ date, subfaenasOfDay, subfaenaById, faenaById, onClo
       >
         <header className="flex shrink-0 items-baseline justify-between border-b border-[var(--color-border)] px-5 py-3">
           <div>
-            <h2 className="text-lg font-semibold">{date}</h2>
+            <h2 className={`text-lg font-semibold ${isWeekendDate(date) ? "text-[#dc2626]" : ""}`}>
+              {humanDate(date)}
+            </h2>
             <p className="text-xs text-[var(--color-muted)]">
               {subfaenasOfDay.length} subfaena{subfaenasOfDay.length === 1 ? "" : "s"} activa{subfaenasOfDay.length === 1 ? "" : "s"}
             </p>

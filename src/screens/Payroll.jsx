@@ -427,19 +427,28 @@ export default function Payroll() {
   };
 
   const generateAndSave = async () => {
-    const items = previewItems.filter((p) => p.include && Number(p.amount) > 0);
+    // Incluimos también items con amount === 0 cuando hubo anticipo aplicado
+    // (caso: el anticipo cubrió todo el bruto). Si no, sus workdays no se
+    // taggean ni los anticipos se marcan como aplicados — quedan huérfanos.
+    // El XLSX del banco los filtra después (no se hacen transferencias de $0).
+    const items = previewItems.filter(
+      (p) => p.include && (Number(p.amount) > 0 || Number(p.advance) > 0),
+    );
     if (items.length === 0) {
-      alert("No hay trabajadores seleccionados con monto > 0.");
+      alert("No hay trabajadores seleccionados con monto > 0 ni anticipos por aplicar.");
       return;
     }
-    const missing = items.filter((p) => !isCashBank(p.bankCode) && (!p.accountNumber || !p.bankCode));
+    // Para validaciones de cuenta solo consideramos los que realmente reciben
+    // pago (amount > 0). Los cero-neto no van al banco.
+    const payableItems = items.filter((p) => Number(p.amount) > 0);
+    const missing = payableItems.filter((p) => !isCashBank(p.bankCode) && (!p.accountNumber || !p.bankCode));
     if (missing.length > 0) {
       const proceed = confirm(
         `${missing.length} trabajador(es) bancarizados tienen datos incompletos. ¿Generar de todos modos?`,
       );
       if (!proceed) return;
     }
-    const suspicious = items
+    const suspicious = payableItems
       .map((p) => ({ p, issue: validateAccountNumber(p.accountNumber, p.bankCode) }))
       .filter((x) => x.issue);
     if (suspicious.length > 0) {
@@ -1323,6 +1332,11 @@ function PreviewTable({
                       onChange={(e) => updatePreview(p.rut, { amount: Number(e.target.value) || 0 })}
                       className="w-28 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-right text-sm font-medium tabular-nums outline-none focus:border-[var(--color-accent)]"
                     />
+                    {Number(p.amount) === 0 && Number(p.advance) > 0 && (
+                      <div className="mt-0.5 text-[10px] font-normal text-[var(--color-warning)]" title="El anticipo cubrió todo el bruto. Igual se incluye en la nómina para marcar workdays y anticipo como aplicados, pero no se transfiere.">
+                        ↩ liquidado por anticipo
+                      </div>
+                    )}
                   </td>
                   <td className="px-3 py-2 text-center">
                     <button

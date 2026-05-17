@@ -145,10 +145,14 @@ function buildBchileSheet(wb, items) {
     "Campo Libre 2 (Glosa 2)",
   ];
   ws.addRow(headers);
+  // Filtramos cero-neto: existen en la nómina solo para liquidar anticipos
+  // (bruto = anticipo), pero el banco no acepta transferencias de $0.
   // Orden alfabético por nombre para que el correlativo A001…A999 sea estable.
-  const sorted = [...items].sort((a, b) =>
-    cleanText(a.name || "").localeCompare(cleanText(b.name || ""), "es", { sensitivity: "base" }),
-  );
+  const sorted = items
+    .filter((it) => Math.round(Number(it.amount) || 0) > 0)
+    .sort((a, b) =>
+      cleanText(a.name || "").localeCompare(cleanText(b.name || ""), "es", { sensitivity: "base" }),
+    );
   sorted.forEach((it, idx) => {
     const identifier = `A${String(idx + 1).padStart(3, "0")}`;
     // `paymentRut` viene de bankDetails[0] (la cuenta destino del banco) y

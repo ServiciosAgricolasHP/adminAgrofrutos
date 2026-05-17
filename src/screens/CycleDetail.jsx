@@ -983,9 +983,16 @@ export default function CycleDetail() {
     [cycleTrips],
   );
 
-  const grandTotal = useMemo(
-    () => Object.values(totalsByLabor).reduce((a, b) => a + b, 0) + transportTotal,
-    [totalsByLabor, transportTotal],
+  // "Total ciclo" = suma cruda de labores (sin transporte). El transporte
+  // se muestra aparte y se suma en "Balance con transporte".
+  const laborsTotal = useMemo(
+    () => Object.values(totalsByLabor).reduce((a, b) => a + b, 0),
+    [totalsByLabor],
+  );
+  const grandTotal = laborsTotal; // alias retrocompat — sigue siendo "Total ciclo"
+  const balanceWithTransport = useMemo(
+    () => laborsTotal + transportTotal,
+    [laborsTotal, transportTotal],
   );
 
   const reloadTransports = async () => {
@@ -1039,8 +1046,11 @@ export default function CycleDetail() {
       if (qty === 0) continue;
       const amount = mode === "flat" ? price : qty * price;
       const docId = workdayDocId(id, laborId, w.rut, date, ck);
+      // Para trato sincronizar también el campo legacy `tiers["0"]` que
+      // `getTratoTierTotals` prioriza al calcular totales. Si no se actualiza
+      // queda stale tras cambiar el precio del día. Ver onCellValueChanged.
       const patch = isTrato
-        ? { ...wd, amount }
+        ? { ...wd, amount, tiers: { "0": { qty, amount } }, totalAmount: amount }
         : { ...wd, qualityX: x, containerY: y, amount };
       await workdaysService.upsert(docId, patch);
       updates[mapKey] = patch;
@@ -1584,12 +1594,22 @@ export default function CycleDetail() {
         params.node.setDataValue(field, 0);
         params.node.setDataValue(`${field}__amt`, 0);
       } else {
+        // `tiers` (single-key "0") es el campo legacy que `normalizeTratoWorkday`
+        // agrega al cargar. `getTratoTierTotals` prioriza ese campo, así que
+        // hay que sincronizarlo con `qty/amount` o el labor total queda
+        // contando el valor viejo hasta que se recargue la página.
+        const tiersField = { "0": { qty, amount } };
         await workdaysService.upsert(docId, {
           cycleId: id, laborId: activeLabor.id, workerRut, date, qty, amount,
+          tiers: tiersField, totalAmount: amount,
         });
         setWorkdaysByLabor((prev) => {
           const lab = { ...(prev[activeLabor.id] || {}) };
-          lab[mapKey] = { ...lab[mapKey], cycleId: id, laborId: activeLabor.id, workerRut, date, qty, amount };
+          lab[mapKey] = {
+            ...lab[mapKey],
+            cycleId: id, laborId: activeLabor.id, workerRut, date, qty, amount,
+            tiers: tiersField, totalAmount: amount,
+          };
           return { ...prev, [activeLabor.id]: lab };
         });
         params.node.setDataValue(field, qty);
@@ -2815,6 +2835,11 @@ export default function CycleDetail() {
             </button>
           );
         })}
+        <div className="rounded-lg border border-[var(--color-accent)] bg-[var(--color-accent-soft)] p-3 shadow-sm">
+          <div className="text-xs font-medium uppercase tracking-wider text-[var(--color-accent)]">Total ciclo</div>
+          <div className="mt-1 text-lg font-bold tabular-nums text-[var(--color-accent)]">{fmtCurrency(grandTotal)}</div>
+          <div className="mt-0.5 text-[10px] text-[var(--color-muted)]">Suma de labores</div>
+        </div>
         {(transportTotal > 0 || cycleTrips.length > 0) && (
           <button
             type="button"
@@ -2831,10 +2856,13 @@ export default function CycleDetail() {
             </div>
           </button>
         )}
-        <div className="rounded-lg border border-[var(--color-accent)] bg-[var(--color-accent-soft)] p-3 shadow-sm">
-          <div className="text-xs font-medium uppercase tracking-wider text-[var(--color-accent)]">Total ciclo</div>
-          <div className="mt-1 text-lg font-bold tabular-nums text-[var(--color-accent)]">{fmtCurrency(grandTotal)}</div>
-        </div>
+        {(transportTotal > 0 || cycleTrips.length > 0) && (
+          <div className="rounded-lg border border-[var(--color-success)] bg-[var(--color-success-soft)] p-3 shadow-sm">
+            <div className="text-xs font-medium uppercase tracking-wider text-[var(--color-success)]">Balance con transporte</div>
+            <div className="mt-1 text-lg font-bold tabular-nums text-[var(--color-success)]">{fmtCurrency(balanceWithTransport)}</div>
+            <div className="mt-0.5 text-[10px] text-[var(--color-muted)]">Total ciclo + transporte</div>
+          </div>
+        )}
       </div>
       )}
 
