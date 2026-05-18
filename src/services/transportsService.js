@@ -133,6 +133,17 @@ export const tripsService = {
 // PAYMENTS (resúmenes)
 // ============================================================
 
+// Filtra una lista de tripIds y devuelve solo los que existen actualmente
+// en Firestore. Necesario porque un resumen pending puede tener referencias
+// a vueltas que el usuario borró después (las pending son borrables) — si
+// el batch luego intenta `.update()` esos IDs falla con "No document to
+// update" y aborta toda la operación.
+async function filterExistingTripIds(tripIds) {
+  if (!tripIds || tripIds.length === 0) return [];
+  const snaps = await Promise.all(tripIds.map((id) => getDoc(doc(db, TRIPS, id))));
+  return tripIds.filter((_, i) => snaps[i].exists());
+}
+
 export const paymentsService = {
   async listByCarrier(carrierId) {
     const q = query(collection(db, PAYMENTS), where("carrierId", "==", carrierId));
@@ -227,12 +238,17 @@ export const paymentsService = {
   },
 
   // Delete a pending summary; trips are unlinked (status remains pending).
+  // Si alguna vuelta referenciada ya fue borrada por separado (el resumen
+  // arrastra el ID dangling), la salteamos para que el batch no aborte
+  // entero con "No document to update".
   async deleteSummary(paymentId) {
     const before = await this.getById(paymentId);
     if (!before) return;
     if (before.status !== "pending") throw new Error("Solo se pueden eliminar resúmenes pendientes");
+    const tripIds = before.tripIds || [];
+    const existingTripIds = await filterExistingTripIds(tripIds);
     const batch = writeBatch(db);
-    for (const tid of before.tripIds || []) {
+    for (const tid of existingTripIds) {
       batch.update(doc(db, TRIPS, tid), { paymentId: null, ...stamp() });
     }
     batch.delete(doc(db, PAYMENTS, paymentId));
@@ -245,6 +261,8 @@ export const paymentsService = {
     const before = await this.getById(paymentId);
     if (!before) throw new Error("Resumen no encontrado");
     if (before.status === "paid") return;
+    const tripIds = before.tripIds || [];
+    const existingTripIds = await filterExistingTripIds(tripIds);
     const batch = writeBatch(db);
     batch.update(doc(db, PAYMENTS, paymentId), {
       status: "paid",
@@ -252,7 +270,7 @@ export const paymentsService = {
       paidBy: auth.currentUser?.uid || null,
       ...stamp(),
     });
-    for (const tid of before.tripIds || []) {
+    for (const tid of existingTripIds) {
       batch.update(doc(db, TRIPS, tid), { status: "paid", ...stamp() });
     }
     await batch.commit();
@@ -270,6 +288,8 @@ export const paymentsService = {
     const before = await this.getById(paymentId);
     if (!before) throw new Error("Resumen no encontrado");
     if (before.status !== "paid") return;
+    const tripIds = before.tripIds || [];
+    const existingTripIds = await filterExistingTripIds(tripIds);
     const batch = writeBatch(db);
     batch.update(doc(db, PAYMENTS, paymentId), {
       status: "pending",
@@ -277,7 +297,7 @@ export const paymentsService = {
       paidBy: null,
       ...stamp(),
     });
-    for (const tid of before.tripIds || []) {
+    for (const tid of existingTripIds) {
       batch.update(doc(db, TRIPS, tid), { status: "pending", ...stamp() });
     }
     await batch.commit();
