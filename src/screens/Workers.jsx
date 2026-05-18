@@ -11,8 +11,6 @@ import {
   accountTypeLabel,
   isCuentaRut,
   isCashBank,
-  defaultBankDetails,
-  CASH_BANK_CODE,
 } from "../utils/banks";
 import WorkerEditModal from "../components/WorkerEditModal";
 import WorkerSummaryModal from "../components/WorkerSummaryModal";
@@ -194,25 +192,6 @@ export default function Workers() {
     setEdit({ mode: "edit", worker });
   };
 
-  const setBankShortcut = async (worker, kind) => {
-    let bankDetails;
-    if (kind === "cuentaRut") {
-      bankDetails = defaultBankDetails(worker.id);
-    } else {
-      bankDetails = [worker.id, "", null, CASH_BANK_CODE];
-    }
-    setResults((prev) => prev.map((w) => (w.id === worker.id ? { ...w, bankDetails } : w)));
-    setAllWorkersForModal((prev) =>
-      prev.map((w) => (w.id === worker.id ? { ...w, bankDetails } : w)),
-    );
-    try {
-      await workersService.update(worker.id, { bankDetails });
-    } catch (err) {
-      alert(err.message || "Error al actualizar");
-      await refreshCurrentSearch();
-    }
-  };
-
   const askDelete = (worker) => setConfirm({ worker });
   const doDelete = async () => {
     if (!confirm) return;
@@ -275,35 +254,25 @@ export default function Workers() {
       },
       {
         headerName: "",
-        width: 380,
+        width: 260,
         pinned: "right",
         cellRenderer: (p) => {
-          const isRut = isCuentaRut(p.data.bankDetails);
           const isCash = isCashBank(p.data.bankDetails?.[3]);
           return (
             <div className="flex h-full items-center gap-1">
-              <button
-                onClick={() => setBankShortcut(p.data, "cuentaRut")}
-                title="Asignar Cuenta RUT (Banco Estado)"
-                className={`rounded-md border px-2 py-1 text-xs ${
-                  isRut && !isCash
-                    ? "border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
-                    : "border-[var(--color-border)] bg-[var(--color-surface-2)] hover:bg-[var(--color-accent-soft)]"
-                }`}
-              >
-                🆔 Cta. RUT
-              </button>
-              <button
-                onClick={() => setBankShortcut(p.data, "efectivo")}
-                title="Marcar como Efectivo"
-                className={`rounded-md border px-2 py-1 text-xs ${
+              {/* Indicador informativo de medio de pago — no es un toggle.
+                  El cambio Banco ↔ Efectivo ahora vive solo en el modal
+                  de edición. */}
+              <span
+                className={`inline-flex items-center rounded-md border px-2 py-1 text-xs ${
                   isCash
-                    ? "border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
-                    : "border-[var(--color-border)] bg-[var(--color-surface-2)] hover:bg-[var(--color-accent-soft)]"
+                    ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+                    : "border-[var(--color-border)] bg-[var(--color-surface-2)] text-[var(--color-muted)]"
                 }`}
+                title={isCash ? "Pago en efectivo" : "Pago por transferencia"}
               >
-                💵 Efec.
-              </button>
+                {isCash ? "💵 Efectivo" : "🏦 Transferencia"}
+              </span>
               <button
                 onClick={() => setSummary(p.data)}
                 title="Ver resumen del trabajador"
@@ -437,7 +406,6 @@ export default function Workers() {
         ) : isMobile ? (
           <div className="space-y-2">
             {displayedResults.map((w) => {
-              const isRut = isCuentaRut(w.bankDetails);
               const isCash = isCashBank(w.bankDetails?.[3]);
               const leader = (w.groupLeader?.[0] || "").toUpperCase().trim() || "—";
               return (
@@ -469,29 +437,17 @@ export default function Workers() {
                   <div className="text-xs text-[var(--color-muted)]">
                     Líder: <span className="text-[var(--color-text)]">{leader}</span>
                   </div>
-                  <div className="flex flex-wrap gap-1 pt-1">
-                    <button
-                      onClick={() => setBankShortcut(w, "cuentaRut")}
-                      title="Asignar Cuenta RUT (Banco Estado)"
-                      className={`rounded-md border px-2 py-1 text-xs ${
-                        isRut && !isCash
-                          ? "border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
-                          : "border-[var(--color-border)] bg-[var(--color-surface-2)] hover:bg-[var(--color-accent-soft)]"
-                      }`}
-                    >
-                      🆔 Cta. RUT
-                    </button>
-                    <button
-                      onClick={() => setBankShortcut(w, "efectivo")}
-                      title="Marcar como Efectivo"
-                      className={`rounded-md border px-2 py-1 text-xs ${
+                  <div className="flex flex-wrap items-center gap-1 pt-1">
+                    <span
+                      className={`inline-flex items-center rounded-md border px-2 py-1 text-xs ${
                         isCash
-                          ? "border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
-                          : "border-[var(--color-border)] bg-[var(--color-surface-2)] hover:bg-[var(--color-accent-soft)]"
+                          ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+                          : "border-[var(--color-border)] bg-[var(--color-surface-2)] text-[var(--color-muted)]"
                       }`}
+                      title={isCash ? "Pago en efectivo" : "Pago por transferencia"}
                     >
-                      💵 Efec.
-                    </button>
+                      {isCash ? "💵 Efectivo" : "🏦 Transferencia"}
+                    </span>
                     <button
                       onClick={() => setSummary(w)}
                       title="Ver resumen del trabajador"

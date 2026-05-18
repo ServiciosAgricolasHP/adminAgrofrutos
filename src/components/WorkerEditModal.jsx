@@ -116,6 +116,23 @@ export default function WorkerEditModal({ open, mode, worker, allWorkers = [], o
     }));
   };
 
+  // Quick-assign Cuenta RUT (Banco Estado). Vuelve a modo Banco si estaba en
+  // efectivo y aplica todos los defaults: RUT pago = RUT del trabajador,
+  // número = RUT sin DV, tipo = Cuenta RUT, banco = Banco Estado. Atajo para
+  // el caso más común (~80% de los trabajadores usa Cuenta RUT).
+  const assignCuentaRut = () => {
+    setForm((f) => {
+      const rut = normalizeRut(f.rut);
+      return {
+        ...f,
+        bd_paymentRut: rut,
+        bd_accountNumber: rutWithoutDv(rut),
+        bd_accountType: ACCOUNT_TYPE_RUT,
+        bd_bankCode: DEFAULT_BANK_CODE,
+      };
+    });
+  };
+
   const onAccountTypeChange = (v) => {
     const t = Number(v);
     setForm((f) => {
@@ -321,31 +338,41 @@ export default function WorkerEditModal({ open, mode, worker, allWorkers = [], o
         <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)] p-4">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <h3 className="text-sm font-semibold">Forma de pago</h3>
-            <div className="flex gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-0.5 text-xs">
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
-                onClick={switchToBank}
-                className={`rounded px-3 py-1 font-medium transition-colors ${
-                  !isCash
-                    ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
-                    : "text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)]"
-                }`}
-                title="Pago por transferencia"
+                onClick={assignCuentaRut}
+                className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
+                title="Asignar Cuenta RUT del Banco Estado usando el RUT del trabajador"
               >
-                🏦 Banco
+                🆔 Asignar Cuenta RUT
               </button>
-              <button
-                type="button"
-                onClick={switchToCash}
-                className={`rounded px-3 py-1 font-medium transition-colors ${
-                  isCash
-                    ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
-                    : "text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)]"
-                }`}
-                title="Pago en efectivo"
-              >
-                💵 Efectivo
-              </button>
+              <div className="flex gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-0.5 text-xs">
+                <button
+                  type="button"
+                  onClick={switchToBank}
+                  className={`rounded px-3 py-1 font-medium transition-colors ${
+                    !isCash
+                      ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
+                      : "text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)]"
+                  }`}
+                  title="Pago por transferencia"
+                >
+                  🏦 Banco
+                </button>
+                <button
+                  type="button"
+                  onClick={switchToCash}
+                  className={`rounded px-3 py-1 font-medium transition-colors ${
+                    isCash
+                      ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
+                      : "text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)]"
+                  }`}
+                  title="Pago en efectivo"
+                >
+                  💵 Efectivo
+                </button>
+              </div>
             </div>
           </div>
 
