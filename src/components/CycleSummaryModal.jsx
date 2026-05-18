@@ -1,4 +1,5 @@
 import { forwardRef, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { toPng, toBlob } from "html-to-image";
 import Modal from "./Modal";
 import {
@@ -17,6 +18,7 @@ import {
 } from "../utils/cosechaCombos";
 import { isRedDay } from "../utils/tratoHE";
 import { tripsService } from "../services/transportsService";
+import { cyclesService, workdaysService } from "../services";
 import { useCarriers } from "../contexts/CarriersContext";
 
 const fmtCurrency = (v) =>
@@ -531,6 +533,19 @@ export default function CycleSummaryModal({
   const [titles, setTitles] = useState({ main: "DETALLE DE JORNADA", subtitle: "", laborNames: {}, carrierNames: {} });
   const [showTitleEditor, setShowTitleEditor] = useState(false);
   const [showCobrarEditor, setShowCobrarEditor] = useState(true);
+  // Toggle de edición — cuando es false, oculta inputs/+filas/✕ en cobrar
+  // mode. El resumen queda "limpio" para copiar/imprimir/exportar.
+  const [editMode, setEditMode] = useState(true);
+  // Popover de visibilidad de columnas (cobrar mode). El botón ancla se pasa
+  // como ref para posicionar el popover via portal sin que el overflow del
+  // Modal padre lo recorte.
+  const [colsMenuOpen, setColsMenuOpen] = useState(false);
+  const colsBtnRef = useRef(null);
+  // Modal de importar ciclos anteriores (cobrar mode). Mantiene la lista de
+  // ciclos disponibles + selección.
+  const [importOpen, setImportOpen] = useState(false);
+  const [availableCycles, setAvailableCycles] = useState([]);
+  const [selectedImportIds, setSelectedImportIds] = useState(new Set());
   const printRef = useRef(null);
 
   useEffect(() => {
@@ -683,6 +698,180 @@ export default function CycleSummaryModal({
       return next;
     });
   };
+
+  // ============================================================
+  // Importar ciclos anteriores (cobrar mode)
+  // ============================================================
+  // Al abrir el modal de importar, listamos ciclos de la misma faena+subfaena
+  // (excluyendo el actual) — todos los estados, ya que se permite consolidar
+  // ciclos abiertos también. Usamos `cache: true` para evitar pegar al
+  // Firestore cada vez que se abre.
+  // Set de cycleIds ya importados — derivado de las filas existentes en
+  // `cobrar.labors[].extraRows[].sourceCycleId`. Usado para deshabilitar
+  // ciclos ya importados en el modal y evitar duplicar el merge.
+  const importedCycleIds = useMemo(() => {
+    const set = new Set();
+    for (const laborCfg of Object.values(cobrar.labors || {})) {
+      for (const er of laborCfg?.extraRows || []) {
+        if (er.sourceCycleId) set.add(er.sourceCycleId);
+      }
+    }
+    return set;
+  }, [cobrar.labors]);
+
+  const openImportModal = async () => {
+    setImportOpen(true);
+    setSelectedImportIds(new Set());
+    if (!cycle?.faenaId || !cycle?.subfaenaId) {
+      setAvailableCycles([]);
+      return;
+    }
+    try {
+      const list = await cyclesService.list({
+        wheres: [
+          ["faenaId", "==", cycle.faenaId],
+          ["subfaenaId", "==", cycle.subfaenaId],
+        ],
+        cache: true,
+        ttl: 5 * 60 * 1000,
+      });
+      const filtered = list
+        .filter((c) => c.id !== cycle.id)
+        .sort((a, b) => String(b.createdAt || b.id).localeCompare(String(a.createdAt || a.id)));
+      setAvailableCycles(filtered);
+    } catch (err) {
+      alert("Error cargando ciclos: " + (err.message || err));
+      setAvailableCycles([]);
+    }
+  };
+
+  // Carga workdays de cada ciclo elegido, los agrupa por labor, matchea por
+  // nombre (case-insensitive) contra el ciclo actual y pushea cada día como
+  // `extraRow` en `cobrar.labors[laborId].extraRows`. Las labores cuyo nombre
+  // no matchee se reportan en un alert al final (el usuario puede renombrar
+  // y re-importar).
+  const handleImportCycles = async () => {
+    // Defensa: filtramos los ya-importados aunque el modal los deshabilite.
+    const ids = [...selectedImportIds].filter((id) => !importedCycleIds.has(id));
+    if (ids.length === 0) {
+      setImportOpen(false);
+      return;
+    }
+    setBusy("import");
+    try {
+      const labors = cycle?.labors || [];
+      const nameToId = new Map(labors.map((l) => [String(l.name || "").trim().toLowerCase(), l.id]));
+
+      const sourceCycles = await Promise.all(ids.map((id) => cyclesService.getById(id)));
+      const allWds = await Promise.all(
+        ids.map((id) => workdaysService.list({ wheres: [["cycleId", "==", id]] })),
+      );
+
+      let importedRowCount = 0;
+      const skippedLabors = [];
+
+      setCobrar((prev) => {
+        const nextLabors = { ...prev.labors };
+
+        for (let i = 0; i < sourceCycles.length; i++) {
+          const sCycle = sourceCycles[i];
+          const sWds = allWds[i] || [];
+          if (!sCycle?.labors) continue;
+
+          const wdsBy = new Map();
+          for (const wd of sWds) {
+            if (!wd?.laborId) continue;
+            if (!wdsBy.has(wd.laborId)) wdsBy.set(wd.laborId, {});
+            const key = wd.id || `${wd.workerRut || "?"}__${wd.date || "?"}`;
+            wdsBy.get(wd.laborId)[key] = wd;
+          }
+
+          for (const sLabor of sCycle.labors) {
+            const wdMap = wdsBy.get(sLabor.id) || {};
+            const { rows } = buildDailyRows(sLabor, wdMap, sCycle.dayPrices || {});
+            if (rows.length === 0) continue;
+
+            const targetId = nameToId.get(String(sLabor.name || "").trim().toLowerCase());
+            if (!targetId) {
+              skippedLabors.push(`${sCycle.label || sCycle.id}: ${sLabor.name}`);
+              continue;
+            }
+
+            const target = nextLabors[targetId] ? { ...nextLabors[targetId] } : {};
+            const extraRows = [...(target.extraRows || [])];
+            for (const r of rows) {
+              const id = (typeof crypto !== "undefined" && crypto.randomUUID)
+                ? crypto.randomUUID()
+                : `imp${Date.now()}${Math.random()}`;
+              const rate = (Number(r.qty) || 0) > 0
+                ? Math.round((Number(r.amount) || 0) / (Number(r.qty) || 1))
+                : 0;
+              extraRows.push({
+                id,
+                date: r.date,
+                qty: Number(r.qty) || 0,
+                overtimeHours: Number(r.overtimeHours) || 0,
+                rate,
+                amount: Number(r.amount) || 0,
+                sourceCycleId: sCycle.id,
+                sourceCycleLabel: sCycle.label || sCycle.id,
+              });
+              importedRowCount++;
+            }
+            target.extraRows = extraRows;
+            nextLabors[targetId] = target;
+          }
+        }
+
+        const next = { ...prev, labors: nextLabors };
+        saveJSON(cobrarStorageKey(cycle?.id), next);
+        return next;
+      });
+
+      setImportOpen(false);
+      let msg = `${importedRowCount} días importados.`;
+      if (skippedLabors.length > 0) {
+        msg += `\n\nLabores no encontradas (nombre no coincide):\n${skippedLabors.slice(0, 10).join("\n")}`;
+        if (skippedLabors.length > 10) msg += `\n… +${skippedLabors.length - 10} más`;
+      }
+      alert(msg);
+    } catch (err) {
+      alert("Error importando: " + (err.message || err));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const toggleImportCycle = (id) => {
+    setSelectedImportIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  // Toggle visibilidad de columna (global por ciclo). Set persistido en
+  // `cobrar.hiddenColumns: string[]`. Las claves coinciden con los campos
+  // que renderiza LaborTable/TransportTable (ver render).
+  const toggleColumn = (key) => {
+    setCobrar((prev) => {
+      const set = new Set(prev.hiddenColumns || []);
+      if (set.has(key)) set.delete(key);
+      else set.add(key);
+      const next = { ...prev, hiddenColumns: [...set] };
+      saveJSON(cobrarStorageKey(cycle?.id), next);
+      return next;
+    });
+  };
+  const resetColumns = () => {
+    setCobrar((prev) => {
+      const next = { ...prev, hiddenColumns: [] };
+      saveJSON(cobrarStorageKey(cycle?.id), next);
+      return next;
+    });
+  };
+  const hiddenColumns = useMemo(() => new Set(cobrar.hiddenColumns || []), [cobrar.hiddenColumns]);
 
   // ============================================================
   // Build per-labor data
@@ -1566,6 +1755,45 @@ export default function CycleSummaryModal({
             {showCobrarEditor ? "▾" : "▸"} Editar tarifas cobro
           </button>
         )}
+        {mode === "cobrar" && (
+          <button
+            onClick={openImportModal}
+            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
+            title="Agregar días de otros ciclos de la misma faena/subfaena"
+          >
+            📥 Importar ciclos anteriores
+          </button>
+        )}
+        {mode === "cobrar" && (
+          <button
+            onClick={() => setEditMode((v) => !v)}
+            className={`rounded-md border px-2 py-1 text-xs ${editMode ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)]" : "border-[var(--color-border)] bg-[var(--color-surface-2)] hover:bg-[var(--color-accent-soft)]"}`}
+            title={editMode ? "Ocultar controles de edición para copiar/imprimir limpio" : "Mostrar inputs y botones de edición"}
+          >
+            {editMode ? "✏️ Editando" : "🔒 Bloqueado"}
+          </button>
+        )}
+        {mode === "cobrar" && (
+          <>
+            <button
+              ref={colsBtnRef}
+              onClick={() => setColsMenuOpen((v) => !v)}
+              className={`rounded-md border px-2 py-1 text-xs ${hiddenColumns.size > 0 ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)]" : "border-[var(--color-border)] bg-[var(--color-surface-2)] hover:bg-[var(--color-accent-soft)]"}`}
+              title="Mostrar / ocultar columnas"
+            >
+              👁 Columnas{hiddenColumns.size > 0 ? ` (${hiddenColumns.size} ocultas)` : ""}
+            </button>
+            {colsMenuOpen && (
+              <ColumnsMenu
+                anchorRef={colsBtnRef}
+                hidden={hiddenColumns}
+                onToggle={toggleColumn}
+                onReset={resetColumns}
+                onClose={() => setColsMenuOpen(false)}
+              />
+            )}
+          </>
+        )}
         {loading && <span className="text-xs text-[var(--color-muted)]">Cargando...</span>}
         <span className="ml-auto text-sm">
           <span className="text-[var(--color-muted)]">Total: </span>
@@ -1599,6 +1827,8 @@ export default function CycleSummaryModal({
       <div ref={printRef}>
         <PrintableSummary
           mode={mode}
+          editMode={editMode}
+          hiddenColumns={hiddenColumns}
           titles={titles}
           labors={mode === "cobrar" ? cobrarLabors : laborsData}
           carriers={mode === "cobrar" ? cobrarCarriers : transportData}
@@ -1632,7 +1862,205 @@ export default function CycleSummaryModal({
           />
         ))}
       </div>
+
+      {importOpen && (
+        <ImportCyclesModal
+          open={importOpen}
+          onClose={() => setImportOpen(false)}
+          cycles={availableCycles}
+          alreadyImported={importedCycleIds}
+          selected={selectedImportIds}
+          onToggle={toggleImportCycle}
+          onConfirm={handleImportCycles}
+          busy={busy === "import"}
+        />
+      )}
     </Modal>
+  );
+}
+
+// ============================================================
+// Popover: Mostrar / ocultar columnas (cobrar mode)
+// ============================================================
+// Lista las claves de columna que pueden ocultarse globalmente en todas las
+// tablas del resumen cobrar. Persiste en `cobrar.hiddenColumns`. Las keys
+// coinciden con los gates `hiddenColumns.has(key)` dentro de LaborTable /
+// TransportTable. Algunas keys aplican solo a ciertos tipos (he/bonos a
+// tratoHE; piso cuando hay piso registrado) — ocultarlas no rompe nada en
+// otras tablas.
+const COLUMN_OPTIONS = [
+  { key: "qty", label: "Base $ / Unidad / Vueltas" },
+  { key: "he", label: "HE (hrs) — tratoHE" },
+  { key: "rate", label: "Total HE / Valor" },
+  { key: "valorTotal", label: "Valor total" },
+  { key: "piso", label: "Piso" },
+  { key: "transport", label: "Transporte" },
+  { key: "total", label: "Total" },
+  { key: "personas", label: "Personas" },
+  { key: "bonos", label: "Bonos — tratoHE" },
+];
+
+function ColumnsMenu({ anchorRef, hidden, onToggle, onReset, onClose }) {
+  // Posicionamos el popover en coordenadas viewport-relative (fixed) usando
+  // el rect del botón ancla. Renderizado via portal en <body> para escapar
+  // del overflow del Modal padre — sin esto el popover quedaba recortado
+  // cuando el usuario ocultaba columnas y el botón se desplazaba.
+  const POPOVER_WIDTH = 256; // = w-64
+  const MARGIN = 8;
+  const [pos, setPos] = useState(null);
+
+  useEffect(() => {
+    const recompute = () => {
+      const el = anchorRef?.current;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      // Alineamos el borde derecho del popover con el borde derecho del botón.
+      const left = Math.max(MARGIN, Math.min(window.innerWidth - POPOVER_WIDTH - MARGIN, r.right - POPOVER_WIDTH));
+      const top = r.bottom + 4;
+      setPos({ top, left });
+    };
+    recompute();
+    window.addEventListener("resize", recompute);
+    window.addEventListener("scroll", recompute, true);
+    return () => {
+      window.removeEventListener("resize", recompute);
+      window.removeEventListener("scroll", recompute, true);
+    };
+  }, [anchorRef]);
+
+  if (!pos) return null;
+
+  return createPortal(
+    <>
+      <div className="fixed inset-0 z-[1000]" onClick={onClose} />
+      <div
+        className="fixed z-[1001] w-64 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-2 shadow-lg"
+        style={{ top: pos.top, left: pos.left }}
+      >
+        <div className="mb-1 flex items-center justify-between text-[10px] uppercase tracking-wider text-[var(--color-muted)]">
+          <span>Columnas visibles</span>
+          <button
+            onClick={onReset}
+            className="rounded px-1 py-0.5 text-[10px] text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)]"
+          >
+            Mostrar todas
+          </button>
+        </div>
+        <ul className="space-y-0.5">
+          {COLUMN_OPTIONS.map((c) => {
+            const isHidden = hidden.has(c.key);
+            return (
+              <li key={c.key}>
+                <label className="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]">
+                  <input
+                    type="checkbox"
+                    checked={!isHidden}
+                    onChange={() => onToggle(c.key)}
+                  />
+                  <span className={isHidden ? "text-[var(--color-muted)] line-through" : ""}>{c.label}</span>
+                </label>
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+    </>,
+    document.body,
+  );
+}
+
+// ============================================================
+// Modal: Importar ciclos anteriores
+// ============================================================
+// Sub-modal del CycleSummaryModal (cobrar mode). Lista ciclos de la misma
+// faena+subfaena para que el usuario elija cuáles importar; cada día de cada
+// labor matcheada se inyecta como `extraRow` (con badge de origen).
+function ImportCyclesModal({ open, onClose, cycles, alreadyImported, selected, onToggle, onConfirm, busy }) {
+  if (!open) return null;
+  return (
+    <div
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="flex max-h-[85vh] w-full max-w-lg flex-col rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <header className="flex shrink-0 items-baseline justify-between border-b border-[var(--color-border)] px-5 py-3">
+          <div>
+            <h2 className="text-lg font-semibold">📥 Importar ciclos anteriores</h2>
+            <p className="text-xs text-[var(--color-muted)]">
+              Misma faena/subfaena. Las labores se mergean por nombre. Los ya importados quedan deshabilitados.
+            </p>
+          </div>
+          <button onClick={onClose} className="text-[var(--color-muted)] hover:text-[var(--color-text)]">✕</button>
+        </header>
+
+        <div className="flex-1 overflow-y-auto px-5 py-3">
+          {cycles.length === 0 ? (
+            <p className="rounded-md border border-dashed border-[var(--color-border)] py-6 text-center text-sm text-[var(--color-muted)]">
+              No hay otros ciclos en esta faena/subfaena.
+            </p>
+          ) : (
+            <ul className="space-y-1">
+              {cycles.map((c) => {
+                const checked = selected.has(c.id);
+                const alreadyDone = alreadyImported?.has(c.id);
+                return (
+                  <li key={c.id}>
+                    <label
+                      className={`flex items-center gap-2 rounded-md border px-3 py-2 text-sm ${
+                        alreadyDone
+                          ? "cursor-not-allowed border-[var(--color-border)] bg-[var(--color-surface-2)] opacity-60"
+                          : checked
+                            ? "cursor-pointer border-[var(--color-accent)] bg-[var(--color-accent-soft)]"
+                            : "cursor-pointer border-[var(--color-border)] hover:bg-[var(--color-surface-2)]"
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        disabled={alreadyDone}
+                        onChange={() => onToggle(c.id)}
+                      />
+                      <div className="flex-1">
+                        <div className="font-medium">
+                          {c.label || c.id}
+                          {alreadyDone && (
+                            <span className="ml-2 rounded bg-[var(--color-success-bg,#dcfce7)] px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-[var(--color-success,#166534)]">
+                              ✓ ya importado
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[10px] text-[var(--color-muted)]">
+                          {c.status || "—"} · {(c.labors || []).length} labor{(c.labors || []).length === 1 ? "" : "es"}
+                        </div>
+                      </div>
+                    </label>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+
+        <footer className="flex shrink-0 items-center justify-end gap-2 border-t border-[var(--color-border)] px-5 py-3">
+          <button
+            onClick={onClose}
+            className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm"
+          >
+            Cancelar
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={busy || selected.size === 0}
+            className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-[var(--color-accent-fg)] hover:opacity-90 disabled:opacity-50"
+          >
+            {busy ? "Importando..." : `Importar ${selected.size} ciclo${selected.size === 1 ? "" : "s"}`}
+          </button>
+        </footer>
+      </div>
+    </div>
   );
 }
 
@@ -1825,6 +2253,8 @@ function CobrarEditor({ labors, carriers, carrierById, onLaborChange, onCarrierC
 const PrintableSummary = forwardRef(function PrintableSummary(
   {
     mode,
+    editMode = true,
+    hiddenColumns = new Set(),
     titles,
     labors,
     carriers,
@@ -1883,6 +2313,8 @@ const PrintableSummary = forwardRef(function PrintableSummary(
             rows={tableRows}
             totals={tableTotals}
             mode={mode}
+            editMode={editMode}
+            hiddenColumns={hiddenColumns}
             chargeRate={mode === "cobrar" ? ld.rate : null}
             catalogs={catalogs}
             redDates={redDates}
@@ -1911,6 +2343,8 @@ const PrintableSummary = forwardRef(function PrintableSummary(
             totalCount={totalCount}
             totalAmount={totalAmount}
             mode={mode}
+            editMode={editMode}
+            hiddenColumns={hiddenColumns}
             chargeRate={mode === "cobrar" ? tg.rate : null}
             onEditRow={editCarrierRow}
             onAddRow={addCarrierRow}
@@ -1966,6 +2400,8 @@ function LaborTable({
   rows,
   totals,
   mode,
+  editMode = true,
+  hiddenColumns = new Set(),
   chargeRate,
   catalogs,
   redDates,
@@ -1974,9 +2410,12 @@ function LaborTable({
   onRemoveRow,
 }) {
   const isCobrar = mode === "cobrar";
+  const editable = isCobrar && editMode;
   if (rows.length === 0 && !isCobrar) return null;
   const showPiso = (totals.pisoAmount || 0) > 0;
   const isHE = laborType === "tratoHE";
+  // Helper: cada columna chequea si su key está en hiddenColumns.
+  const showCol = (key) => !hiddenColumns.has(key);
 
   // En cobrar las filas vienen pre-cargadas con chargedQty/chargedOvertimeHours/
   // chargedRate/chargedAmount (overrides aplicados). En pagar leemos los campos
@@ -2014,20 +2453,20 @@ function LaborTable({
             <th style={cellH}>Fecha</th>
             {isHE ? (
               <>
-                <th style={{ ...cellH, textAlign: "right" }}>Base $</th>
-                <th style={{ ...cellH, textAlign: "right" }}>HE (hrs)</th>
+                {showCol("qty") && <th style={{ ...cellH, textAlign: "right" }}>Base $</th>}
+                {showCol("he") && <th style={{ ...cellH, textAlign: "right" }}>HE (hrs)</th>}
               </>
             ) : (
-              <th style={{ ...cellH, textAlign: "right" }}>{unit}</th>
+              showCol("qty") && <th style={{ ...cellH, textAlign: "right" }}>{unit}</th>
             )}
-            <th style={{ ...cellH, textAlign: "right" }}>{isHE ? "Total HE" : "Valor"}</th>
-            <th style={{ ...cellH, textAlign: "right" }}>Valor total</th>
-            {showPiso && <th style={{ ...cellH, textAlign: "right" }}>Piso</th>}
-            <th style={cellH}>Transporte</th>
-            <th style={{ ...cellH, textAlign: "right" }}>Total</th>
-            <th style={{ ...cellH, textAlign: "right" }}>Personas</th>
-            {isHE && <th style={{ ...cellH, textAlign: "right" }}>Bonos</th>}
-            {isCobrar && <th style={{ ...cellH, width: 24 }}></th>}
+            {showCol("rate") && <th style={{ ...cellH, textAlign: "right" }}>{isHE ? "Total HE" : "Valor"}</th>}
+            {showCol("valorTotal") && <th style={{ ...cellH, textAlign: "right" }}>Valor total</th>}
+            {showPiso && showCol("piso") && <th style={{ ...cellH, textAlign: "right" }}>Piso</th>}
+            {showCol("transport") && <th style={cellH}>Transporte</th>}
+            {showCol("total") && <th style={{ ...cellH, textAlign: "right" }}>Total</th>}
+            {showCol("personas") && <th style={{ ...cellH, textAlign: "right" }}>Personas</th>}
+            {isHE && showCol("bonos") && <th style={{ ...cellH, textAlign: "right" }}>Bonos</th>}
+            {editable && <th style={{ ...cellH, width: 24 }}></th>}
           </tr>
         </thead>
         <tbody>
@@ -2045,10 +2484,14 @@ function LaborTable({
               <tr key={rowKey}>
                 <td style={cell}>
                   {displayName}
-                  {r.isExtra && <span style={{ color: "#888", marginLeft: 4, fontSize: 10 }}>(ajuste)</span>}
+                  {r.isExtra && editable && (
+                    <span style={{ color: "#888", marginLeft: 4, fontSize: 10 }}>
+                      {r.sourceCycleLabel ? `(de ${r.sourceCycleLabel})` : "(ajuste)"}
+                    </span>
+                  )}
                 </td>
                 <td style={dateCellStyle}>
-                  {isCobrar && r.isExtra ? (
+                  {editable && r.isExtra ? (
                     <input
                       type="date"
                       value={r.date || ""}
@@ -2061,79 +2504,93 @@ function LaborTable({
                 </td>
                 {isHE ? (
                   <>
-                    <td style={{ ...cell, textAlign: "right", padding: isCobrar ? 3 : "5px 8px" }}>
-                      {isCobrar ? (
+                    {showCol("qty") && (
+                      <td style={{ ...cell, textAlign: "right", padding: editable ? 3 : "5px 8px" }}>
+                        {editable ? (
+                          <input
+                            type="number"
+                            value={inputVal(qty)}
+                            onChange={(e) => handleField(r, "qty", e.target.value)}
+                            style={cobrarInputStyle}
+                          />
+                        ) : (qty > 0 ? fmtCurrency(qty) : "")}
+                      </td>
+                    )}
+                    {showCol("he") && (
+                      <td style={{ ...cell, textAlign: "right", padding: editable ? 3 : "5px 8px" }}>
+                        {editable ? (
+                          <input
+                            type="number"
+                            step="0.25"
+                            value={inputVal(heHrs)}
+                            onChange={(e) => handleField(r, "overtimeHours", e.target.value)}
+                            style={cobrarInputStyle}
+                          />
+                        ) : (heHrs > 0 ? fmtNumber(heHrs) : "")}
+                      </td>
+                    )}
+                  </>
+                ) : (
+                  showCol("qty") && (
+                    <td style={{ ...cell, textAlign: "right", padding: editable ? 3 : "5px 8px" }}>
+                      {editable ? (
                         <input
                           type="number"
                           value={inputVal(qty)}
                           onChange={(e) => handleField(r, "qty", e.target.value)}
                           style={cobrarInputStyle}
                         />
-                      ) : (qty > 0 ? fmtCurrency(qty) : "")}
+                      ) : formatRowMetric(r, laborType, catalogs)}
                     </td>
-                    <td style={{ ...cell, textAlign: "right", padding: isCobrar ? 3 : "5px 8px" }}>
-                      {isCobrar ? (
-                        <input
-                          type="number"
-                          step="0.25"
-                          value={inputVal(heHrs)}
-                          onChange={(e) => handleField(r, "overtimeHours", e.target.value)}
-                          style={cobrarInputStyle}
-                        />
-                      ) : (heHrs > 0 ? fmtNumber(heHrs) : "")}
-                    </td>
-                  </>
-                ) : (
-                  <td style={{ ...cell, textAlign: "right", padding: isCobrar ? 3 : "5px 8px" }}>
-                    {isCobrar ? (
+                  )
+                )}
+                {showCol("rate") && (
+                  <td style={{ ...cell, textAlign: "right", padding: (editable && !isHE) ? 3 : "5px 8px" }}>
+                    {isHE ? (
+                      rate > 0 ? fmtCurrency(rate) : ""
+                    ) : editable ? (
                       <input
                         type="number"
-                        value={inputVal(qty)}
-                        onChange={(e) => handleField(r, "qty", e.target.value)}
+                        value={inputVal(rate)}
+                        onChange={(e) => handleField(r, "rate", e.target.value)}
                         style={cobrarInputStyle}
                       />
-                    ) : formatRowMetric(r, laborType, catalogs)}
+                    ) : (rate > 0 ? fmtCurrency(rate) : "")}
                   </td>
                 )}
-                <td style={{ ...cell, textAlign: "right", padding: (isCobrar && !isHE) ? 3 : "5px 8px" }}>
-                  {isHE ? (
-                    rate > 0 ? fmtCurrency(rate) : ""
-                  ) : isCobrar ? (
-                    <input
-                      type="number"
-                      value={inputVal(rate)}
-                      onChange={(e) => handleField(r, "rate", e.target.value)}
-                      style={cobrarInputStyle}
-                    />
-                  ) : (rate > 0 ? fmtCurrency(rate) : "")}
-                </td>
-                <td style={{ ...cell, textAlign: "right", padding: isCobrar ? 3 : "5px 8px" }}>
-                  {isCobrar ? (
-                    <input
-                      type="number"
-                      value={inputVal(valorTotal)}
-                      onChange={(e) => handleField(r, "amount", e.target.value)}
-                      style={{ ...cobrarInputStyle, fontWeight: 600 }}
-                      title="Sobreescribe el cálculo qty × rate. Borrá para volver al auto."
-                    />
-                  ) : fmtCurrency(valorTotal)}
-                </td>
-                {showPiso && (
+                {showCol("valorTotal") && (
+                  <td style={{ ...cell, textAlign: "right", padding: editable ? 3 : "5px 8px" }}>
+                    {editable ? (
+                      <input
+                        type="number"
+                        value={inputVal(valorTotal)}
+                        onChange={(e) => handleField(r, "amount", e.target.value)}
+                        style={{ ...cobrarInputStyle, fontWeight: 600 }}
+                        title="Sobreescribe el cálculo qty × rate. Borrá para volver al auto."
+                      />
+                    ) : fmtCurrency(valorTotal)}
+                  </td>
+                )}
+                {showPiso && showCol("piso") && (
                   <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums", color: piso > 0 ? "#b45309" : "#999" }}>
                     {piso > 0 ? `${r.pisoCount > 1 ? `${r.pisoCount}× ` : ""}${fmtCurrency(piso)}` : "—"}
                   </td>
                 )}
-                <td style={{ ...cell, textAlign: "right", color: "#999" }}>$ -</td>
-                <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums", fontWeight: 600 }}>{fmtCurrency(totalCol)}</td>
-                <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
-                  {(r.workerCount || 0) > 0 ? r.workerCount : (r.isExtra ? "—" : 0)}
-                </td>
-                {isHE && (
+                {showCol("transport") && <td style={{ ...cell, textAlign: "right", color: "#999" }}>$ -</td>}
+                {showCol("total") && (
+                  <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums", fontWeight: 600 }}>{fmtCurrency(totalCol)}</td>
+                )}
+                {showCol("personas") && (
+                  <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                    {(r.workerCount || 0) > 0 ? r.workerCount : (r.isExtra ? "—" : 0)}
+                  </td>
+                )}
+                {isHE && showCol("bonos") && (
                   <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums", color: (r.bonosTotal || 0) > 0 ? "#b45309" : "#999" }}>
                     {(r.bonosTotal || 0) > 0 ? fmtCurrency(r.bonosTotal) : "—"}
                   </td>
                 )}
-                {isCobrar && (
+                {editable && (
                   <td style={{ ...cell, textAlign: "center", padding: 2 }}>
                     {r.isExtra && (
                       <button
@@ -2150,10 +2607,21 @@ function LaborTable({
               </tr>
             );
           })}
-          {isCobrar && onAddRow && (
+          {editable && onAddRow && (
             <tr>
               <td
-                colSpan={6 + (isHE ? 1 : 0) + (showPiso ? 1 : 0) + 1 + 1 + (isHE ? 1 : 0)}
+                colSpan={
+                  2
+                  + (isHE ? (Number(showCol("qty")) + Number(showCol("he"))) : Number(showCol("qty")))
+                  + Number(showCol("rate"))
+                  + Number(showCol("valorTotal"))
+                  + (showPiso ? Number(showCol("piso")) : 0)
+                  + Number(showCol("transport"))
+                  + Number(showCol("total"))
+                  + Number(showCol("personas"))
+                  + (isHE ? Number(showCol("bonos")) : 0)
+                  + 1
+                }
                 style={{ ...cell, padding: 4, textAlign: "left", background: "#f9fafb" }}
               >
                 <button
@@ -2170,40 +2638,54 @@ function LaborTable({
             <td style={{ ...cell, fontWeight: 700 }} colSpan={2}>Subtotal {displayName}</td>
             {isHE ? (
               <>
-                <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
-                  {totals.qty > 0 ? fmtCurrency(totals.qty) : ""}
-                </td>
-                <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
-                  {totals.overtimeHours > 0 ? fmtNumber(totals.overtimeHours) : ""}
-                </td>
+                {showCol("qty") && (
+                  <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
+                    {totals.qty > 0 ? fmtCurrency(totals.qty) : ""}
+                  </td>
+                )}
+                {showCol("he") && (
+                  <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
+                    {totals.overtimeHours > 0 ? fmtNumber(totals.overtimeHours) : ""}
+                  </td>
+                )}
               </>
             ) : (
+              showCol("qty") && (
+                <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
+                  {isCobrar ? fmtNumber(totals.qty || 0) : formatTotalsMetric(totals, laborType, rows, catalogs)}
+                </td>
+              )
+            )}
+            {showCol("rate") && (
               <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
-                {isCobrar ? fmtNumber(totals.qty || 0) : formatTotalsMetric(totals, laborType, rows, catalogs)}
+                {isHE && (totals.heTotal || 0) > 0 ? fmtCurrency(totals.heTotal) : ""}
               </td>
             )}
-            <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
-              {isHE && (totals.heTotal || 0) > 0 ? fmtCurrency(totals.heTotal) : ""}
-            </td>
-            <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(totals.amount)}</td>
-            {showPiso && (
+            {showCol("valorTotal") && (
+              <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(totals.amount)}</td>
+            )}
+            {showPiso && showCol("piso") && (
               <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums", color: "#b45309" }}>
                 {fmtCurrency(totals.pisoAmount || 0)}
               </td>
             )}
-            <td style={cell}></td>
-            <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
-              {fmtCurrency(isCobrar ? totals.amount : totals.amount + (totals.pisoAmount || 0))}
-            </td>
-            <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
-              {(totals.workerDays || 0) > 0 ? totals.workerDays : ""}
-            </td>
-            {isHE && (
+            {showCol("transport") && <td style={cell}></td>}
+            {showCol("total") && (
+              <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
+                {fmtCurrency(isCobrar ? totals.amount : totals.amount + (totals.pisoAmount || 0))}
+              </td>
+            )}
+            {showCol("personas") && (
+              <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
+                {(totals.workerDays || 0) > 0 ? totals.workerDays : ""}
+              </td>
+            )}
+            {isHE && showCol("bonos") && (
               <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums", color: "#b45309" }}>
                 {(totals.bonosTotal || 0) > 0 ? fmtCurrency(totals.bonosTotal) : "—"}
               </td>
             )}
-            {isCobrar && <td style={cell}></td>}
+            {editable && <td style={cell}></td>}
           </tr>
         </tbody>
       </table>
@@ -2218,13 +2700,17 @@ function TransportTable({
   totalCount,
   totalAmount,
   mode,
+  editMode = true,
+  hiddenColumns = new Set(),
   chargeRate,
   onEditRow,
   onAddRow,
   onRemoveRow,
 }) {
   const isCobrar = mode === "cobrar";
+  const editable = isCobrar && editMode;
   if (rows.length === 0 && !isCobrar) return null;
+  const showCol = (key) => !hiddenColumns.has(key);
 
   const rowCount = (r) => isCobrar ? r.chargedCount : r.count;
   const rowRate = (r) => isCobrar
@@ -2249,10 +2735,10 @@ function TransportTable({
           <tr style={{ background: "#fbe5d6" }}>
             <th style={cellH}>🚐 Transporte</th>
             <th style={cellH}>Fecha</th>
-            <th style={{ ...cellH, textAlign: "right" }}>Vueltas</th>
-            <th style={{ ...cellH, textAlign: "right" }}>Valor</th>
-            <th style={{ ...cellH, textAlign: "right" }}>Total</th>
-            {isCobrar && <th style={{ ...cellH, width: 24 }}></th>}
+            {showCol("qty") && <th style={{ ...cellH, textAlign: "right" }}>Vueltas</th>}
+            {showCol("rate") && <th style={{ ...cellH, textAlign: "right" }}>Valor</th>}
+            {showCol("total") && <th style={{ ...cellH, textAlign: "right" }}>Total</th>}
+            {editable && <th style={{ ...cellH, width: 24 }}></th>}
           </tr>
         </thead>
         <tbody>
@@ -2265,10 +2751,14 @@ function TransportTable({
               <tr key={rowKey}>
                 <td style={cell}>
                   {displayName}
-                  {r.isExtra && <span style={{ color: "#888", marginLeft: 4, fontSize: 10 }}>(ajuste)</span>}
+                  {r.isExtra && editable && (
+                    <span style={{ color: "#888", marginLeft: 4, fontSize: 10 }}>
+                      {r.sourceCycleLabel ? `(de ${r.sourceCycleLabel})` : "(ajuste)"}
+                    </span>
+                  )}
                 </td>
                 <td style={cell}>
-                  {isCobrar && r.isExtra ? (
+                  {editable && r.isExtra ? (
                     <input
                       type="date"
                       value={r.date || ""}
@@ -2279,38 +2769,44 @@ function TransportTable({
                     dateLabel(r.date)
                   )}
                 </td>
-                <td style={{ ...cell, textAlign: "right", padding: isCobrar ? 3 : "5px 8px" }}>
-                  {isCobrar ? (
-                    <input
-                      type="number"
-                      value={inputVal(count)}
-                      onChange={(e) => handleField(r, "count", e.target.value)}
-                      style={cobrarInputStyle}
-                    />
-                  ) : count}
-                </td>
-                <td style={{ ...cell, textAlign: "right", padding: isCobrar ? 3 : "5px 8px" }}>
-                  {isCobrar ? (
-                    <input
-                      type="number"
-                      value={inputVal(rate)}
-                      onChange={(e) => handleField(r, "rate", e.target.value)}
-                      style={cobrarInputStyle}
-                    />
-                  ) : (rate > 0 ? fmtCurrency(rate) : "")}
-                </td>
-                <td style={{ ...cell, textAlign: "right", padding: isCobrar ? 3 : "5px 8px" }}>
-                  {isCobrar ? (
-                    <input
-                      type="number"
-                      value={inputVal(total)}
-                      onChange={(e) => handleField(r, "amount", e.target.value)}
-                      style={{ ...cobrarInputStyle, fontWeight: 600 }}
-                      title="Sobreescribe el cálculo vueltas × valor. Borrá para volver al auto."
-                    />
-                  ) : fmtCurrency(total)}
-                </td>
-                {isCobrar && (
+                {showCol("qty") && (
+                  <td style={{ ...cell, textAlign: "right", padding: editable ? 3 : "5px 8px" }}>
+                    {editable ? (
+                      <input
+                        type="number"
+                        value={inputVal(count)}
+                        onChange={(e) => handleField(r, "count", e.target.value)}
+                        style={cobrarInputStyle}
+                      />
+                    ) : count}
+                  </td>
+                )}
+                {showCol("rate") && (
+                  <td style={{ ...cell, textAlign: "right", padding: editable ? 3 : "5px 8px" }}>
+                    {editable ? (
+                      <input
+                        type="number"
+                        value={inputVal(rate)}
+                        onChange={(e) => handleField(r, "rate", e.target.value)}
+                        style={cobrarInputStyle}
+                      />
+                    ) : (rate > 0 ? fmtCurrency(rate) : "")}
+                  </td>
+                )}
+                {showCol("total") && (
+                  <td style={{ ...cell, textAlign: "right", padding: editable ? 3 : "5px 8px" }}>
+                    {editable ? (
+                      <input
+                        type="number"
+                        value={inputVal(total)}
+                        onChange={(e) => handleField(r, "amount", e.target.value)}
+                        style={{ ...cobrarInputStyle, fontWeight: 600 }}
+                        title="Sobreescribe el cálculo vueltas × valor. Borrá para volver al auto."
+                      />
+                    ) : fmtCurrency(total)}
+                  </td>
+                )}
+                {editable && (
                   <td style={{ ...cell, textAlign: "center", padding: 2 }}>
                     {r.isExtra && (
                       <button
@@ -2327,9 +2823,12 @@ function TransportTable({
               </tr>
             );
           })}
-          {isCobrar && onAddRow && (
+          {editable && onAddRow && (
             <tr>
-              <td colSpan={6} style={{ ...cell, padding: 4, textAlign: "left", background: "#f9fafb" }}>
+              <td
+                colSpan={2 + Number(showCol("qty")) + Number(showCol("rate")) + Number(showCol("total")) + 1}
+                style={{ ...cell, padding: 4, textAlign: "left", background: "#f9fafb" }}
+              >
                 <button
                   type="button"
                   onClick={() => onAddRow(carrierId)}
@@ -2342,12 +2841,16 @@ function TransportTable({
           )}
           <tr style={{ background: "#c6efce" }}>
             <td style={{ ...cell, fontWeight: 700 }} colSpan={2}>Subtotal {displayName}</td>
-            <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{totalCount}</td>
-            <td style={cell}></td>
-            <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
-              {fmtCurrency(totalAmount)}
-            </td>
-            {isCobrar && <td style={cell}></td>}
+            {showCol("qty") && (
+              <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{totalCount}</td>
+            )}
+            {showCol("rate") && <td style={cell}></td>}
+            {showCol("total") && (
+              <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
+                {fmtCurrency(totalAmount)}
+              </td>
+            )}
+            {editable && <td style={cell}></td>}
           </tr>
         </tbody>
       </table>
