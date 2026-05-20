@@ -74,22 +74,22 @@
 }
 
 .theme-sheridan {
-  --color-bg: #1a1c2e;
-  --color-surface: #232645;
-  --color-surface-2: #2d3157;
-  --color-border: #3a3f6b;
-  --color-border-strong: #50568a;
-  --color-text: #e9ebff;
-  --color-muted: #a0a6c8;
-  --color-accent: #a8e6cf;
-  --color-accent-hover: #88d6b8;
-  --color-accent-soft: rgba(168, 230, 207, 0.18);
-  --color-accent-fg: #1a1c2e;
-  --color-danger: #ffaaa5;
-  --color-danger-soft: rgba(255, 170, 165, 0.18);
-  --color-success: #c9b6ff;
-  --color-warning: #ffd6a5;
-  --color-warning-soft: rgba(255, 214, 165, 0.18);
+  --color-bg: #0d0a18;
+  --color-surface: #17122a;
+  --color-surface-2: #221b3a;
+  --color-border: #322749;
+  --color-border-strong: #4b3970;
+  --color-text: #ece4ff;
+  --color-muted: #9b89c2;
+  --color-accent: #c084fc;
+  --color-accent-hover: #a855f7;
+  --color-accent-soft: rgba(192, 132, 252, 0.18);
+  --color-accent-fg: #0d0a18;
+  --color-danger: #fda4af;
+  --color-danger-soft: rgba(253, 164, 175, 0.16);
+  --color-success: #86efac;
+  --color-warning: #fcd34d;
+  --color-warning-soft: rgba(252, 211, 77, 0.16);
 }
 
 .theme-aetiskViolet {

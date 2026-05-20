@@ -10,7 +10,15 @@ export default function Modal({ open, onClose, title, children, footer, size = "
 
   if (!open) return null;
 
-  const widths = { sm: "max-w-sm", md: "max-w-md", lg: "max-w-2xl", xl: "max-w-4xl" };
+  const widths = {
+    sm: "max-w-sm",
+    md: "max-w-md",
+    lg: "max-w-2xl",
+    xl: "max-w-4xl",
+    "2xl": "max-w-6xl",
+    "3xl": "max-w-7xl",
+    full: "max-w-[96vw]",
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4 py-6" onClick={onClose}>

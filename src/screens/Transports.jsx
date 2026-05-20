@@ -307,7 +307,7 @@ function CarrierTripsModal({ open, onClose, carrier }) {
         open={open}
         onClose={onClose}
         title={`🚐 Vueltas — ${carrier.alias} · ${carrier.name}`}
-        size="xl"
+        size="3xl"
       >
         <div className="mb-3 flex flex-wrap items-end justify-between gap-2 text-xs">
           <div className="flex flex-wrap items-center gap-2">
@@ -1038,6 +1038,17 @@ function PaymentsTab() {
         onPay={() => setConfirmAction({ type: "pay", payment: viewing })}
         onRevert={() => setConfirmAction({ type: "revert", payment: viewing })}
         onDelete={() => setConfirmAction({ type: "delete", payment: viewing })}
+        onChanged={async () => {
+          // Reload del listado padre + refresh del viewing actual (su .total
+          // cambió tras editar precios). Bump balanceVersion para que el
+          // balance también se refresque.
+          await reload();
+          setBalanceVersion((v) => v + 1);
+          if (viewing) {
+            const updated = await paymentsService.getById(viewing.id);
+            if (updated) setViewing(updated);
+          }
+        }}
       />
 
       <ConfirmDialog
@@ -2103,11 +2114,13 @@ function GenerateSummaryModal({ open, onClose, carriers, faenaById, subfaenaById
   );
 }
 
-function PaymentDetailModal({ open, onClose, payment, carrier, faenaById, subfaenaById, cycleById, onPay, onRevert, onDelete }) {
+function PaymentDetailModal({ open, onClose, payment, carrier, faenaById, subfaenaById, cycleById, onPay, onRevert, onDelete, onChanged }) {
   const [trips, setTrips] = useState([]);
   const [loading, setLoading] = useState(false);
   const printRef = useRef(null);
   const [busy, setBusy] = useState("");
+  const [editMode, setEditMode] = useState(false);
+  const [savingTripId, setSavingTripId] = useState(null);
 
   useEffect(() => {
     if (!open || !payment) return;
@@ -2163,6 +2176,33 @@ function PaymentDetailModal({ open, onClose, payment, carrier, faenaById, subfae
       alert("Error al copiar: " + (err.message || err));
     } finally {
       setBusy("");
+    }
+  };
+
+  // Edita inline el `amount` de una vuelta. Optimista: actualiza el state
+  // local primero, después escribe a Firestore (trip.amount + payment.total).
+  // Si Firestore falla, recargamos los trips desde la fuente.
+  const handleAmountChange = async (tripId, newAmount) => {
+    if (payment.status === "paid") return;
+    setSavingTripId(tripId);
+    const nextTrips = trips.map((t) => (t.id === tripId ? { ...t, amount: Number(newAmount) || 0 } : t));
+    setTrips(nextTrips);
+    const newTotal = nextTrips.reduce((s, t) => s + (Number(t.amount) || 0), 0);
+    try {
+      await tripsService.update(tripId, { amount: Number(newAmount) || 0 });
+      await paymentsService.updateTotal(payment.id, newTotal);
+      if (onChanged) await onChanged();
+    } catch (err) {
+      alert("Error al guardar: " + (err.message || err));
+      try {
+        const all = await tripsService.listByCarrier(payment.carrierId);
+        const filtered = all
+          .filter((t) => (payment.tripIds || []).includes(t.id))
+          .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+        setTrips(filtered);
+      } catch { /* noop */ }
+    } finally {
+      setSavingTripId(null);
     }
   };
 
@@ -2224,6 +2264,15 @@ function PaymentDetailModal({ open, onClose, payment, carrier, faenaById, subfae
           >
             🖨 Imprimir
           </button>
+          {!isPaid && (
+            <button
+              onClick={() => setEditMode((v) => !v)}
+              className={`rounded-md border px-3 py-1.5 text-sm ${editMode ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)] text-[var(--color-accent)]" : "border-[var(--color-border)] hover:bg-[var(--color-accent-soft)]"}`}
+              title="Editar valores de cada vuelta del resumen"
+            >
+              {editMode ? "✓ Listo" : "✏️ Editar precios"}
+            </button>
+          )}
           {/* Marcar pagado / Revertir movieron a la pestaña "Quincenas".
               Desde acá solo se crea, edita o elimina el resumen suelto. */}
           {!isPaid && (
@@ -2242,7 +2291,10 @@ function PaymentDetailModal({ open, onClose, payment, carrier, faenaById, subfae
           {isPaid ? "Pagado" : "Pendiente"}
         </span>
         <span className="text-[var(--color-muted)]">{periodLabel}</span>
-        <span className="font-semibold tabular-nums">{fmtCurrency(payment.total)}</span>
+        <span className="font-semibold tabular-nums">
+          {fmtCurrency(trips.reduce((s, t) => s + (Number(t.amount) || 0), 0))}
+          {savingTripId && <span className="ml-2 text-xs text-[var(--color-muted)]">guardando…</span>}
+        </span>
       </div>
 
       {loading ? (
@@ -2253,6 +2305,8 @@ function PaymentDetailModal({ open, onClose, payment, carrier, faenaById, subfae
           payment={payment}
           carrier={carrier}
           trips={trips}
+          editable={editMode && !isPaid}
+          onAmountChange={handleAmountChange}
           periodLabel={periodLabel}
           faenaById={faenaById}
           subfaenaById={subfaenaById}
@@ -2288,11 +2342,21 @@ function monthOfTrips(trips) {
 }
 
 const PrintableSummary = forwardRef(function PrintableSummary(
-  { payment, carrier, trips, periodLabel, faenaById, subfaenaById, cycleById },
+  { payment, carrier, trips, periodLabel, faenaById, subfaenaById, cycleById, editable = false, onAmountChange },
   ref,
 ) {
   const month = monthOfTrips(trips);
   const total = trips.reduce((s, t) => s + (Number(t.amount) || 0), 0);
+  const inputStyle = {
+    width: 90,
+    textAlign: "right",
+    fontVariantNumeric: "tabular-nums",
+    border: "1px solid #ccc",
+    borderRadius: 3,
+    padding: "1px 4px",
+    background: "#fffbeb",
+    fontSize: 12,
+  };
 
   return (
     <div ref={ref} style={{ background: "#ffffff", color: "#000", padding: 16, fontFamily: "ui-sans-serif, system-ui, sans-serif" }}>
@@ -2313,6 +2377,7 @@ const PrintableSummary = forwardRef(function PrintableSummary(
         <thead>
           <tr style={{ background: "#92d050" }}>
             <th style={cellH}>FECHA</th>
+            <th style={cellH}>Vehículo</th>
             <th style={cellH}>N° vueltas</th>
             <th style={cellH}>LUGAR</th>
             <th style={cellH}>DESTINO</th>
@@ -2330,11 +2395,26 @@ const PrintableSummary = forwardRef(function PrintableSummary(
             return (
               <tr key={t.id}>
                 <td style={cell}>{dateLabel(t.date)}</td>
+                <td style={cell}>{t.vehicleAlias || "—"}</td>
                 <td style={{ ...cell, textAlign: "center" }}>{t.qty}</td>
                 <td style={cell}>{t.lugar || ""}</td>
                 <td style={cell}>{t.destino || ""}</td>
                 <td style={cell}>{labor}</td>
-                <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(t.amount)}</td>
+                <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums", padding: editable ? 3 : "5px 8px" }}>
+                  {editable ? (
+                    <input
+                      type="number"
+                      defaultValue={Number(t.amount) || 0}
+                      onBlur={(e) => {
+                        const v = e.target.value === "" ? 0 : Number(e.target.value);
+                        if (v !== Number(t.amount)) onAmountChange && onAmountChange(t.id, v);
+                      }}
+                      style={inputStyle}
+                    />
+                  ) : (
+                    fmtCurrency(t.amount)
+                  )}
+                </td>
                 <td style={cell}>
                   {t.personCount != null ? `${t.personCount} PERS` : ""}
                   {t.kind === "approach" ? (t.personCount != null ? " · " : "") + "acercamiento" : ""}
@@ -2344,7 +2424,7 @@ const PrintableSummary = forwardRef(function PrintableSummary(
             );
           })}
           <tr style={{ background: "#c6efce" }}>
-            <td style={cell} colSpan={5}></td>
+            <td style={cell} colSpan={6}></td>
             <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(total)}</td>
             <td style={cell}></td>
           </tr>
@@ -2755,6 +2835,11 @@ function PayrollsTab() {
 
   const [payrolls, setPayrolls] = useState([]);
   const [payments, setPayments] = useState([]);
+  // Para el flujo "Nueva quincena auto" necesitamos faenas activas (para los
+  // chips de filtrado) y vueltas pending sin paymentId (las "sueltas" desde
+  // las que se arman los resúmenes).
+  const [faenas, setFaenas] = useState([]);
+  const [pendingTrips, setPendingTrips] = useState([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [editingId, setEditingId] = useState(null);
@@ -2765,9 +2850,11 @@ function PayrollsTab() {
   const load = async () => {
     setLoading(true);
     try {
-      const [pr, py] = await Promise.all([
+      const [pr, py, fa, pt] = await Promise.all([
         transportPayrollsService.listAll(),
         paymentsService.listAll(),
+        faenasService.list({ cache: true, ttl: 60_000 }),
+        tripsService.listPendingUnlinked(),
       ]);
       const sortDesc = (a, b) => {
         const ta = a.createdAt?.toMillis?.() ?? a.createdAt?.seconds ?? 0;
@@ -2776,6 +2863,10 @@ function PayrollsTab() {
       };
       setPayrolls(pr.sort(sortDesc));
       setPayments(py);
+      setFaenas(fa.filter((f) => !f.deleted));
+      // Solo las vueltas no asignadas a ningún resumen — son las elegibles
+      // para entrar a una quincena nueva.
+      setPendingTrips(pt.filter((t) => !t.paymentId));
     } finally {
       setLoading(false);
     }
@@ -2897,12 +2988,39 @@ function PayrollsTab() {
 
       {creating && (
         <PayrollCreateModal
-          looseSummaries={looseSummaries}
+          carriers={carriers}
           carriersById={carriersById}
+          faenas={faenas}
+          pendingTrips={pendingTrips}
+          looseSummaries={looseSummaries}
           onClose={() => setCreating(false)}
-          onCreate={async (form) => {
+          onCreate={async ({ name, periodFrom, periodTo, notes, perCarrier, importSummaryIds }) => {
             try {
-              await transportPayrollsService.create(form);
+              // 1) Creamos un resumen nuevo por cada carrier con sus vueltas sueltas filtradas.
+              // 2) Sumamos los resúmenes existentes seleccionados para importar.
+              // 3) Creamos la quincena referenciando todos los paymentIds (los importados quedan
+              //    linkeados via payrollId dentro de transportPayrollsService.create).
+              const created = [];
+              for (const it of perCarrier) {
+                const datesSorted = it.trips.map((t) => t.date).filter(Boolean).sort();
+                const summary = await paymentsService.createSummary({
+                  carrierId: it.carrierId,
+                  periodFrom: datesSorted[0] || periodFrom || null,
+                  periodTo: datesSorted[datesSorted.length - 1] || periodTo || null,
+                  groupBy: "day",
+                  tripIds: it.trips.map((t) => t.id),
+                  total: it.total,
+                  notes: "",
+                });
+                created.push(summary.id);
+              }
+              await transportPayrollsService.create({
+                name,
+                periodFrom,
+                periodTo,
+                paymentIds: [...created, ...(importSummaryIds || [])],
+                notes,
+              });
               setCreating(false);
               await load();
             } catch (err) { alert(err?.message || "Error"); }
@@ -3019,32 +3137,138 @@ function TypeToConfirmModal({ word, title, message, confirmLabel, danger = false
   );
 }
 
-function PayrollCreateModal({ looseSummaries, carriersById, onClose, onCreate }) {
+// Modal de creación de quincenas — flujo automático: elegís fechas, carriers
+// y faenas (chips toggleables), y la quincena se arma con un resumen por
+// carrier construido desde sus vueltas sueltas dentro de ese alcance.
+function PayrollCreateModal({ carriers, carriersById, faenas, pendingTrips, looseSummaries, onClose, onCreate }) {
   const [name, setName] = useState("");
   const [periodFrom, setPeriodFrom] = useState("");
   const [periodTo, setPeriodTo] = useState("");
   const [notes, setNotes] = useState("");
-  const [selected, setSelected] = useState(new Set());
+  // Carriers excluidos del armado automático (default vacío = todos incluidos).
+  const [excludedCarrierIds, setExcludedCarrierIds] = useState(new Set());
+  // excludedFaenaIds vacío = todas las faenas incluidas (default).
+  const [excludedFaenaIds, setExcludedFaenaIds] = useState(new Set());
+  // Resúmenes existentes seleccionados para importar (default vacío).
+  const [importIds, setImportIds] = useState(new Set());
   const [busy, setBusy] = useState(false);
 
-  const total = useMemo(
-    () => looseSummaries.filter((s) => selected.has(s.id)).reduce((acc, s) => acc + (Number(s.total) || 0), 0),
-    [looseSummaries, selected],
+  const inRange = (d) =>
+    (!periodFrom || d >= periodFrom) && (!periodTo || d <= periodTo);
+
+  // Vueltas sueltas (sin paymentId) filtradas por rango + faenas. Estas son
+  // las que van a alimentar los resúmenes nuevos que armaremos auto.
+  const eligibleTrips = useMemo(() => {
+    return pendingTrips.filter((t) => {
+      if (!inRange(t.date)) return false;
+      if (excludedFaenaIds.has(t.faenaId)) return false;
+      return true;
+    });
+  }, [pendingTrips, periodFrom, periodTo, excludedFaenaIds]);
+
+  // Auto-listado: agrupar vueltas elegibles por carrier.
+  const tripsByCarrier = useMemo(() => {
+    const m = new Map();
+    for (const t of eligibleTrips) {
+      if (!m.has(t.carrierId)) m.set(t.carrierId, []);
+      m.get(t.carrierId).push(t);
+    }
+    return m;
+  }, [eligibleTrips]);
+
+  // Carriers auto-listados ordenados por alias. Todos incluidos por default
+  // — el usuario puede destildar individualmente.
+  const autoCarriers = useMemo(() => {
+    return [...tripsByCarrier.entries()]
+      .map(([carrierId, trips]) => {
+        const total = trips.reduce((s, t) => s + (Number(t.amount) || 0), 0);
+        return { carrierId, trips, total };
+      })
+      .sort((a, b) => {
+        const ca = carriersById.get(a.carrierId);
+        const cb = carriersById.get(b.carrierId);
+        return (ca?.alias || "").localeCompare(cb?.alias || "");
+      });
+  }, [tripsByCarrier, carriersById]);
+
+  // Lo que efectivamente se va a usar para crear resúmenes nuevos.
+  const perCarrierToCreate = useMemo(
+    () => autoCarriers.filter((c) => !excludedCarrierIds.has(c.carrierId)),
+    [autoCarriers, excludedCarrierIds],
   );
 
-  const toggle = (id) => {
-    setSelected((prev) => {
+  // Resúmenes existentes (sueltos, no pagados) — opcionalmente importables.
+  // Filtro suave por overlap con el rango si está definido, para reducir ruido.
+  const importableSummaries = useMemo(() => {
+    return looseSummaries
+      .filter((s) => {
+        if (!periodFrom && !periodTo) return true;
+        const sFrom = s.periodFrom || s.periodTo || null;
+        const sTo = s.periodTo || s.periodFrom || null;
+        if (!sFrom || !sTo) return true;
+        // Hay overlap si NO (sTo < from || sFrom > to)
+        if (periodFrom && sTo < periodFrom) return false;
+        if (periodTo && sFrom > periodTo) return false;
+        return true;
+      })
+      .sort((a, b) => {
+        const ca = carriersById.get(a.carrierId);
+        const cb = carriersById.get(b.carrierId);
+        return (ca?.alias || "").localeCompare(cb?.alias || "");
+      });
+  }, [looseSummaries, periodFrom, periodTo, carriersById]);
+
+  const importedTotal = useMemo(() => {
+    return importableSummaries
+      .filter((s) => importIds.has(s.id))
+      .reduce((acc, s) => acc + (Number(s.total) || 0), 0);
+  }, [importableSummaries, importIds]);
+
+  const createdTotal = useMemo(
+    () => perCarrierToCreate.reduce((s, p) => s + p.total, 0),
+    [perCarrierToCreate],
+  );
+
+  const grandTotal = createdTotal + importedTotal;
+  const totalSummaries = perCarrierToCreate.length + importIds.size;
+
+  const toggleCarrier = (id) => {
+    setExcludedCarrierIds((prev) => {
       const n = new Set(prev);
       if (n.has(id)) n.delete(id); else n.add(id);
       return n;
     });
   };
+  const toggleFaena = (id) => {
+    setExcludedFaenaIds((prev) => {
+      const n = new Set(prev);
+      if (n.has(id)) n.delete(id); else n.add(id);
+      return n;
+    });
+  };
+  const toggleImport = (id) => {
+    setImportIds((prev) => {
+      const n = new Set(prev);
+      if (n.has(id)) n.delete(id); else n.add(id);
+      return n;
+    });
+  };
+  const includeAllCarriers = () => setExcludedCarrierIds(new Set());
+  const excludeAllCarriers = () =>
+    setExcludedCarrierIds(new Set(autoCarriers.map((c) => c.carrierId)));
 
   const onSubmit = async () => {
-    if (!name.trim() || selected.size === 0) return;
+    if (!name.trim() || totalSummaries === 0) return;
     setBusy(true);
     try {
-      await onCreate({ name, periodFrom: periodFrom || null, periodTo: periodTo || null, paymentIds: [...selected], notes });
+      await onCreate({
+        name,
+        periodFrom: periodFrom || null,
+        periodTo: periodTo || null,
+        notes,
+        perCarrier: perCarrierToCreate,
+        importSummaryIds: [...importIds],
+      });
     } finally {
       setBusy(false);
     }
@@ -3063,10 +3287,10 @@ function PayrollCreateModal({ looseSummaries, carriersById, onClose, onCreate })
           </button>
           <button
             onClick={onSubmit}
-            disabled={!name.trim() || selected.size === 0 || busy}
+            disabled={!name.trim() || totalSummaries === 0 || busy}
             className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-[var(--color-accent-fg)] hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
           >
-            {busy ? "Creando..." : `Crear (${selected.size} resúmenes)`}
+            {busy ? "Creando..." : `Crear quincena (${totalSummaries} resumen${totalSummaries === 1 ? "" : "es"} · ${fmtCurrency(grandTotal)})`}
           </button>
         </>
       }
@@ -3113,45 +3337,172 @@ function PayrollCreateModal({ looseSummaries, carriersById, onClose, onCreate })
           />
         </label>
 
+        {/* Filtro de faenas — chips toggleables. Default todas activas. */}
         <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] p-2">
-          <div className="mb-2 flex items-center justify-between text-xs">
+          <div className="mb-1.5 flex items-center justify-between text-xs">
             <span className="font-medium uppercase tracking-wide text-[var(--color-muted)]">
-              Resúmenes sueltos para incluir
+              Faenas (filtra las vueltas sueltas elegibles)
             </span>
-            <span className="font-semibold tabular-nums">{fmtCurrency(total)}</span>
+            {excludedFaenaIds.size > 0 && (
+              <button
+                onClick={() => setExcludedFaenaIds(new Set())}
+                className="rounded px-1 py-0.5 text-[10px] text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)]"
+              >
+                Incluir todas
+              </button>
+            )}
           </div>
-          {looseSummaries.length === 0 ? (
-            <div className="rounded-md border border-dashed border-[var(--color-border)] bg-[var(--color-surface)] py-6 text-center text-xs text-[var(--color-muted)]">
-              No hay resúmenes pendientes sueltos. Generá uno desde la pestaña "Resúmenes".
+          <div className="flex flex-wrap gap-1">
+            {faenas.length === 0 && (
+              <span className="text-[10px] text-[var(--color-muted)]">Sin faenas activas.</span>
+            )}
+            {faenas.map((f) => {
+              const excluded = excludedFaenaIds.has(f.id);
+              return (
+                <button
+                  key={f.id}
+                  onClick={() => toggleFaena(f.id)}
+                  className={`rounded-full border px-2 py-0.5 text-xs ${
+                    excluded
+                      ? "border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-muted)] line-through"
+                      : "border-[var(--color-accent)] bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+                  }`}
+                >
+                  {f.name}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Transportistas con vueltas sueltas en el rango — auto-listados. */}
+        <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] p-2">
+          <div className="mb-1.5 flex items-center justify-between text-xs">
+            <span className="font-medium uppercase tracking-wide text-[var(--color-muted)]">
+              Resúmenes nuevos a crear · {perCarrierToCreate.length}/{autoCarriers.length} transportistas · {eligibleTrips.length} vueltas
+            </span>
+            {autoCarriers.length > 0 && (
+              <div className="flex gap-1">
+                {excludedCarrierIds.size > 0 && (
+                  <button onClick={includeAllCarriers} className="rounded px-1 py-0.5 text-[10px] text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)]">
+                    Incluir todos
+                  </button>
+                )}
+                {excludedCarrierIds.size < autoCarriers.length && (
+                  <button onClick={excludeAllCarriers} className="rounded px-1 py-0.5 text-[10px] text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)]">
+                    Excluir todos
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+          {autoCarriers.length === 0 ? (
+            <div className="rounded-md border border-dashed border-[var(--color-border)] bg-[var(--color-surface)] py-4 text-center text-xs text-[var(--color-muted)]">
+              No hay transportistas con vueltas sueltas en el rango seleccionado.
             </div>
           ) : (
-            <div className="max-h-72 space-y-1 overflow-auto">
-              {looseSummaries.map((s) => {
-                const isSel = selected.has(s.id);
-                const carrier = carriersById.get(s.carrierId);
-                const period = (s.periodFrom || s.periodTo) ? `${s.periodFrom || "?"} → ${s.periodTo || "?"}` : "—";
+            <div className="max-h-56 space-y-1 overflow-auto">
+              {autoCarriers.map((row) => {
+                const carrier = carriersById.get(row.carrierId);
+                const included = !excludedCarrierIds.has(row.carrierId);
                 return (
-                  <button
-                    key={s.id}
-                    onClick={() => toggle(s.id)}
-                    className={`flex w-full items-center gap-2 rounded-md border px-2 py-1.5 text-left text-sm ${
-                      isSel
-                        ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)]"
-                        : "border-[var(--color-border)] bg-[var(--color-surface)] hover:bg-[var(--color-accent-soft)]"
+                  <label
+                    key={row.carrierId}
+                    className={`flex cursor-pointer items-center gap-2 rounded-md border px-2 py-1.5 text-sm ${
+                      included
+                        ? "border-[var(--color-accent)] bg-[var(--color-surface)]"
+                        : "border-[var(--color-border)] bg-[var(--color-surface)] opacity-60"
                     }`}
                   >
-                    <input type="checkbox" checked={isSel} readOnly className="pointer-events-none" />
+                    <input
+                      type="checkbox"
+                      checked={included}
+                      onChange={() => toggleCarrier(row.carrierId)}
+                      className="h-4 w-4"
+                    />
                     <span className="flex-1 truncate">
-                      <span className="font-medium">{carrier?.alias || s.carrierId}</span>
-                      <span className="ml-1 text-[10px] text-[var(--color-muted)]">{period}</span>
+                      <span className="font-medium">{carrier?.alias || row.carrierId}</span>
+                      <span className="ml-2 text-[10px] text-[var(--color-muted)]">
+                        {row.trips.length} vuelta{row.trips.length === 1 ? "" : "s"}
+                      </span>
                     </span>
-                    <span className="tabular-nums">{fmtCurrency(s.total)}</span>
-                  </button>
+                    <span className="tabular-nums">{fmtCurrency(row.total)}</span>
+                  </label>
                 );
               })}
             </div>
           )}
         </div>
+
+        {/* Resúmenes existentes (sueltos, no pagados) que se pueden importar. */}
+        <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] p-2">
+          <div className="mb-1.5 flex items-center justify-between text-xs">
+            <span className="font-medium uppercase tracking-wide text-[var(--color-muted)]">
+              Importar resúmenes existentes · {importIds.size}/{importableSummaries.length}
+            </span>
+            {importableSummaries.length > 0 && importIds.size > 0 && (
+              <button
+                onClick={() => setImportIds(new Set())}
+                className="rounded px-1 py-0.5 text-[10px] text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)]"
+              >
+                Limpiar
+              </button>
+            )}
+          </div>
+          {importableSummaries.length === 0 ? (
+            <div className="rounded-md border border-dashed border-[var(--color-border)] bg-[var(--color-surface)] py-3 text-center text-[11px] text-[var(--color-muted)]">
+              No hay resúmenes sueltos para importar.
+            </div>
+          ) : (
+            <div className="max-h-44 space-y-1 overflow-auto">
+              {importableSummaries.map((s) => {
+                const carrier = carriersById.get(s.carrierId);
+                const selected = importIds.has(s.id);
+                const period = (s.periodFrom || s.periodTo) ? `${s.periodFrom || "?"} → ${s.periodTo || "?"}` : "—";
+                return (
+                  <label
+                    key={s.id}
+                    className={`flex cursor-pointer items-center gap-2 rounded-md border px-2 py-1.5 text-sm ${
+                      selected
+                        ? "border-[var(--color-accent)] bg-[var(--color-surface)]"
+                        : "border-[var(--color-border)] bg-[var(--color-surface)]"
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selected}
+                      onChange={() => toggleImport(s.id)}
+                      className="h-4 w-4"
+                    />
+                    <span className="flex-1 truncate">
+                      <span className="font-medium">{carrier?.alias || s.carrierId}</span>
+                      <span className="ml-2 text-[10px] text-[var(--color-muted)]">
+                        {(s.tripIds || []).length} vuelta{(s.tripIds || []).length === 1 ? "" : "s"} · {period}
+                      </span>
+                    </span>
+                    <span className="tabular-nums">{fmtCurrency(s.total || 0)}</span>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {totalSummaries > 0 && (
+          <div className="rounded-md border border-[var(--color-accent)] bg-[var(--color-accent-soft)] px-3 py-2 text-sm">
+            <div className="flex items-center justify-between">
+              <span className="font-medium text-[var(--color-accent)]">
+                Total quincena · {totalSummaries} resumen{totalSummaries === 1 ? "" : "es"}
+              </span>
+              <span className="font-semibold tabular-nums text-[var(--color-accent)]">{fmtCurrency(grandTotal)}</span>
+            </div>
+            <div className="mt-0.5 text-[10px] text-[var(--color-muted)]">
+              {perCarrierToCreate.length > 0 && `${perCarrierToCreate.length} nuevo${perCarrierToCreate.length === 1 ? "" : "s"} (${fmtCurrency(createdTotal)})`}
+              {perCarrierToCreate.length > 0 && importIds.size > 0 && " · "}
+              {importIds.size > 0 && `${importIds.size} importado${importIds.size === 1 ? "" : "s"} (${fmtCurrency(importedTotal)})`}
+            </div>
+          </div>
+        )}
       </div>
     </Modal>
   );
@@ -3213,6 +3564,61 @@ function PayrollMetaEditModal({ payroll, onClose, onSave }) {
   );
 }
 
+const PrintablePayrollTable = forwardRef(function PrintablePayrollTable(
+  { payroll, items, carriersById },
+  ref,
+) {
+  const tripsCount = items.reduce((s, it) => s + (it.tripIds || []).length, 0);
+  const total = items.reduce((s, it) => s + (Number(it.total) || 0), 0);
+  const period = (payroll.periodFrom || payroll.periodTo)
+    ? `${payroll.periodFrom || "?"} → ${payroll.periodTo || "?"}`
+    : "—";
+  return (
+    <div ref={ref} style={{ background: "#ffffff", color: "#000", padding: 16, fontFamily: "ui-sans-serif, system-ui, sans-serif" }}>
+      <div style={{ marginBottom: 8, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16 }}>
+        <div style={{ fontWeight: 700, fontSize: 15, textTransform: "uppercase" }}>
+          DETALLE QUINCENA — {payroll.name}
+        </div>
+        <div style={{ fontSize: 12, color: "#444" }}>{period}</div>
+      </div>
+      <table style={{ borderCollapse: "collapse", width: "100%" }}>
+        <thead>
+          <tr style={{ background: "#92d050" }}>
+            <th style={{ ...cellH, width: 36, textAlign: "center" }}>#</th>
+            <th style={cellH}>TRANSPORTISTA</th>
+            <th style={{ ...cellH, textAlign: "center" }}>VUELTAS</th>
+            <th style={cellH}>PERÍODO</th>
+            <th style={cellH}>ESTADO</th>
+            <th style={{ ...cellH, textAlign: "right" }}>TOTAL</th>
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((it, i) => {
+            const carrier = carriersById.get(it.carrierId);
+            const itemPeriod = (it.periodFrom || it.periodTo) ? `${it.periodFrom || "?"} → ${it.periodTo || "?"}` : "—";
+            return (
+              <tr key={it.id}>
+                <td style={{ ...cell, textAlign: "center" }}>{i + 1}</td>
+                <td style={cell}>{carrier?.alias || it.carrierId}</td>
+                <td style={{ ...cell, textAlign: "center", fontVariantNumeric: "tabular-nums" }}>{(it.tripIds || []).length}</td>
+                <td style={cell}>{itemPeriod}</td>
+                <td style={cell}>{it.status === "paid" ? "Pagado" : "Pendiente"}</td>
+                <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(it.total)}</td>
+              </tr>
+            );
+          })}
+          <tr style={{ background: "#c6efce" }}>
+            <td style={{ ...cell, fontWeight: 700 }} colSpan={2}>TOTAL</td>
+            <td style={{ ...cell, textAlign: "center", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{tripsCount}</td>
+            <td style={cell} colSpan={2}></td>
+            <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(total)}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  );
+});
+
 function PayrollDetailModal({
   payroll, items, carriersById, looseSummaries,
   onClose, onEditMeta, onDeletePayroll, onAddSummaries, onRemoveSummary,
@@ -3220,12 +3626,65 @@ function PayrollDetailModal({
 }) {
   const [addingOpen, setAddingOpen] = useState(false);
   const [adding, setAdding] = useState(new Set());
+  const printRef = useRef(null);
+  const [busy, setBusy] = useState("");
   const isPaid = payroll.status === "paid";
 
   const onAddConfirm = async () => {
     await onAddSummaries([...adding]);
     setAdding(new Set());
     setAddingOpen(false);
+  };
+
+  const handleDownload = async () => {
+    if (!printRef.current) return;
+    setBusy("download");
+    try {
+      const dataUrl = await toPng(printRef.current, { backgroundColor: "#ffffff", pixelRatio: 2 });
+      const link = document.createElement("a");
+      link.download = `quincena_${payroll.name.replace(/[^\w-]+/g, "_")}.png`;
+      link.href = dataUrl;
+      link.click();
+    } catch (err) {
+      alert("Error al generar imagen: " + (err.message || err));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const handleCopy = async () => {
+    if (!printRef.current) return;
+    setBusy("copy");
+    try {
+      const blob = await toBlob(printRef.current, { backgroundColor: "#ffffff", pixelRatio: 2 });
+      if (!blob) throw new Error("No se pudo generar la imagen");
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+      alert("Imagen copiada al portapapeles");
+    } catch (err) {
+      alert("Error al copiar: " + (err.message || err));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const handlePrint = () => {
+    if (!printRef.current) return;
+    const html = printRef.current.outerHTML;
+    const win = window.open("", "_blank", "width=900,height=700");
+    if (!win) return;
+    win.document.write(`<!DOCTYPE html><html><head><title>Quincena ${payroll.name}</title>
+      <style>
+        * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; color-adjust: exact !important; }
+        body { font-family: ui-sans-serif, system-ui, sans-serif; padding: 20px; color: #000; }
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid #999; padding: 6px 8px; font-size: 12px; }
+        thead th { background: #92d050 !important; text-align: left; }
+        @media print { @page { size: landscape; margin: 12mm; } }
+      </style>
+    </head><body>${html}</body></html>`);
+    win.document.close();
+    win.focus();
+    setTimeout(() => { win.print(); }, 250);
   };
 
   return (
@@ -3284,16 +3743,51 @@ function PayrollDetailModal({
         </div>
       )}
 
-      <div className="mb-2 flex items-center justify-between">
+      {/* Renderizado off-screen del printable — capturado por html-to-image
+          y `outerHTML` para imprimir. No visible para el usuario. */}
+      <div style={{ position: "absolute", left: -99999, top: 0, pointerEvents: "none" }} aria-hidden>
+        <PrintablePayrollTable ref={printRef} payroll={payroll} items={items} carriersById={carriersById} />
+      </div>
+
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
         <h4 className="text-sm font-semibold">Resúmenes ({items.length})</h4>
-        {!isPaid && looseSummaries.length > 0 && (
-          <button
-            onClick={() => setAddingOpen((v) => !v)}
-            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
-          >
-            {addingOpen ? "▾" : "▸"} + Agregar resumen
-          </button>
-        )}
+        <div className="flex flex-wrap gap-1">
+          {items.length > 0 && (
+            <>
+              <button
+                onClick={handleCopy}
+                disabled={busy === "copy"}
+                className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)] disabled:opacity-60"
+                title="Copiar tabla como imagen"
+              >
+                {busy === "copy" ? "Copiando..." : "📋 Copiar"}
+              </button>
+              <button
+                onClick={handleDownload}
+                disabled={busy === "download"}
+                className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)] disabled:opacity-60"
+                title="Descargar tabla como PNG"
+              >
+                {busy === "download" ? "..." : "📥 PNG"}
+              </button>
+              <button
+                onClick={handlePrint}
+                className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
+                title="Imprimir tabla"
+              >
+                🖨 Imprimir
+              </button>
+            </>
+          )}
+          {!isPaid && looseSummaries.length > 0 && (
+            <button
+              onClick={() => setAddingOpen((v) => !v)}
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
+            >
+              {addingOpen ? "▾" : "▸"} + Agregar resumen
+            </button>
+          )}
+        </div>
       </div>
 
       {addingOpen && (
@@ -3333,62 +3827,93 @@ function PayrollDetailModal({
         </div>
       )}
 
-      <div className="space-y-1.5">
-        {items.length === 0 && (
-          <div className="rounded-md border border-dashed border-[var(--color-border)] py-4 text-center text-xs text-[var(--color-muted)]">
-            La quincena está vacía. Agregá resúmenes con el botón de arriba.
-          </div>
-        )}
-        {items.map((it) => {
-          const carrier = carriersById.get(it.carrierId);
-          const itemPaid = it.status === "paid";
-          return (
-            <div key={it.id} className="flex items-center gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2">
-              <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
-                itemPaid ? "bg-[var(--color-success-soft)] text-[var(--color-success)]" : "bg-[var(--color-warning-soft)] text-[var(--color-warning)]"
-              }`}>
-                {itemPaid ? "Pagado" : "Pendiente"}
-              </span>
-              <div className="flex-1 min-w-0">
-                <div className="text-sm font-medium truncate">{carrier?.alias || it.carrierId}</div>
-                <div className="text-[10px] text-[var(--color-muted)]">
-                  {it.periodFrom || "?"} → {it.periodTo || "?"} · {(it.tripIds || []).length} vueltas
-                </div>
-              </div>
-              <span className="font-semibold tabular-nums text-sm">{fmtCurrency(it.total)}</span>
-              {!isPaid && (
-                <div className="flex gap-1">
-                  {!itemPaid && (
-                    <>
-                      <button
-                        onClick={() => onMarkItemPaid(it)}
-                        className="rounded-md bg-[var(--color-accent)] px-2 py-1 text-[10px] font-medium text-[var(--color-accent-fg)] hover:bg-[var(--color-accent-hover)]"
-                      >
-                        💰 Pagar
-                      </button>
-                      <button
-                        onClick={() => onRemoveSummary(it.id)}
-                        title="Sacar de la quincena (vuelve a estar suelto)"
-                        className="rounded-md border border-[var(--color-border)] px-2 py-1 text-[10px] text-[var(--color-danger)] hover:bg-[var(--color-accent-soft)]"
-                      >
-                        ✕
-                      </button>
-                    </>
-                  )}
-                  {itemPaid && (
-                    <button
-                      onClick={() => onRevertItem(it)}
-                      className="rounded-md border border-[var(--color-warning)] px-2 py-1 text-[10px] text-[var(--color-warning)]"
-                    >
-                      ↶
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
+      {items.length === 0 ? (
+        <div className="rounded-md border border-dashed border-[var(--color-border)] py-4 text-center text-xs text-[var(--color-muted)]">
+          La quincena está vacía. Agregá resúmenes con el botón de arriba.
+        </div>
+      ) : (
+        <div className="overflow-x-auto rounded-md border border-[var(--color-border)]">
+          <table className="w-full text-sm">
+            <thead className="bg-[var(--color-surface-2)] text-xs uppercase tracking-wide text-[var(--color-muted)]">
+              <tr>
+                <th className="px-2 py-2 text-left">#</th>
+                <th className="px-2 py-2 text-left">Transportista</th>
+                <th className="px-2 py-2 text-center">Vueltas</th>
+                <th className="hidden px-2 py-2 text-left md:table-cell">Período</th>
+                <th className="px-2 py-2 text-left">Estado</th>
+                <th className="px-2 py-2 text-right">Total</th>
+                {!isPaid && <th className="px-2 py-2 text-right">Acciones</th>}
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((it, i) => {
+                const carrier = carriersById.get(it.carrierId);
+                const itemPaid = it.status === "paid";
+                const itemPeriod = (it.periodFrom || it.periodTo) ? `${it.periodFrom || "?"} → ${it.periodTo || "?"}` : "—";
+                return (
+                  <tr key={it.id} className="border-t border-[var(--color-border)] hover:bg-[var(--color-surface-2)]">
+                    <td className="px-2 py-2 text-[var(--color-muted)] tabular-nums">{i + 1}</td>
+                    <td className="px-2 py-2 font-medium">{carrier?.alias || it.carrierId}</td>
+                    <td className="px-2 py-2 text-center tabular-nums">{(it.tripIds || []).length}</td>
+                    <td className="hidden px-2 py-2 text-xs text-[var(--color-muted)] md:table-cell">{itemPeriod}</td>
+                    <td className="px-2 py-2">
+                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                        itemPaid ? "bg-[var(--color-success-soft)] text-[var(--color-success)]" : "bg-[var(--color-warning-soft)] text-[var(--color-warning)]"
+                      }`}>
+                        {itemPaid ? "Pagado" : "Pendiente"}
+                      </span>
+                    </td>
+                    <td className="px-2 py-2 text-right font-semibold tabular-nums">{fmtCurrency(it.total)}</td>
+                    {!isPaid && (
+                      <td className="px-2 py-2 text-right">
+                        <div className="flex justify-end gap-1">
+                          {!itemPaid && (
+                            <>
+                              <button
+                                onClick={() => onMarkItemPaid(it)}
+                                className="rounded-md bg-[var(--color-accent)] px-2 py-1 text-[10px] font-medium text-[var(--color-accent-fg)] hover:bg-[var(--color-accent-hover)]"
+                              >
+                                💰 Pagar
+                              </button>
+                              <button
+                                onClick={() => onRemoveSummary(it.id)}
+                                title="Sacar de la quincena (vuelve a estar suelto)"
+                                className="rounded-md border border-[var(--color-border)] px-2 py-1 text-[10px] text-[var(--color-danger)] hover:bg-[var(--color-accent-soft)]"
+                              >
+                                ✕
+                              </button>
+                            </>
+                          )}
+                          {itemPaid && (
+                            <button
+                              onClick={() => onRevertItem(it)}
+                              className="rounded-md border border-[var(--color-warning)] px-2 py-1 text-[10px] text-[var(--color-warning)]"
+                            >
+                              ↶
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    )}
+                  </tr>
+                );
+              })}
+              <tr className="border-t-2 border-[var(--color-border)] bg-[var(--color-surface-2)]">
+                <td className="px-2 py-2 font-semibold" colSpan={2}>TOTAL</td>
+                <td className="px-2 py-2 text-center font-semibold tabular-nums">
+                  {items.reduce((s, it) => s + (it.tripIds || []).length, 0)}
+                </td>
+                <td className="hidden md:table-cell" />
+                <td />
+                <td className="px-2 py-2 text-right font-semibold tabular-nums">
+                  {fmtCurrency(items.reduce((s, it) => s + (Number(it.total) || 0), 0))}
+                </td>
+                {!isPaid && <td />}
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      )}
     </Modal>
   );
 }

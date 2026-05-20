@@ -237,6 +237,19 @@ export const paymentsService = {
     });
   },
 
+  // Actualiza solo el `total` del resumen (recalculado en cliente después de
+  // editar el `amount` de alguna vuelta vinculada). Pago bloqueado para
+  // resúmenes ya `paid`.
+  async updateTotal(paymentId, total) {
+    const before = await this.getById(paymentId);
+    if (!before) throw new Error("Resumen no existe");
+    if (before.status === "paid") throw new Error("Resumen pagado no editable");
+    await updateDoc(doc(db, PAYMENTS, paymentId), {
+      total: Number(total) || 0,
+      ...stamp(),
+    });
+  },
+
   // Delete a pending summary; trips are unlinked (status remains pending).
   // Si alguna vuelta referenciada ya fue borrada por separado (el resumen
   // arrastra el ID dangling), la salteamos para que el batch no aborte
