@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AgGridReact } from "ag-grid-react";
 import { ModuleRegistry, AllCommunityModule } from "ag-grid-community";
 import "ag-grid-community/styles/ag-grid.css";
 import { AG_GRID_LOCALE_ES } from "../utils/agGridLocale";
 import { workersService } from "../services";
-import { deleteWorkerSafe, detectQueryKind, searchWorkers } from "../services/workersService";
+import { deleteWorkerSafe, detectQueryKind } from "../services/workersService";
 import { formatRutForDisplay } from "../utils/rutUtils";
 import {
   bankName,
@@ -21,105 +21,90 @@ import { useIsMobile } from "../hooks/useIsMobile";
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
-const MIN_SEARCH = 4;
+// Mínimo de caracteres para que el campo de búsqueda libre filtre la lista.
+// Antes eran 4 — había una razón fuerte (la búsqueda corría server-side por
+// prefijo y necesitábamos limitar el universo de matches). Hoy todo el filtro
+// es client-side sobre la lista cacheada en localStorage (TTL 2h), así que
+// dejarlo en 2 da feedback inmediato y permite buscar por apellido / dígitos
+// del RUT en cualquier posición. Los filtros (líder/banco) ignoran este gate.
+const MIN_SEARCH = 2;
 
 export default function Workers() {
   const isMobile = useIsMobile();
-  const [results, setResults] = useState([]);
-  const [loading, setLoading] = useState(false);
   const [edit, setEdit] = useState(null);
   const [confirm, setConfirm] = useState(null);
   const [summary, setSummary] = useState(null);
   const [groupSummaryOpen, setGroupSummaryOpen] = useState(false);
   const [search, setSearch] = useState("");
-  const [allWorkersForModal, setAllWorkersForModal] = useState([]);
-  // Filtros opcionales (componibles con la búsqueda). Cuando alguno está
-  // activo, los resultados salen de la lista completa cacheada en lugar de la
-  // búsqueda server-side, y la regla de "≥4 caracteres" se relaja.
+  // `allWorkers` es la fuente única de verdad — viene del cache persistente
+  // de `workersService.list` (2h TTL). Antes había también `results` con la
+  // búsqueda server-side (`searchWorkers`); se eliminó porque con la lista
+  // completa en memoria el filtro client-side gana en flexibilidad
+  // (substring sobre apellido, dígitos parciales del RUT) sin reads extra.
+  const [allWorkers, setAllWorkers] = useState([]);
+  const [cacheLoading, setCacheLoading] = useState(false);
+  // Filtros opcionales componibles con la búsqueda de texto.
   // leaderFilter: "" | "__none__" | <nombre líder UPPER>
   // payFilter: "" | "cash" | "transfer"
   const [leaderFilter, setLeaderFilter] = useState("");
   const [payFilter, setPayFilter] = useState("");
-  const cacheRef = useRef(new Map());
-  const reqIdRef = useRef(0);
 
   const queryKind = detectQueryKind(search);
   const queryRaw = search.trim();
   const queryReady = queryRaw.replace(/[.\s-]/g, "").length >= MIN_SEARCH;
   const filtersActive = leaderFilter !== "" || payFilter !== "";
 
-  // Debounced server-side search (≥ MIN_SEARCH chars). Caches results per
-  // query within the session to avoid hitting Firestore on re-typed queries.
-  useEffect(() => {
-    if (!queryReady) {
-      setResults([]);
-      setLoading(false);
-      return;
-    }
-    const key = queryRaw.toLowerCase();
-    const cached = cacheRef.current.get(key);
-    if (cached) {
-      setResults(cached);
-      setLoading(false);
-      return;
-    }
-    const myId = ++reqIdRef.current;
-    setLoading(true);
-    const t = setTimeout(async () => {
-      try {
-        const list = await searchWorkers(queryRaw, { take: 100 });
-        if (reqIdRef.current !== myId) return;
-        cacheRef.current.set(key, list);
-        setResults(list);
-      } finally {
-        if (reqIdRef.current === myId) setLoading(false);
-      }
-    }, 250);
-    return () => clearTimeout(t);
-  }, [queryRaw, queryReady]);
-
-  // Lazy-load full workers list (used by the edit modal for similarity check
-  // and leader pool, y también para los filtros opt-in). Hits Firestore at
-  // most once per 2h thanks to the cache.
+  // Carga la lista completa de trabajadores. Hit a Firestore solo si el cache
+  // de localStorage expiró (2h TTL) o si nunca se cargó. Devuelve la lista
+  // para encadenar; si ya estaba cargada, retorna inmediatamente.
   const ensureAllForModal = async () => {
-    if (allWorkersForModal.length) return allWorkersForModal;
-    const list = await workersService.list({
-      order: ["name", "asc"],
-      cache: true,
-      persist: true,
-      ttl: 2 * 60 * 60 * 1000,
-    });
-    setAllWorkersForModal(list);
-    return list;
+    if (allWorkers.length) return allWorkers;
+    setCacheLoading(true);
+    try {
+      const list = await workersService.list({
+        order: ["name", "asc"],
+        cache: true,
+        persist: true,
+        ttl: 2 * 60 * 60 * 1000,
+      });
+      setAllWorkers(list);
+      return list;
+    } finally {
+      setCacheLoading(false);
+    }
   };
 
-  // Pre-cargar la lista en cuanto el usuario active cualquier filtro.
+  // Pre-cargar la lista al montar la pantalla — la primera vez paga ~500-2000
+  // reads (una vez por TTL de 2h), después es gratis. Así el filtro client-side
+  // funciona desde el primer caracter sin esperar acciones del usuario.
   useEffect(() => {
-    if (filtersActive && allWorkersForModal.length === 0) {
-      ensureAllForModal();
-    }
+    ensureAllForModal();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filtersActive]);
+  }, []);
 
-  // Líderes únicos para el dropdown (toma del dataset completo cacheado).
+  // Líderes únicos para el dropdown (extraídos del dataset completo cacheado).
   const leaderOptions = useMemo(() => {
     const set = new Set();
-    for (const w of allWorkersForModal) {
+    for (const w of allWorkers) {
       const l = (w.groupLeader?.[0] || "").toString().toUpperCase().trim();
       if (l) set.add(l);
     }
     return [...set].sort((a, b) => a.localeCompare(b, "es"));
-  }, [allWorkersForModal]);
+  }, [allWorkers]);
 
   const stripAccents = (s) =>
     String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toUpperCase();
 
-  // Cuando hay filtros activos los resultados salen del dataset completo.
-  // La búsqueda por texto se aplica encima como substring acentos-insensitive
-  // sobre nombre y RUT (componible).
+  // Filtrado client-side sobre `allWorkers` (única fuente de datos):
+  //   1. Filtro de líder (si está set).
+  //   2. Filtro de pago (efectivo/transferencia).
+  //   3. Búsqueda libre por substring (gated por MIN_SEARCH) — match acentos-
+  //      insensitive sobre nombre y RUT (sin puntos/guiones).
+  // Si no hay query ni filtros, devuelve [] para mantener el empty state y
+  // no abrumar con 2000 filas de entrada.
   const displayedResults = useMemo(() => {
-    if (!filtersActive) return results;
-    let arr = allWorkersForModal;
+    if (!queryReady && !filtersActive) return [];
+    let arr = allWorkers;
     if (leaderFilter === "__none__") {
       arr = arr.filter((w) => !((w.groupLeader?.[0] || "").toString().trim()));
     } else if (leaderFilter) {
@@ -132,7 +117,7 @@ export default function Workers() {
     } else if (payFilter === "transfer") {
       arr = arr.filter((w) => w.bankDetails?.[3] && !isCashBank(w.bankDetails?.[3]));
     }
-    if (queryRaw) {
+    if (queryReady) {
       const needle = stripAccents(queryRaw.replace(/[.\s-]/g, ""));
       if (needle) {
         arr = arr.filter((w) => {
@@ -143,7 +128,7 @@ export default function Workers() {
       }
     }
     return arr;
-  }, [filtersActive, leaderFilter, payFilter, allWorkersForModal, queryRaw, results]);
+  }, [queryReady, filtersActive, leaderFilter, payFilter, allWorkers, queryRaw]);
 
   const showResults = filtersActive || queryReady;
   const clearFilters = () => {
@@ -151,35 +136,24 @@ export default function Workers() {
     setPayFilter("");
   };
 
-  const refreshCurrentSearch = async () => {
-    cacheRef.current.delete(queryRaw.toLowerCase());
-    if (!queryReady) return;
-    setLoading(true);
+  // Re-fetch full cache. Llamado tras edit/delete — `workersService.{update,
+  // remove}` ya muta el cache aditivamente, pero traemos la lista actualizada
+  // por las dudas (caso edición de un campo derivado).
+  const refreshCache = async () => {
     try {
-      const list = await searchWorkers(queryRaw, { take: 100 });
-      cacheRef.current.set(queryRaw.toLowerCase(), list);
-      setResults(list);
-    } finally {
-      setLoading(false);
-    }
+      const list = await workersService.list({
+        order: ["name", "asc"],
+        cache: true,
+        persist: true,
+        ttl: 2 * 60 * 60 * 1000,
+      });
+      setAllWorkers(list);
+    } catch { /* noop */ }
   };
 
   const onSaved = async () => {
     setEdit(null);
-    await refreshCurrentSearch();
-    // Si la lista completa está cargada (por filtros o por el modal), la
-    // refrescamos también — `workersService.update` ya invalidó el cache.
-    if (allWorkersForModal.length) {
-      try {
-        const list = await workersService.list({
-          order: ["name", "asc"],
-          cache: true,
-          persist: true,
-          ttl: 2 * 60 * 60 * 1000,
-        });
-        setAllWorkersForModal(list);
-      } catch { /* noop */ }
-    }
+    await refreshCache();
   };
 
   const openCreate = async () => {
@@ -199,7 +173,7 @@ export default function Workers() {
     try {
       await deleteWorkerSafe(confirm.worker.id);
       setConfirm(null);
-      await refreshCurrentSearch();
+      await refreshCache();
     } catch (err) {
       alert(err.message || "Error al eliminar");
       setConfirm(null);
@@ -306,9 +280,11 @@ export default function Workers() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Trabajadores</h1>
           <p className="text-sm text-[var(--color-muted)]">
-            {showResults
-              ? `${displayedResults.length} resultado(s)`
-              : `Escribe al menos ${MIN_SEARCH} caracteres para buscar`}
+            {cacheLoading && allWorkers.length === 0
+              ? "Cargando trabajadores..."
+              : showResults
+                ? `${displayedResults.length} resultado(s) · ${allWorkers.length} en total`
+                : `Buscá por nombre, apellido o RUT (mín. ${MIN_SEARCH} caracteres) · ${allWorkers.length} trabajadores`}
           </p>
         </div>
         <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
@@ -316,7 +292,7 @@ export default function Workers() {
             <input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder={`Buscar por RUT o nombre (mín. ${MIN_SEARCH} caracteres)...`}
+              placeholder={`Buscar por nombre, apellido o RUT (mín. ${MIN_SEARCH})...`}
               className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 pr-16 text-sm shadow-sm outline-none focus:border-[var(--color-accent)]"
             />
             {queryKind && (
@@ -391,14 +367,12 @@ export default function Workers() {
       <div
         className={`h-full ${isMobile ? "" : "ag-theme-quartz ag-theme-app"}`}
       >
-        {!showResults ? (
-          <div className="flex h-full items-center justify-center rounded-lg border border-dashed border-[var(--color-border)] text-sm text-[var(--color-muted)]">
-            Escribe al menos {MIN_SEARCH} caracteres (RUT o nombre) o activá un filtro para listar.
-          </div>
-        ) : loading && !filtersActive ? (
-          <div className="flex h-full items-center justify-center text-[var(--color-muted)]">Buscando...</div>
-        ) : filtersActive && allWorkersForModal.length === 0 ? (
+        {cacheLoading && allWorkers.length === 0 ? (
           <div className="flex h-full items-center justify-center text-[var(--color-muted)]">Cargando trabajadores...</div>
+        ) : !showResults ? (
+          <div className="flex h-full items-center justify-center rounded-lg border border-dashed border-[var(--color-border)] text-sm text-[var(--color-muted)]">
+            Buscá por nombre, apellido o RUT (mín. {MIN_SEARCH} caracteres) o activá un filtro para listar.
+          </div>
         ) : displayedResults.length === 0 ? (
           <div className="flex h-full items-center justify-center rounded-lg border border-dashed border-[var(--color-border)] text-sm text-[var(--color-muted)]">
             Sin resultados{search ? ` para "${search}"` : ""}.
@@ -488,7 +462,7 @@ export default function Workers() {
         open={!!edit}
         mode={edit?.mode}
         worker={edit?.worker}
-        allWorkers={allWorkersForModal}
+        allWorkers={allWorkers}
         onClose={() => setEdit(null)}
         onSaved={onSaved}
       />
