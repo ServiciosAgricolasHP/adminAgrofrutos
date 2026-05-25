@@ -19,6 +19,7 @@ import CleanupPaidWorkdays from "./screens/CleanupPaidWorkdays";
 import InterestLinks from "./screens/InterestLinks";
 import AdminConsole from "./screens/AdminConsole";
 import Calendar from "./screens/Calendar";
+import Facturacion from "./screens/Facturacion";
 
 export default function App() {
   return (
@@ -45,6 +46,7 @@ export default function App() {
                 <Route path="advances" element={<Advances />} />
                 <Route path="links" element={<InterestLinks />} />
                 <Route path="calendar" element={<Calendar />} />
+                <Route path="facturacion" element={<Facturacion />} />
                 <Route
                   path="audit"
                   element={

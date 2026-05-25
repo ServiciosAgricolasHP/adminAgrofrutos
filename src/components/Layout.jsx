@@ -17,6 +17,7 @@ const navItems = [
   { to: "/transports", label: "Transportes", icon: "🚛" },
   { to: "/advances", label: "Anticipos / Bonos", icon: "🪙" },
   { to: "/payroll", label: "Nómina", icon: "💰" },
+  { to: "/facturacion", label: "Facturación", icon: "🧾" },
   { to: "/links", label: "Links útiles", icon: "🔗" },
 ];
 

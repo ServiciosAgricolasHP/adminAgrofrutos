@@ -21,6 +21,12 @@ export const workdaysService = createService("workday", "workdays");
 export const groupLeadersService = createService("groupLeader", "groupLeader");
 export const payrollSnapshotsService = createService("payrollSnapshot", "payrollSnapshots");
 export const interestLinksService = createService("interestLink", "interestLinks");
+// Documentos tributarios electrónicos (DTE) importados desde el SII.
+// Por ahora `source: "sii_import"` es el único origen; cuando se sume emisión
+// directa, se agregará `source: "self_emitted"`. El doc id es determinístico
+// (`{rutEmisor}_{tipo}_{folio}`) para que reimportar el mismo período sea
+// idempotente — escribe encima del existente sin duplicar.
+export const dteDocumentsService = createService("dteDocument", "dteDocuments");
 export { tripsService as transportsService, paymentsService as transportPaymentsService } from "./transportsService";
 export const logsService = createService("log", "logs");
 

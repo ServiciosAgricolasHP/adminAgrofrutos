@@ -118,12 +118,12 @@ export default function Advances() {
 
   const onDelete = async () => {
     if (!confirmDelete) return;
-    const locked =
+    const deleteLocked =
       confirmDelete.status === "applied" ||
       confirmDelete.status === "partial" ||
       (Number(confirmDelete.amountPaid) || 0) > 0;
-    if (locked) {
-      alert("No se puede eliminar un anticipo/bono con pagos aplicados. Elimina la nómina primero.");
+    if (deleteLocked) {
+      alert("No se puede eliminar un anticipo/bono con pagos aplicados. Para perdonar el saldo, usá Editar y bajá el monto al ya pagado.");
       setConfirmDelete(null);
       return;
     }
@@ -230,7 +230,12 @@ export default function Advances() {
           <div className="space-y-2">
             {filtered.map((a) => {
               const status = a.status || "pending";
-              const isApplied = status === "applied" || status === "partial" || (Number(a.amountPaid) || 0) > 0;
+              // Edit lock: solo si el anticipo está totalmente aplicado. Los parciales
+              // son editables para permitir "perdonazo" (bajar amount al amountPaid).
+              const editLocked = status === "applied";
+              // Delete lock: aplicado o parcial. Para borrar un parcial el usuario
+              // tiene que revertir la nómina o usar editar para cerrarlo.
+              const deleteLocked = status === "applied" || status === "partial" || (Number(a.amountPaid) || 0) > 0;
               const meta = advanceTypeMeta(a.type);
               const sign = advanceSign(a);
               const amountColor = sign > 0 ? "text-[var(--color-success)]" : "text-[var(--color-warning)]";
@@ -271,16 +276,16 @@ export default function Advances() {
                   <div className="flex flex-wrap justify-end gap-1 pt-1">
                     <button
                       onClick={() => setEditing({ ...a, mode: "edit" })}
-                      disabled={isApplied}
-                      title={isApplied ? "No editable: ya aplicado" : "Editar"}
+                      disabled={editLocked}
+                      title={editLocked ? "No editable: totalmente aplicado" : (status === "partial" ? "Editar (parcial — podés bajar el monto para cerrar)" : "Editar")}
                       className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)] disabled:opacity-40"
                     >
                       Editar
                     </button>
                     <button
                       onClick={() => setConfirmDelete(a)}
-                      disabled={isApplied}
-                      title={isApplied ? "Elimina la nómina primero" : "Eliminar"}
+                      disabled={deleteLocked}
+                      title={deleteLocked ? "Tiene pagos aplicados — usá Editar para cerrar el saldo" : "Eliminar"}
                       className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs text-[var(--color-danger)] hover:bg-[var(--color-danger-soft)] disabled:opacity-40"
                     >
                       Eliminar
@@ -337,21 +342,23 @@ export default function Advances() {
                   <td className="px-3 py-2">
                     <div className="flex justify-end gap-1">
                       {(() => {
-                        const locked = a.status === "applied" || a.status === "partial" || (Number(a.amountPaid) || 0) > 0;
+                        const st = a.status || "pending";
+                        const editLocked = st === "applied";
+                        const deleteLocked = st === "applied" || st === "partial" || (Number(a.amountPaid) || 0) > 0;
                         return (
                           <>
                             <button
                               onClick={() => setEditing({ ...a, mode: "edit" })}
-                              disabled={locked}
-                              title={locked ? "No editable: ya tiene pagos aplicados" : "Editar"}
+                              disabled={editLocked}
+                              title={editLocked ? "No editable: totalmente aplicado" : (st === "partial" ? "Editar (parcial — podés bajar el monto para cerrar)" : "Editar")}
                               className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)] disabled:opacity-40"
                             >
                               Editar
                             </button>
                             <button
                               onClick={() => setConfirmDelete(a)}
-                              disabled={locked}
-                              title={locked ? "Elimina la nómina primero" : "Eliminar"}
+                              disabled={deleteLocked}
+                              title={deleteLocked ? "Tiene pagos aplicados — usá Editar para cerrar el saldo" : "Eliminar"}
                               className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs text-[var(--color-danger)] hover:bg-[var(--color-danger-soft)] disabled:opacity-40"
                             >
                               Eliminar
@@ -390,6 +397,12 @@ export default function Advances() {
 
 function AdvanceFormModal({ open, item, onClose, onSaved }) {
   const isEdit = item?.mode === "edit";
+  // Editar un anticipo `partial` (con pagos aplicados) impone restricciones:
+  // worker y type quedan locked (no se pueden reasignar pagos), y `amount` no
+  // puede caer por debajo de lo ya pagado. Setear `amount = amountPaid` cierra
+  // el anticipo (status → "applied") — esto es el "perdonazo del saldo".
+  const amountPaid = Number(item?.amountPaid) || 0;
+  const isPartial = isEdit && (item?.status === "partial" || amountPaid > 0);
   const [form, setForm] = useState({
     type: "anticipo",
     workerRut: "",
@@ -429,16 +442,26 @@ function AdvanceFormModal({ open, item, onClose, onSaved }) {
   const submit = async () => {
     if (!form.workerRut) return alert("Selecciona un trabajador.");
     if (!form.amount || form.amount <= 0) return alert("Monto debe ser mayor a 0.");
+    const newAmount = Math.round(Number(form.amount) || 0);
+    if (isPartial && newAmount < amountPaid) {
+      return alert(`El monto no puede ser menor a lo ya pagado (${fmtCurrency(amountPaid)}). Si querés cerrar el saldo, ponelo igual a ${fmtCurrency(amountPaid)}.`);
+    }
     setBusy(true);
     try {
+      // Recompute status si hay pagos aplicados: si amount queda en o por debajo
+      // de amountPaid → "applied" (saldo perdonado); si supera → sigue "partial".
+      let status = item?.status || "pending";
+      if (isPartial) {
+        status = newAmount <= amountPaid ? "applied" : "partial";
+      }
       const data = {
         type: form.type,
         workerRut: form.workerRut,
         workerName: form.workerName,
-        amount: Math.round(Number(form.amount) || 0),
+        amount: newAmount,
         date: form.date,
         note: form.note,
-        status: item?.status || "pending",
+        status,
       };
       if (isEdit) await advancesService.update(item.id, data);
       else await advancesService.create(data);
@@ -472,17 +495,33 @@ function AdvanceFormModal({ open, item, onClose, onSaved }) {
       }
     >
       <div className="space-y-3">
+        {isPartial && (
+          <div className="rounded-md border border-[var(--color-accent)] bg-[var(--color-accent-soft)] px-3 py-2 text-xs text-[var(--color-accent)]">
+            <div className="font-semibold">Anticipo parcialmente aplicado</div>
+            <div className="mt-0.5 opacity-90">
+              Pagado: <span className="font-mono">{fmtCurrency(amountPaid)}</span>
+              {" · "}
+              Resta: <span className="font-mono">{fmtCurrency(Math.max(0, (Number(item?.amount) || 0) - amountPaid))}</span>
+            </div>
+            <div className="mt-1 opacity-80">
+              Podés bajar el monto hasta <span className="font-mono">{fmtCurrency(amountPaid)}</span> para perdonar el saldo (queda cerrado).
+              No se puede cambiar el trabajador ni el tipo.
+            </div>
+          </div>
+        )}
+
         <div>
           <label className="mb-1 block text-xs font-medium text-[var(--color-muted)]">Tipo</label>
-          <div className="flex gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] p-1 text-sm">
+          <div className={`flex gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] p-1 text-sm ${isPartial ? "opacity-60" : ""}`}>
             {ADVANCE_TYPES.map((t) => (
               <button
                 key={t.value}
                 type="button"
-                onClick={() => setForm((f) => ({ ...f, type: t.value }))}
+                disabled={isPartial}
+                onClick={() => !isPartial && setForm((f) => ({ ...f, type: t.value }))}
                 className={`flex-1 rounded px-3 py-1 ${
                   form.type === t.value ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]" : "text-[var(--color-muted)]"
-                }`}
+                } disabled:cursor-not-allowed`}
               >
                 {t.icon} {t.label}
               </button>
@@ -498,12 +537,14 @@ function AdvanceFormModal({ open, item, onClose, onSaved }) {
                 <span className="font-medium">{form.workerName}</span>
                 <span className="ml-2 font-mono text-xs text-[var(--color-muted)]">{formatRutForDisplay(form.workerRut)}</span>
               </span>
-              <button
-                onClick={() => setPicker({ q: "", results: [], open: true })}
-                className="text-xs text-[var(--color-accent)]"
-              >
-                Cambiar
-              </button>
+              {!isPartial && (
+                <button
+                  onClick={() => setPicker({ q: "", results: [], open: true })}
+                  className="text-xs text-[var(--color-accent)]"
+                >
+                  Cambiar
+                </button>
+              )}
             </div>
           ) : (
             <>

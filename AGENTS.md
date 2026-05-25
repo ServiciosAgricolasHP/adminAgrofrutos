@@ -267,11 +267,12 @@ Botones de descarga:
 - Servicio: `services/advancesService.js` (colección `advances`).
 - Una colección con discriminador `type: "anticipo" | "bono"`. **Legacy** `"adelanto"` se normaliza a `"anticipo"` al leer (vía `LEGACY_TYPE_MAP`) — no hay tipo separado. Helpers: `ADVANCE_TYPES`, `normalizeAdvanceType`, `advanceSign`, `isBono`, `advanceTypeMeta`.
 - **Signo**: anticipo = `-1` (descuenta del bruto), bono = `+1` (suma al bruto). Mismo flow / lifecycle, distinto signo.
-- Estados: `pending` | `applied` | `cancelled`.
-- Documento: `{type, workerRut, workerName, amount, date, note, status, appliedPayrollId, appliedAt, appliedBy}`.
+- Estados: `pending` | `partial` | `applied` | `cancelled`. `partial` = `amountPaid > 0 && amountPaid < amount` (la siguiente nómina sigue aplicando contra el saldo pendiente).
+- Documento: `{type, workerRut, workerName, amount, date, note, status, amountPaid, payments[], appliedPayrollId, appliedAt, appliedBy}`.
 - UI: filtros por tipo (todos / anticipo / bono), búsqueda, status. Dos botones de creación (🪙 + Anticipo, 🎁 + Bono). Cada fila muestra el badge de signo correspondiente.
 - Modal de creación con `searchWorkers` para autocompletar trabajador.
-- No editables/eliminables si están `applied` (cascade desde Payroll).
+- **Lock de Editar/Eliminar**: `applied` (totalmente aplicado) → ambos bloqueados. `partial` → Editar habilitado, Eliminar bloqueado.
+- **"Perdonazo" de saldo en parciales**: editar un `partial` permite bajar `amount` hasta `amountPaid` para cerrar la cuenta — el status se recalcula al guardar (`newAmount ≤ amountPaid` → `applied`; `>` → sigue `partial`). El modal muestra banner con Pagado/Resta, bloquea `type` y `worker` (no se pueden reasignar pagos existentes), y valida que `newAmount ≥ amountPaid`. El doc + `payments[]` quedan intactos para auditoría.
 
 ### Integración con Nómina
 
@@ -322,6 +323,25 @@ Botones de descarga:
 - Cuatro secciones para inspección barata: conteos por colección, workdays por mes (12 reads para todo un año), workdays por rango, workdays por ciclo.
 - Usa `getCountFromServer` de Firestore — 1 read por cada 1000 docs vs N con `getDocs`. Permite estimar costos sin descargar la colección.
 
+## Facturación / Billing
+
+- Pantalla: `src/screens/Facturacion.jsx`. Ruta `/facturacion`. Nav label: "Facturación" (icono 🧾). Acceso para admin y supervisor.
+- Servicio: `dteDocumentsService` (colección `dteDocuments`) en `services/index.js`.
+- **V1: solo lectura/import**. La emisión de documentos electrónicos sigue siendo manual en el portal SII por ahora — no hay integración con LibreDTE/OpenFactura ni Cloud Functions todavía. Cuando se sume emisión, se distingue por `source` en el doc.
+- **Flujo**: el usuario exporta el CSV del **Registro de Compras y Ventas (RCV)** desde el portal SII (un archivo por mes/empresa, separados ventas y compras). En la app: click 📥 Importar CSV → preview modal con stats + sample + duplicados → Confirmar → escribe a Firestore.
+- Parser: `src/utils/siiCsvParser.js`. Funciones: `parseSiiRcvCsv(buffer, { companyRut })`, `dteTypeLabel(tipo)`, `normalizeRut(raw)`. Maneja:
+  - Auto-detección de **kind** (ventas vs compras) inspeccionando headers (`Rut cliente` vs `Rut Proveedor`).
+  - Encoding **UTF-8 con BOM o ISO-8859-1** (latin-1) — intenta UTF-8 primero, fallback a latin-1 si detecta U+FFFD.
+  - Fechas en varios formatos (YYYY-MM-DD, DD/MM/YYYY, DD-MM-YYYY) normalizadas a ISO.
+  - Montos con miles `.` y decimal `,` o sin separadores.
+  - RUTs con/sin guión y puntos, normalizados a `12345678-9`.
+- Doc shape: `{ id, kind ("venta"|"compra"), tipo (33/34/39/56/61/...), tipoLabel, folio, rutEmisor, razonSocialEmisor, rutReceptor, razonSocialReceptor, fechaEmision, periodo ("YYYY-MM"), exento, neto, iva, otrosImpuestos, total, source ("sii_import"), importedAt, importedBy }`.
+- **Doc id determinístico**: `{rutEmisor sin DV}_{tipo}_{folio}`. Reimportar el mismo período es **idempotente** — `setDoc({ merge: true })` sobreescribe sin duplicar. El preview cuenta cuántos sobreescriben antes de confirmar.
+- Bulk write: `writeBatch(db)` con chunks de 450 (límite Firestore 500). Reads/writes solo en `dteDocuments` — sin tocar otras colecciones.
+- UI: tabs **📤 Ventas / 📥 Compras**, filtros por período (YYYY-MM), tipo de DTE, búsqueda libre (razón social, RUT, folio). Cards de totales (Neto, IVA, Total) que se recalculan con los filtros.
+- **Sin links a otras entidades por ahora** (cycles, faenas, taxClients): los datos quedan crudos. Una fase siguiente puede agregar `linkedCycleId`/`linkedClientId` opcional para reportes cruzados.
+- **Sin emisión, sin Cloud Functions, sin certificado digital**. La complejidad fiscal se evita completamente. Si más adelante se quiere automatizar la emisión BTE u otros, va via Cloud Functions + provider (LibreDTE) y se agrega `source: "self_emitted"` al doc shape.
+
 ## Links útiles
 
 - Pantalla: `src/screens/InterestLinks.jsx`. Ruta `/links`.
@@ -351,6 +371,7 @@ Botones de descarga:
 /transports                    Transportes
 /advances                      Anticipos / Adelantos
 /payroll                       Nómina
+/facturacion                   Facturación (import RCV del SII)
 /links                         Links útiles
 /calendar                      Calendario mensual
 /audit                         Auditoría (admin only)
