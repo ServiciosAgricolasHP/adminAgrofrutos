@@ -15,7 +15,7 @@ import {
 } from "../utils/banks";
 
 const MIN_SEARCH = 3;
-const WORKERS_TTL_MS = 24 * 60 * 60 * 1000;
+const WORKERS_TTL_MS = 2 * 60 * 60 * 1000;
 const LEADER_LOCAL = "CHILENOS";
 const LEADER_FOREIGN = "EXTRANJEROS";
 

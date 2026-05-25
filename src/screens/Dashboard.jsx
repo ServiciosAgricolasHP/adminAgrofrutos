@@ -18,7 +18,7 @@ export default function Dashboard() {
         const [f, c, w] = await Promise.all([
           faenasService.list({ order: ["name", "asc"], cache: true, persist: true, ttl: 10 * 60 * 1000 }),
           cyclesService.list({ cache: true, ttl: 2 * 60 * 1000 }),
-          workersService.list({ cache: true, persist: true, ttl: 24 * 60 * 60 * 1000 }),
+          workersService.list({ cache: true, persist: true, ttl: 2 * 60 * 60 * 1000 }),
         ]);
         if (cancelled) return;
         setFaenas(f);

@@ -208,7 +208,7 @@ export default function Calendar() {
   const [faenas, setFaenas] = useState([]);
   const [subfaenas, setSubfaenas] = useState([]);
   // Lista completa de trabajadores — necesaria para mostrar nombres en el
-  // drawer del día. Compartido con el módulo Workers via cache 24h en
+  // drawer del día. Compartido con el módulo Workers via cache 2h en
   // localStorage; primera carga ~500-2000 reads, después gratis.
   const [workers, setWorkers] = useState([]);
 
@@ -267,7 +267,7 @@ export default function Calendar() {
             order: ["name", "asc"],
             cache: true,
             persist: true,
-            ttl: 24 * 60 * 60 * 1000,
+            ttl: 2 * 60 * 60 * 1000,
           }),
         ]);
         if (cancelled) return;

@@ -5,7 +5,7 @@ export const subfaenasService = createService("subfaena", "subfaenas");
 export const cyclesService = createService("cycle", "cycles");
 
 // Workers: high write/read ratio (new workers, edits to bank details, etc.)
-// Every mutation defaults to additive cache updates so the persisted 24h list
+// Every mutation defaults to additive cache updates so the persisted 2h list
 // cache stays warm and the picker doesn't trigger a full re-fetch after each
 // new worker is added.
 const _workers = createService("worker", "worker");

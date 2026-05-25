@@ -540,7 +540,7 @@ export default function CycleDetail() {
       order: ["name", "asc"],
       cache: true,
       persist: true,
-      ttl: 24 * 60 * 60 * 1000,
+      ttl: 2 * 60 * 60 * 1000,
     });
     setAllWorkers(list);
   };

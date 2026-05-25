@@ -630,7 +630,10 @@ export default function CycleSummaryModal({
       const labor = prev.labors[laborId] || {};
       const extraRows = [...(labor.extraRows || [])];
       const id = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : `x${Date.now()}${Math.random()}`;
-      extraRows.push({ id, date: "", qty: 0, overtimeHours: 0, rate: 0, amount: 0 });
+      // amount/rate vacíos para que la multiplicación automática (qty × rate)
+      // arranque a funcionar apenas el usuario tipea qty + rate. Si dejamos `0`,
+      // el override `amount=0` bloquea el `computedAmount` y la fila queda en $0.
+      extraRows.push({ id, date: "", qty: "", overtimeHours: "", rate: "", amount: "" });
       const next = { ...prev, labors: { ...prev.labors, [laborId]: { ...labor, extraRows } } };
       saveJSON(cobrarStorageKey(cycle?.id), next);
       return next;
@@ -674,7 +677,8 @@ export default function CycleSummaryModal({
       const carrier = prev.carriers[carrierId] || {};
       const extraRows = [...(carrier.extraRows || [])];
       const id = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : `x${Date.now()}${Math.random()}`;
-      extraRows.push({ id, date: "", count: 0, rate: 0, amount: 0 });
+      // amount/rate vacíos — ver comentario en addCobrarLaborExtraRow.
+      extraRows.push({ id, date: "", count: "", rate: "", amount: "" });
       const next = { ...prev, carriers: { ...prev.carriers, [carrierId]: { ...carrier, extraRows } } };
       saveJSON(cobrarStorageKey(cycle?.id), next);
       return next;
@@ -975,6 +979,22 @@ export default function CycleSummaryModal({
       // tratoHE: total = base $ + HE × tarifa HE. Otros: total = qty × rate.
       const computeAmount = (qty, hours, rowRate) =>
         isHE ? Number(qty) + Number(hours) * Number(rowRate) : Number(qty) * Number(rowRate);
+
+      // Para labors `trato`, las filas regulares traen `unit` desde el config
+      // del día (`saco`, `metro`, etc.). Las filas extra/manuales no tienen
+      // unit → heredamos la unidad dominante de las filas regulares para que
+      // el formato muestre "212 saco" en vez de solo "212".
+      let dominantUnit = null;
+      if (ld.labor.type === "trato") {
+        const unitCounts = new Map();
+        for (const r of ld.rows || []) {
+          if (r.unit != null) unitCounts.set(r.unit, (unitCounts.get(r.unit) || 0) + 1);
+        }
+        let maxC = 0;
+        for (const [u, c] of unitCounts) {
+          if (c > maxC) { maxC = c; dominantUnit = u; }
+        }
+      }
       const chargedRows = (ld.rows || []).map((r) => {
         const ov = rowOverrides[r.date] || {};
         const qty = ov.qty != null && ov.qty !== "" ? Number(ov.qty) : Number(r.qty) || 0;
@@ -1008,6 +1028,9 @@ export default function CycleSummaryModal({
           qty: Number(ex.qty) || 0,
           overtimeHours: Number(ex.overtimeHours) || 0,
           amount: amount,
+          // Heredá la unit dominante del labor (solo trato) para que
+          // formatRowMetric muestre "X saco" cuando se imprime no-editable.
+          unit: ex.unit != null ? ex.unit : dominantUnit,
           pisoAmount: 0,
           pisoCount: 0,
           chargedQty: qty,
@@ -1126,13 +1149,24 @@ export default function CycleSummaryModal({
   // Wrappers que dispatchan a updateRow / updateExtra según el tipo de fila.
   // Simplifican la API que recibe LaborTable / TransportTable: ellos sólo
   // saben `editRow(row, patch)` sin preocuparse si es base u override.
+  // Si el usuario edita un factor (qty/count/rate/overtimeHours) sin pasar
+  // `amount` explícito, blanqueamos `amount` para que el cálculo
+  // qty × rate (o qty + hours × rate en tratoHE) vuelva a mandar. Sin esto
+  // el amount viejo (ej. el que vino de la importación) queda pegado y la
+  // multiplicación parece no actualizarse.
+  const clearAmountIfFactorEdit = (patch, factorKeys) => {
+    const editsFactor = factorKeys.some((k) => k in patch);
+    return editsFactor && !("amount" in patch) ? { ...patch, amount: "" } : patch;
+  };
   const editCobrarLaborRow = (laborId, row, patch) => {
-    if (row?.isExtra) updateCobrarLaborExtraRow(laborId, row.extraId, patch);
-    else updateCobrarLaborRow(laborId, row.date, patch);
+    const finalPatch = clearAmountIfFactorEdit(patch, ["qty", "rate", "overtimeHours"]);
+    if (row?.isExtra) updateCobrarLaborExtraRow(laborId, row.extraId, finalPatch);
+    else updateCobrarLaborRow(laborId, row.date, finalPatch);
   };
   const editCobrarCarrierRow = (carrierId, row, patch) => {
-    if (row?.isExtra) updateCobrarCarrierExtraRow(carrierId, row.extraId, patch);
-    else updateCobrarCarrierRow(carrierId, row.date, patch);
+    const finalPatch = clearAmountIfFactorEdit(patch, ["count", "rate"]);
+    if (row?.isExtra) updateCobrarCarrierExtraRow(carrierId, row.extraId, finalPatch);
+    else updateCobrarCarrierRow(carrierId, row.date, finalPatch);
   };
 
   // ============================================================
@@ -1615,7 +1649,7 @@ export default function CycleSummaryModal({
       // ============ HOJA TOTAL GENERAL ============
       const wsTotal = wb.addWorksheet(safeName("Total"));
       wsTotal.getColumn(1).width = 6;
-      wsTotal.getCell("B2").value = mode === "cobrar" ? "TOTAL A COBRAR" : "TOTAL GENERAL";
+      wsTotal.getCell("B2").value = mode === "cobrar" ? "TOTAL A FACTURAR" : "TOTAL GENERAL";
       wsTotal.getCell("B2").font = { bold: true, size: 14 };
 
       const HR = 4;
@@ -1640,7 +1674,7 @@ export default function CycleSummaryModal({
       const totalEnd = totalRow - 1;
 
       const grandRow = totalRow;
-      wsTotal.getCell(`B${grandRow}`).value = "TOTAL GENERAL";
+      wsTotal.getCell(`B${grandRow}`).value = mode === "cobrar" ? "TOTAL A FACTURAR" : "TOTAL GENERAL";
       wsTotal.getCell(`B${grandRow}`).font = { bold: true };
       wsTotal.getCell(`B${grandRow}`).fill = titleFill;
       const grand = wsTotal.getCell(`C${grandRow}`);
@@ -1653,6 +1687,27 @@ export default function CycleSummaryModal({
       grand.numFmt = moneyFmt;
       grand.font = { bold: true, size: 12 };
       grand.fill = titleFill;
+
+      // En modo cobrar agregamos abajo: Valor IVA (19%) y total con IVA incluido.
+      if (mode === "cobrar") {
+        const ivaRow = grandRow + 1;
+        wsTotal.getCell(`B${ivaRow}`).value = "Valor IVA (19%)";
+        wsTotal.getCell(`B${ivaRow}`).font = { bold: true };
+        const iva = wsTotal.getCell(`C${ivaRow}`);
+        iva.value = { formula: `ROUND(C${grandRow}*0.19,0)`, result: Math.round((Number(grandFallback) || 0) * 0.19) };
+        iva.numFmt = moneyFmt;
+        iva.font = { bold: true };
+
+        const totIvaRow = grandRow + 2;
+        wsTotal.getCell(`B${totIvaRow}`).value = "IVA incluido";
+        wsTotal.getCell(`B${totIvaRow}`).font = { bold: true, size: 12 };
+        wsTotal.getCell(`B${totIvaRow}`).fill = titleFill;
+        const totIva = wsTotal.getCell(`C${totIvaRow}`);
+        totIva.value = { formula: `C${grandRow}+C${ivaRow}`, result: Math.round((Number(grandFallback) || 0) * 1.19) };
+        totIva.numFmt = moneyFmt;
+        totIva.font = { bold: true, size: 12 };
+        totIva.fill = titleFill;
+      }
 
       wsTotal.getColumn(2).width = 32;
       wsTotal.getColumn(3).width = 16;
@@ -2353,17 +2408,33 @@ const PrintableSummary = forwardRef(function PrintableSummary(
         );
       })}
 
-      {/* Grand total */}
+      {/* Grand total — en modo cobrar incluye desglose de IVA (19%) abajo. */}
       <table style={{ borderCollapse: "collapse", width: "100%", marginTop: 12 }}>
         <tbody>
           <tr style={{ background: "#a9d08e" }}>
             <td style={{ ...cell, fontWeight: 700, fontSize: 14 }}>
-              {mode === "cobrar" ? "TOTAL A COBRAR" : "TOTAL GENERAL"}
+              {mode === "cobrar" ? "TOTAL A FACTURAR" : "TOTAL GENERAL"}
             </td>
             <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontSize: 14, fontVariantNumeric: "tabular-nums" }}>
               {fmtCurrency(grandTotal)}
             </td>
           </tr>
+          {mode === "cobrar" && (
+            <>
+              <tr style={{ background: "#fff" }}>
+                <td style={{ ...cell, fontWeight: 600 }}>Valor IVA (19%)</td>
+                <td style={{ ...cell, textAlign: "right", fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
+                  {fmtCurrency(Math.round((Number(grandTotal) || 0) * 0.19))}
+                </td>
+              </tr>
+              <tr style={{ background: "#c6efce" }}>
+                <td style={{ ...cell, fontWeight: 700, fontSize: 14 }}>IVA incluido</td>
+                <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontSize: 14, fontVariantNumeric: "tabular-nums" }}>
+                  {fmtCurrency(Math.round((Number(grandTotal) || 0) * 1.19))}
+                </td>
+              </tr>
+            </>
+          )}
         </tbody>
       </table>
     </div>

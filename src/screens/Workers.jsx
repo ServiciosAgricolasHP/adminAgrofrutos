@@ -80,14 +80,14 @@ export default function Workers() {
 
   // Lazy-load full workers list (used by the edit modal for similarity check
   // and leader pool, y también para los filtros opt-in). Hits Firestore at
-  // most once per 24h thanks to the cache.
+  // most once per 2h thanks to the cache.
   const ensureAllForModal = async () => {
     if (allWorkersForModal.length) return allWorkersForModal;
     const list = await workersService.list({
       order: ["name", "asc"],
       cache: true,
       persist: true,
-      ttl: 24 * 60 * 60 * 1000,
+      ttl: 2 * 60 * 60 * 1000,
     });
     setAllWorkersForModal(list);
     return list;
@@ -175,7 +175,7 @@ export default function Workers() {
           order: ["name", "asc"],
           cache: true,
           persist: true,
-          ttl: 24 * 60 * 60 * 1000,
+          ttl: 2 * 60 * 60 * 1000,
         });
         setAllWorkersForModal(list);
       } catch { /* noop */ }
