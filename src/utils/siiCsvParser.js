@@ -106,6 +106,21 @@ function parseAmount(raw) {
   return Number.isFinite(n) ? n : 0;
 }
 
+// Intenta extraer un RUT del nombre del archivo. El SII suele incluir el RUT
+// del contribuyente en el filename de los exports del RCV (ej.
+// `Detalle_VENTA_76123456-7_202405.csv`). Devuelve "" si no encuentra nada.
+// Es heurística: si el usuario renombró el archivo no vamos a detectar nada,
+// pero la mayoría de las veces el nombre original se preserva.
+export function extractRutFromFilename(name) {
+  if (!name) return "";
+  // Captura `12345678-9` o `1234567-K` con o sin puntos.
+  const m = String(name).match(/\b(\d{1,3}(?:\.\d{3}){0,2})-([\dKk])\b/) ||
+            String(name).match(/\b(\d{7,8})-([\dKk])\b/);
+  if (!m) return "";
+  const num = m[1].replace(/\./g, "");
+  return `${num}-${m[2].toUpperCase()}`;
+}
+
 // RUT chileno: normaliza a formato "12345678-9" (sin puntos, con guión).
 // Si viene con DV separado por guión o pegado, lo dejamos consistente.
 export function normalizeRut(rawRut) {
@@ -119,11 +134,24 @@ export function normalizeRut(rawRut) {
   return `${s.slice(0, -1)}-${s.slice(-1)}`;
 }
 
-// RUT sin guión ni DV — sirve como prefijo del doc id para que dos formatos
+// RUT sin guión ni DV — sirve como parte del doc id para que dos formatos
 // del mismo RUT no creen dos docs distintos.
-function rutNumeric(rawRut) {
+export function rutNumeric(rawRut) {
   const s = String(rawRut || "").replace(/\./g, "").replace(/-/g, "").toUpperCase();
   return s.length > 1 ? s.slice(0, -1) : s;
+}
+
+// Builder del doc id de un DTE en Firestore. Combina companyId + kind + tipo +
+// folio + (proveedor en compras) para que cada documento sea único globalmente
+// dentro de la empresa. Reimportar el mismo período sobreescribe sin duplicar.
+export function buildDteDocId({ companyId, kind, tipo, folio, rutEmisor, rutReceptor }) {
+  if (!companyId) throw new Error("buildDteDocId requiere companyId");
+  if (kind === "venta") {
+    return `${companyId}_V_${tipo}_${folio}`;
+  }
+  // Compras: incluir proveedor (rutEmisor) porque dos proveedores pueden
+  // tener el mismo folio en su propia secuencia.
+  return `${companyId}_C_${rutNumeric(rutEmisor)}_${tipo}_${folio}`;
 }
 
 // Detecta si el header corresponde a ventas o compras. Estrategia:
@@ -218,17 +246,11 @@ export function parseSiiRcvCsv(buffer, { companyRut } = {}) {
       const rutReceptor = kind === "venta" ? rutContraparte : (companyRut || "");
       const razonSocialReceptor = kind === "venta" ? razon : "";
 
-      // Doc id determinístico — clave natural del documento desde el lado del
-      // emisor. Si no hay rutEmisor (porque no nos pasaron companyRut en venta),
-      // usamos un fallback con el RUT del receptor — no es ideal, pero permite
-      // distinguir docs entre sí dentro del mismo período.
-      const idPrefix = rutNumeric(rutEmisor) || `R${rutNumeric(rutReceptor)}`;
-      const id = `${idPrefix}_${tipo}_${folio}`;
-
       const periodo = fecha ? fecha.slice(0, 7) : "";
 
+      // Sin id — el caller arma el id final cuando sabe el companyId
+      // (vía `buildDteDocId`).
       const rec = {
-        id,
         kind,
         tipo,
         tipoLabel: dteTypeLabel(tipo),

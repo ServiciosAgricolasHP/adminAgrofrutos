@@ -326,21 +326,119 @@ Botones de descarga:
 ## Facturación / Billing
 
 - Pantalla: `src/screens/Facturacion.jsx`. Ruta `/facturacion`. Nav label: "Facturación" (icono 🧾). Acceso para admin y supervisor.
-- Servicio: `dteDocumentsService` (colección `dteDocuments`) en `services/index.js`.
-- **V1: solo lectura/import**. La emisión de documentos electrónicos sigue siendo manual en el portal SII por ahora — no hay integración con LibreDTE/OpenFactura ni Cloud Functions todavía. Cuando se sume emisión, se distingue por `source` en el doc.
-- **Flujo**: el usuario exporta el CSV del **Registro de Compras y Ventas (RCV)** desde el portal SII (un archivo por mes/empresa, separados ventas y compras). En la app: click 📥 Importar CSV → preview modal con stats + sample + duplicados → Confirmar → escribe a Firestore.
-- Parser: `src/utils/siiCsvParser.js`. Funciones: `parseSiiRcvCsv(buffer, { companyRut })`, `dteTypeLabel(tipo)`, `normalizeRut(raw)`. Maneja:
-  - Auto-detección de **kind** (ventas vs compras) inspeccionando headers (`Rut cliente` vs `Rut Proveedor`).
-  - Encoding **UTF-8 con BOM o ISO-8859-1** (latin-1) — intenta UTF-8 primero, fallback a latin-1 si detecta U+FFFD.
-  - Fechas en varios formatos (YYYY-MM-DD, DD/MM/YYYY, DD-MM-YYYY) normalizadas a ISO.
-  - Montos con miles `.` y decimal `,` o sin separadores.
-  - RUTs con/sin guión y puntos, normalizados a `12345678-9`.
-- Doc shape: `{ id, kind ("venta"|"compra"), tipo (33/34/39/56/61/...), tipoLabel, folio, rutEmisor, razonSocialEmisor, rutReceptor, razonSocialReceptor, fechaEmision, periodo ("YYYY-MM"), exento, neto, iva, otrosImpuestos, total, source ("sii_import"), importedAt, importedBy }`.
-- **Doc id determinístico**: `{rutEmisor sin DV}_{tipo}_{folio}`. Reimportar el mismo período es **idempotente** — `setDoc({ merge: true })` sobreescribe sin duplicar. El preview cuenta cuántos sobreescriben antes de confirmar.
-- Bulk write: `writeBatch(db)` con chunks de 450 (límite Firestore 500). Reads/writes solo en `dteDocuments` — sin tocar otras colecciones.
-- UI: tabs **📤 Ventas / 📥 Compras**, filtros por período (YYYY-MM), tipo de DTE, búsqueda libre (razón social, RUT, folio). Cards de totales (Neto, IVA, Total) que se recalculan con los filtros.
-- **Sin links a otras entidades por ahora** (cycles, faenas, taxClients): los datos quedan crudos. Una fase siguiente puede agregar `linkedCycleId`/`linkedClientId` opcional para reportes cruzados.
-- **Sin emisión, sin Cloud Functions, sin certificado digital**. La complejidad fiscal se evita completamente. Si más adelante se quiere automatizar la emisión BTE u otros, va via Cloud Functions + provider (LibreDTE) y se agrega `source: "self_emitted"` al doc shape.
+- Servicios: `companiesService` (colección `companies`) + `dteDocumentsService` (colección `dteDocuments`) en `services/index.js`. TTL del list = **10 min** (`ttl: 600_000`) — las mutaciones locales (status, notas, pagos, import) actualizan el state en memoria, así que el TTL solo afecta al re-entrar a la pantalla.
+- **Multi-empresa**: el sistema soporta N empresas (probado con 3). Cada empresa tiene `{ rut, razonSocial, alias, enabled }`. CRUD inline desde el modal **🏢 Empresas**. Los DTE quedan namespaceados por `companyId` así no se colisionan folios entre empresas (mismo proveedor puede facturar a varias empresas con el mismo folio).
+- **Empresa elegida persiste en localStorage** (`facturacion.selectedCompanyId`). Si la empresa guardada fue borrada, cae a la primera.
+- **V1: solo lectura/import**. La emisión sigue siendo manual en el portal SII — no hay integración con LibreDTE/OpenFactura. Cuando se sume emisión se distingue por `source: "self_emitted"` (hoy todos son `"sii_import"`).
+- **Flujo de import**: el usuario exporta CSV del **Registro de Compras y Ventas (RCV)** desde el portal SII. En la app: 📥 Importar → elegir empresa + **uno o varios archivos** (Ctrl/Cmd+click) → preview multi-file con stats, warnings de RUT mismatch, exclusiones togglables → Confirmar → escribe a Firestore.
+
+### Parser CSV (`src/utils/siiCsvParser.js`)
+
+Exporta: `parseSiiRcvCsv(buffer, { companyRut })`, `dteTypeLabel(tipo)`, `normalizeRut(raw)`, `rutNumeric(raw)`, `extractRutFromFilename(name)`, `buildDteDocId({ companyId, kind, tipo, folio, rutEmisor, rutReceptor })`.
+
+- Auto-detecta **kind** (ventas vs compras) por headers (`Rut cliente` vs `Rut Proveedor`).
+- Encoding **UTF-8 con BOM o ISO-8859-1** — intenta UTF-8, fallback a latin-1 si detecta U+FFFD.
+- Fechas en YYYY-MM-DD, DD/MM/YYYY, DD-MM-YYYY → normalizadas a ISO.
+- Montos con miles `.` y decimal `,` o sin separadores.
+- RUTs con/sin guión y puntos, normalizados a `12345678-9`.
+- `extractRutFromFilename` saca el RUT del nombre del archivo (el SII suele incluirlo en exports del RCV) para detectar mismatch con la empresa elegida → warning en el preview.
+
+### Doc shape + replace por período
+
+```
+{
+  id,                     // companyId_V_tipo_folio  (ventas)
+                          // companyId_C_rutProvNumeric_tipo_folio  (compras)
+  kind: "venta"|"compra",
+  tipo: 33|34|39|56|61|112|...,
+  tipoLabel, folio,
+  rutEmisor, razonSocialEmisor,
+  rutReceptor, razonSocialReceptor,
+  fechaEmision, periodo: "YYYY-MM",
+  exento, neto, iva, otrosImpuestos, total,
+  companyId, companyAlias,
+  source: "sii_import", sourceFile,
+  importedAt, importedBy,
+  paymentStatus: "unpaid"|"paid"|"net_only"|"factored"|"cancelled",
+  paymentStatusSetAt, paymentStatusSetBy,
+  notes,                  // glosa interna editable
+  payments: [{ id, date, amount, kind, notes, recordedAt }],
+  amountPaid,             // denormalizado: sum(payments.amount)
+}
+```
+
+- **Doc id determinístico por `companyId`**: reimportar el mismo período es **idempotente** (setDoc + merge sobreescribe sin duplicar). El preview cuenta cuántos sobreescriben antes de confirmar.
+- **Replace por período**: confirmar el import agrupa por `(companyId, kind, periodo)` y para cada scope (a) lee los existentes, (b) calcula **huérfanos** (existían antes, no vienen en el nuevo CSV) y los **elimina**, (c) escribe los nuevos/actualizados. Preserva `paymentStatus` existente al reimportar — solo setea `"unpaid"` para docs nuevos. Bulk write: `writeBatch(db)` con chunks de 450 (límite Firestore 500).
+
+### UI
+
+- Tabs **📤 Facturas** (kind=venta — antes "Ventas", renombrado a Facturas), **📥 Compras**, **📑 Retenciones**.
+- **Vista default = mes actual**. Toggle **🔍 Auditoría** habilita navegar todos los períodos.
+- Filtros: período, tipo de DTE, **estado de pago** (chips: Todos / No pagado / Pagado / Solo neto / Solo IVA / Anulada), búsqueda libre con `<datalist>` autocomplete de contrapartes únicas.
+- Cards de totales: Documentos, Neto, IVA, Total. **NCs (tipos 61/112) restan con signo** en los totales y se cuentan aparte en una card específica. Para vista normal: cards adicionales de No pagado del período / Solo neto / Cedidas. Para Retenciones: Facturas con retención / IVA retenido / Total facturado.
+- **Tabla principal sortable**: click en cualquier header (Fecha, Tipo, Folio, Cliente/Proveedor, RUT, Neto, IVA, Total, Abonos, Estado) alterna asc/desc con flecha ▲/▼. Default `fechaEmision desc`. Sort sobre "estado" empuja NCs al final (clave virtual `zz_anulada`).
+- **Columna Abonos**: muestra el monto pagado + sub-text "Saldo $X" (warning) o "✓ N abonos" (success) cuando está totalmente pagada. NCs: "—".
+
+### Estados de pago (`PAYMENT_STATUSES`)
+
+5 estados manuales para facturas/boletas afectas, expuestos como `<select>` por fila. Las NCs (61/112) **no usan estos estados** — chip fijo "Anulada" rojo.
+
+| Estado | Significado |
+|---|---|
+| `unpaid` | Pendiente de cobro/pago (default al importar) |
+| `paid` | Completo |
+| `net_only` | Cliente solo pagó NETO — retuvo IVA (típico de servicios). Aparece en tab Retenciones |
+| `factored` | Factura cedida vía factoring (queda "solo IVA" en libros) |
+| `cancelled` | Anulada por NC |
+
+El select nativo lleva colores explícitos `var(--color-surface)` / `var(--color-text)` en sus `<option>` porque el dropdown nativo hereda el fondo del chip y en dark mode los soft colors hacen ilegibles los items.
+
+### Autodetección de NC anulada (sugerencia)
+
+- Helper `findCancellingNcs(dteDoc, allDocs)`: matchea NCs con misma `companyId + kind + RUT contraparte + total exacto`, con NC fecha ≥ factura. Memo `cancellingByDocId` precalcula el mapa.
+- **No auto-cambia** el estado — solo sugiere. En la fila aparece un badge **⚠ NC?** al lado del select; click abre el `DocDetailModal` con un banner rojo listando las NCs candidatas + botón **"Marcar como Anulada"** que en un click setea `cancelled` y agrega `[Anulada por NC tipo-folio (fecha, monto)]` a las notas como auditoría.
+
+### Pagos / abonos (`payments[]`)
+
+- Sección dentro del `DocDetailModal` (oculta para NCs). Lista pagos con fecha/tipo/monto/notas + botón × por fila.
+- Tipos (`PAYMENT_KINDS`): `abono` / `neto` / `iva` / `total` — categorización para auditoría.
+- Indicador **Pagado** / **Saldo** con color (verde si cerrada, warning si queda saldo).
+- Form inline para agregar: fecha (default hoy), tipo, monto, notas. Al cambiar tipo, el monto se autocompleta: `total` = saldo pendiente, `neto` = factura.neto, `iva` = factura.iva, `abono` = vacío.
+- **Validación estricta**: `amountPaid + nuevo ≤ total` — si excede, alerta con desglose y bloquea. Monto > 0, fecha obligatoria. El botón "+ Registrar pago" se deshabilita cuando saldo ≤ 0.
+- Persistencia: `saveDocPayments(dteDoc, payments)` escribe `payments` + `amountPaid` denormalizado.
+- `paymentStatus` es independiente de los pagos — es la etiqueta de alto nivel; los pagos son el detalle/auditoría temporal.
+
+### Retenciones (tab + exports)
+
+Tab **📑 Retenciones** muestra todas las facturas con `paymentStatus === "net_only"` agrupadas por contraparte (sin restricción de kind). `retencionesByContraparte` agrupa por RUT, suma neto/iva/total, ordena por IVA desc. Lista expandible (▸/▾) en `RetencionesView`.
+
+**Exports** (4 botones en toolbar global, mismo set por contraparte individual):
+- 📋 Copiar (toBlob al clipboard como PNG)
+- 📥 PNG (toPng + download)
+- 🖨 Imprimir (ventana print landscape con color-adjust: exact)
+- 📊 XLSX (ExcelJS lazy, layout convención col A vacía width 6 + fila 1 vacía)
+
+**`PrintableRetenciones`** (general): banner amarillo destacado con **IVA Retenido total del período** (font 22, weight 800), tabla resumen por contraparte, y sección **Detalle de facturas** agrupada por contraparte con subtotales por grupo + total general. Sin columna `Tipo` (solo `Documento` con el label) — el número de tipo es ruido visual.
+
+**`PrintableRetencionesGroup`** (individual): un printable por contraparte renderizado off-screen, mismo estilo pero limitado a una sola contraparte. Cada grupo en la vista tiene su propia toolbar de 4 botones (📋📥🖨📊) con `stopPropagation` para que no expanda el grupo. Filename: `Retencion_{empresa}_{contraparte}_{periodo}`.
+
+**XLSX por grupo**: una hoja con banner explícito de IVA retenido (fila 4 destacada amarilla con monto grande) + tabla de facturas + total con fórmulas SUM. Las celdas IVA llevan `bold: true`.
+
+### Ver pendientes (modal global)
+
+Botón **⏳ Ver pendientes** al lado de Auditoría, con badge contador. Abre `PendientesModal` con todas las facturas de la empresa seleccionada **(cualquier período)** que tengan saldo pendiente, categorizadas:
+
+| Categoría | Criterio |
+|---|---|
+| `full` (Factura completa) | status `unpaid` sin abonos → debe el total |
+| `partial` (Abono parcial) | status `unpaid` con abonos → debe `total - amountPaid` |
+| `iva` (IVA pendiente) | status `net_only` o `factored` → debe `iva - max(0, paid - neto)` |
+
+Skip: NCs, `paid`, `cancelled`. Helper: `pendingFor(d)` devuelve `{ category, amount }` o null.
+
+UI: summary cards por categoría + tabla agrupada con sub-headers de color (`#ffd6d6`/`#fff2cc`/`#dde9ff`), subtotales por grupo, total general destacado al final. Cada fila tiene ℹ para abrir el detalle. Misma toolbar de 4 exports.
+
+**`PrintablePendientes`** off-screen replica el layout para captura. **XLSX** baja workbook con secciones por categoría, subtotales con fórmulas y total general en verde.
 
 ## Links útiles
 
@@ -352,7 +450,7 @@ Botones de descarga:
 ## Layout
 
 - **Sidebar colapsable** (`layout.sidebarOpen` en `localStorage`): un solo botón ☰ funciona como toggle en desktop y abre drawer en mobile (decidido por `matchMedia("(min-width: 768px)")`).
-- Nav incluye: Dashboard, Faenas, Calendario, Trabajadores, Transportes, Anticipos / Bonos, Nómina, Links útiles. Items admin (Auditoría, Migrar CSV, Limpiar pagados, Consola) se ven solo con `isAdmin`.
+- Nav incluye: Dashboard, Faenas, Calendario, Trabajadores, Transportes, Anticipos / Bonos, Nómina, Facturación, Links útiles. Items admin (Auditoría, Migrar CSV, Limpiar pagados, Consola) se ven solo con `isAdmin`.
 - **Versión en el header** — `Agrofrutos v1.0.{commitCount}` autogenerado en build-time por `vite.config.js` (via `git rev-list --count HEAD` inyectado como `__APP_VERSION__`). Sirve para diagnosticar caché PWA viejo de un vistazo: si el header sigue mostrando una versión anterior tras un deploy, el SW tiene un bundle stale.
 
 ## Env
