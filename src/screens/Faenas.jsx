@@ -88,6 +88,42 @@ export default function Faenas() {
   const [dropOverId, setDropOverId] = useState(null);
   const [dropOverGroupId, setDropOverGroupId] = useState(null);
 
+  // ---------------- Collapse de subfaenas / ciclos cerrados ----------------
+  // Persistido por usuario. Por defecto las subfaenas arrancan expandidas;
+  // los ciclos cerrados arrancan ocultos cuando hay abiertos al lado (el
+  // usuario lo abre con un toggle "Ver N cerrados"). El objetivo es que
+  // faenas con muchos ciclos históricos no inunden la vista operativa.
+  const collapsedSubsKey = `af.collapsedSubs.${user?.uid || "anon"}`;
+  const [collapsedSubs, setCollapsedSubs] = useState(() => {
+    try { return new Set(JSON.parse(localStorage.getItem(collapsedSubsKey) || "[]")); } catch { return new Set(); }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(collapsedSubsKey, JSON.stringify([...collapsedSubs])); } catch { /* noop */ }
+  }, [collapsedSubs, collapsedSubsKey]);
+
+  const showClosedKey = `af.showClosedInSub.${user?.uid || "anon"}`;
+  const [showClosedInSub, setShowClosedInSub] = useState(() => {
+    try { return new Set(JSON.parse(localStorage.getItem(showClosedKey) || "[]")); } catch { return new Set(); }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(showClosedKey, JSON.stringify([...showClosedInSub])); } catch { /* noop */ }
+  }, [showClosedInSub, showClosedKey]);
+
+  const toggleSubCollapse = (subId) => {
+    setCollapsedSubs((prev) => {
+      const n = new Set(prev);
+      if (n.has(subId)) n.delete(subId); else n.add(subId);
+      return n;
+    });
+  };
+  const toggleShowClosed = (subId) => {
+    setShowClosedInSub((prev) => {
+      const n = new Set(prev);
+      if (n.has(subId)) n.delete(subId); else n.add(subId);
+      return n;
+    });
+  };
+
   // ---------------- Layout (groups + colors per user) ----------------
   const [layout, setLayout] = useState(defaultLayout);
   const [editLayout, setEditLayout] = useState(false);
@@ -762,6 +798,12 @@ export default function Faenas() {
             message: `¿Eliminar el ciclo "${c.label}"?`,
           })
         }
+        collapsedSubs={collapsedSubs}
+        onToggleSubCollapse={toggleSubCollapse}
+        onCollapseAllSubs={() => setCollapsedSubs(new Set((selectedSubs || []).map((s) => s.id)))}
+        onExpandAllSubs={() => setCollapsedSubs(new Set())}
+        showClosedInSub={showClosedInSub}
+        onToggleShowClosed={toggleShowClosed}
       />
     );
 
@@ -1425,6 +1467,12 @@ function SelectedDetail({
   onOpenCloseFlow,
   onReopenCycle,
   onDeleteCycle,
+  collapsedSubs,
+  onToggleSubCollapse,
+  onCollapseAllSubs,
+  onExpandAllSubs,
+  showClosedInSub,
+  onToggleShowClosed,
 }) {
   const cyclesBySub = (cycles || []).reduce((acc, c) => {
     if (!c.subfaenaId) return acc;
@@ -1434,6 +1482,7 @@ function SelectedDetail({
   const orphanCycles = (cycles || []).filter((c) => !c.subfaenaId);
 
   const hasSubs = (subs || []).length > 0;
+  const allCollapsed = hasSubs && (subs || []).every((s) => collapsedSubs?.has(s.id));
 
   return (
     <div className="mt-6 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] shadow-sm">
@@ -1473,23 +1522,60 @@ function SelectedDetail({
         </div>
       ) : (
         <div className="space-y-3 px-5 py-4">
-          <div className="flex items-center justify-between text-xs uppercase tracking-wider text-[var(--color-muted)]">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs uppercase tracking-wider text-[var(--color-muted)]">
             <span>Subfaenas ({subs.length})</span>
-            <button
-              onClick={onCreateSub}
-              className="rounded-md bg-[var(--color-accent)] px-3 py-1 text-xs font-medium text-[var(--color-accent-fg)] hover:bg-[var(--color-accent-hover)]"
-            >
-              + Subfaena
-            </button>
+            <div className="flex flex-wrap gap-1">
+              <button
+                onClick={allCollapsed ? onExpandAllSubs : onCollapseAllSubs}
+                title={allCollapsed ? "Expandir todas las subfaenas" : "Colapsar todas las subfaenas"}
+                className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-[10px] normal-case tracking-normal hover:bg-[var(--color-accent-soft)]"
+              >
+                {allCollapsed ? "▾ Expandir todo" : "▸ Colapsar todo"}
+              </button>
+              <button
+                onClick={onCreateSub}
+                className="rounded-md bg-[var(--color-accent)] px-3 py-1 text-xs font-medium normal-case text-[var(--color-accent-fg)] hover:bg-[var(--color-accent-hover)]"
+              >
+                + Subfaena
+              </button>
+            </div>
           </div>
           {subs.map((s) => {
             const subCycles = cyclesBySub[s.id] || [];
+            const openCycles = subCycles.filter((c) => c.status !== "closed");
+            const closedCycles = subCycles.filter((c) => c.status === "closed");
+            const isCollapsed = !!collapsedSubs?.has(s.id);
+            // Si hay abiertos y cerrados, los cerrados arrancan ocultos. Si
+            // solo hay cerrados (subfaena histórica), se muestran sí o sí —
+            // sino la subfaena se vería vacía.
+            const closedHiddenByDefault = openCycles.length > 0;
+            const showClosed = !closedHiddenByDefault || !!showClosedInSub?.has(s.id);
             return (
               <div key={s.id} className="rounded-md border border-[var(--color-border)]">
                 <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2">
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm font-medium">{s.name}</div>
-                    {s.notes && <div className="truncate text-xs text-[var(--color-muted)]">{s.notes}</div>}
+                  <button
+                    onClick={() => onToggleSubCollapse(s.id)}
+                    aria-label={isCollapsed ? "Expandir" : "Colapsar"}
+                    className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)] hover:text-[var(--color-accent)]"
+                  >
+                    {isCollapsed ? "▸" : "▾"}
+                  </button>
+                  <div
+                    className="min-w-0 flex-1 cursor-pointer"
+                    onClick={() => onToggleSubCollapse(s.id)}
+                  >
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="truncate text-sm font-medium">{s.name}</span>
+                      <span className="rounded bg-[var(--color-surface)] px-1.5 py-0.5 text-[10px] text-[var(--color-muted)]">
+                        {openCycles.length > 0 && <span className="text-[var(--color-accent)]">{openCycles.length} abierto{openCycles.length === 1 ? "" : "s"}</span>}
+                        {openCycles.length > 0 && closedCycles.length > 0 && " · "}
+                        {closedCycles.length > 0 && <span>{closedCycles.length} cerrado{closedCycles.length === 1 ? "" : "s"}</span>}
+                        {subCycles.length === 0 && "sin ciclos"}
+                      </span>
+                    </div>
+                    {s.notes && !isCollapsed && (
+                      <div className="truncate text-xs text-[var(--color-muted)]">{s.notes}</div>
+                    )}
                   </div>
                   <div className="ml-auto flex shrink-0 flex-wrap gap-1">
                     <button
@@ -1512,21 +1598,45 @@ function SelectedDetail({
                     </button>
                   </div>
                 </div>
-                {subCycles.length === 0 ? (
-                  <div className="px-3 py-2 text-xs text-[var(--color-muted)]">Sin ciclos.</div>
-                ) : (
-                  <ul className="divide-y divide-[var(--color-border)]">
-                    {subCycles.map((c) => (
-                      <CycleRow
-                        key={c.id}
-                        cycle={c}
-                        onEdit={onEditCycle}
-                        onOpenCloseFlow={onOpenCloseFlow}
-                        onReopen={onReopenCycle}
-                        onDelete={onDeleteCycle}
-                      />
-                    ))}
-                  </ul>
+                {!isCollapsed && (
+                  subCycles.length === 0 ? (
+                    <div className="px-3 py-2 text-xs text-[var(--color-muted)]">Sin ciclos.</div>
+                  ) : (
+                    <>
+                      <ul className="divide-y divide-[var(--color-border)]">
+                        {openCycles.map((c) => (
+                          <CycleRow
+                            key={c.id}
+                            cycle={c}
+                            onEdit={onEditCycle}
+                            onOpenCloseFlow={onOpenCloseFlow}
+                            onReopen={onReopenCycle}
+                            onDelete={onDeleteCycle}
+                          />
+                        ))}
+                        {showClosed && closedCycles.map((c) => (
+                          <CycleRow
+                            key={c.id}
+                            cycle={c}
+                            onEdit={onEditCycle}
+                            onOpenCloseFlow={onOpenCloseFlow}
+                            onReopen={onReopenCycle}
+                            onDelete={onDeleteCycle}
+                          />
+                        ))}
+                      </ul>
+                      {closedHiddenByDefault && closedCycles.length > 0 && (
+                        <button
+                          onClick={() => onToggleShowClosed(s.id)}
+                          className="w-full border-t border-[var(--color-border)] bg-[var(--color-surface-2)]/50 px-3 py-1.5 text-left text-xs text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)] hover:text-[var(--color-accent)]"
+                        >
+                          {showClosed
+                            ? `▴ Ocultar ${closedCycles.length} ciclo${closedCycles.length === 1 ? "" : "s"} cerrado${closedCycles.length === 1 ? "" : "s"}`
+                            : `▾ Ver ${closedCycles.length} ciclo${closedCycles.length === 1 ? "" : "s"} cerrado${closedCycles.length === 1 ? "" : "s"}`}
+                        </button>
+                      )}
+                    </>
+                  )
                 )}
               </div>
             );
