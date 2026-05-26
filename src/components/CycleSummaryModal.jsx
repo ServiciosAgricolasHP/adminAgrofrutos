@@ -529,7 +529,11 @@ export default function CycleSummaryModal({
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState("");
   const [mode, setMode] = useState("pagar"); // pagar | cobrar
-  const [cobrar, setCobrar] = useState({ labors: {}, carriers: {} });
+  // `withIva` (default true) controla si el printable + XLSX en modo cobrar
+  // muestran las filas de IVA 19%. Algunos cobros van sin IVA (servicios
+  // exentos, boletas, acuerdos netos) — el toggle queda persistido por ciclo
+  // así no hay que setearlo cada vez.
+  const [cobrar, setCobrar] = useState({ labors: {}, carriers: {}, withIva: true });
   const [titles, setTitles] = useState({ main: "DETALLE DE JORNADA", subtitle: "", laborNames: {}, carrierNames: {} });
   const [showTitleEditor, setShowTitleEditor] = useState(false);
   const [showCobrarEditor, setShowCobrarEditor] = useState(true);
@@ -550,7 +554,11 @@ export default function CycleSummaryModal({
 
   useEffect(() => {
     if (!open || !cycle?.id) return;
-    setCobrar(loadJSON(cobrarStorageKey(cycle.id), { labors: {}, carriers: {} }));
+    setCobrar(() => {
+      const loaded = loadJSON(cobrarStorageKey(cycle.id), { labors: {}, carriers: {}, withIva: true });
+      // Backfill para ciclos guardados antes de que existiera el toggle.
+      return { withIva: true, ...loaded };
+    });
     const defaultSubtitle = [faena?.name, subfaena?.name, cycle.label].filter(Boolean).join(" · ");
     setTitles(loadJSON(titlesStorageKey(cycle.id), {
       main: "DETALLE DE JORNADA",
@@ -588,6 +596,14 @@ export default function CycleSummaryModal({
       const next = { ...prev, carrierNames: { ...prev.carrierNames, [carrierId]: name } };
       saveJSON(titlesStorageKey(cycle?.id), next);
       return next;
+    });
+  };
+
+  const setCobrarWithIva = (next) => {
+    setCobrar((prev) => {
+      const n = { ...prev, withIva: !!next };
+      saveJSON(cobrarStorageKey(cycle?.id), n);
+      return n;
     });
   };
 
@@ -1649,7 +1665,9 @@ export default function CycleSummaryModal({
       // ============ HOJA TOTAL GENERAL ============
       const wsTotal = wb.addWorksheet(safeName("Total"));
       wsTotal.getColumn(1).width = 6;
-      wsTotal.getCell("B2").value = mode === "cobrar" ? "TOTAL A FACTURAR" : "TOTAL GENERAL";
+      wsTotal.getCell("B2").value = mode === "cobrar"
+        ? (cobrar.withIva !== false ? "TOTAL A FACTURAR" : "TOTAL A COBRAR (sin IVA)")
+        : "TOTAL GENERAL";
       wsTotal.getCell("B2").font = { bold: true, size: 14 };
 
       const HR = 4;
@@ -1674,7 +1692,9 @@ export default function CycleSummaryModal({
       const totalEnd = totalRow - 1;
 
       const grandRow = totalRow;
-      wsTotal.getCell(`B${grandRow}`).value = mode === "cobrar" ? "TOTAL A FACTURAR" : "TOTAL GENERAL";
+      wsTotal.getCell(`B${grandRow}`).value = mode === "cobrar"
+        ? (cobrar.withIva !== false ? "TOTAL A FACTURAR" : "TOTAL A COBRAR (sin IVA)")
+        : "TOTAL GENERAL";
       wsTotal.getCell(`B${grandRow}`).font = { bold: true };
       wsTotal.getCell(`B${grandRow}`).fill = titleFill;
       const grand = wsTotal.getCell(`C${grandRow}`);
@@ -1689,7 +1709,8 @@ export default function CycleSummaryModal({
       grand.fill = titleFill;
 
       // En modo cobrar agregamos abajo: Valor IVA (19%) y total con IVA incluido.
-      if (mode === "cobrar") {
+      // Si el toggle "Sin IVA" está activo, se omiten estas filas.
+      if (mode === "cobrar" && cobrar.withIva !== false) {
         const ivaRow = grandRow + 1;
         wsTotal.getCell(`B${ivaRow}`).value = "Valor IVA (19%)";
         wsTotal.getCell(`B${ivaRow}`).font = { bold: true };
@@ -1829,6 +1850,17 @@ export default function CycleSummaryModal({
           </button>
         )}
         {mode === "cobrar" && (
+          <button
+            onClick={() => setCobrarWithIva(!cobrar.withIva)}
+            className={`rounded-md border px-2 py-1 text-xs ${cobrar.withIva ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)] text-[var(--color-accent)]" : "border-[var(--color-border)] bg-[var(--color-surface-2)] hover:bg-[var(--color-accent-soft)]"}`}
+            title={cobrar.withIva
+              ? "El total se cobra con IVA (19% calculado abajo). Click para cambiar a sin IVA."
+              : "El total se cobra sin IVA (servicios exentos / acuerdos netos). Click para activar IVA."}
+          >
+            {cobrar.withIva ? "💰 Con IVA" : "🚫 Sin IVA"}
+          </button>
+        )}
+        {mode === "cobrar" && (
           <>
             <button
               ref={colsBtnRef}
@@ -1883,6 +1915,7 @@ export default function CycleSummaryModal({
         <PrintableSummary
           mode={mode}
           editMode={editMode}
+          withIva={cobrar.withIva !== false}
           hiddenColumns={hiddenColumns}
           titles={titles}
           labors={mode === "cobrar" ? cobrarLabors : laborsData}
@@ -2309,6 +2342,7 @@ const PrintableSummary = forwardRef(function PrintableSummary(
   {
     mode,
     editMode = true,
+    withIva = true,
     hiddenColumns = new Set(),
     titles,
     labors,
@@ -2413,13 +2447,15 @@ const PrintableSummary = forwardRef(function PrintableSummary(
         <tbody>
           <tr style={{ background: "#a9d08e" }}>
             <td style={{ ...cell, fontWeight: 700, fontSize: 14 }}>
-              {mode === "cobrar" ? "TOTAL A FACTURAR" : "TOTAL GENERAL"}
+              {mode === "cobrar"
+                ? (withIva ? "TOTAL A FACTURAR" : "TOTAL A COBRAR (sin IVA)")
+                : "TOTAL GENERAL"}
             </td>
             <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontSize: 14, fontVariantNumeric: "tabular-nums" }}>
               {fmtCurrency(grandTotal)}
             </td>
           </tr>
-          {mode === "cobrar" && (
+          {mode === "cobrar" && withIva && (
             <>
               <tr style={{ background: "#fff" }}>
                 <td style={{ ...cell, fontWeight: 600 }}>Valor IVA (19%)</td>
