@@ -426,15 +426,15 @@ Tab **📑 Retenciones** muestra todas las facturas con `paymentStatus === "net_
 
 ### Ver pendientes (modal global)
 
-Botón **⏳ Ver pendientes** al lado de Auditoría, con badge contador. Abre `PendientesModal` con todas las facturas de la empresa seleccionada **(cualquier período)** que tengan saldo pendiente, categorizadas:
+Botón **⏳ Ver pendientes** al lado de Auditoría, con badge contador. Abre `PendientesModal` con las **ventas** (kind=`venta` — no compras, son flujo distinto) de la empresa seleccionada **(cualquier período)** que tengan saldo pendiente, categorizadas:
 
 | Categoría | Criterio |
 |---|---|
 | `full` (Factura completa) | status `unpaid` sin abonos → debe el total |
 | `partial` (Abono parcial) | status `unpaid` con abonos → debe `total - amountPaid` |
-| `iva` (IVA pendiente) | status `net_only` o `factored` → debe `iva - max(0, paid - neto)` |
+| `iva` (IVA pendiente) | status `net_only` → debe `iva - max(0, paid - neto)` |
 
-Skip: NCs, `paid`, `cancelled`. Helper: `pendingFor(d)` devuelve `{ category, amount }` o null.
+Skip: NCs, `paid`, `cancelled`, **`factored`** (Solo IVA / cedida — se considera pagada porque el factor ya pagó el neto al emisor; el IVA es una obligación tributaria separada que se gestiona en el F29, no acá). Helper: `pendingFor(d)` devuelve `{ category, amount }` o null.
 
 UI: summary cards por categoría + tabla agrupada con sub-headers de color (`#ffd6d6`/`#fff2cc`/`#dde9ff`), subtotales por grupo, total general destacado al final. Cada fila tiene ℹ para abrir el detalle. Misma toolbar de 4 exports.
 

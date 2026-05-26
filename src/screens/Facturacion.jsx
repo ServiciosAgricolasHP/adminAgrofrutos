@@ -97,10 +97,14 @@ const PENDIENTE_CATS = {
 
 // Devuelve `{ category, amount }` para una factura pendiente, o null si no
 // tiene nada pendiente (pagada, anulada, NC, factura cerrada, etc.).
+// `factored` (Solo IVA — cedida vía factoring) se considera **pagada** para
+// efectos de cobranza: el factor ya pagó el neto al emisor y el cliente queda
+// debiéndole al factor, no a nosotros. El IVA es una obligación tributaria
+// separada que se gestiona en el F29, no en este flujo.
 function pendingFor(d) {
   if (CREDIT_NOTE_TYPES.has(Number(d.tipo))) return null;
   const st = d.paymentStatus || "unpaid";
-  if (st === "cancelled" || st === "paid") return null;
+  if (st === "cancelled" || st === "paid" || st === "factored") return null;
   const total = Number(d.total) || 0;
   const neto = Number(d.neto) || 0;
   const iva = Number(d.iva) || 0;
@@ -110,7 +114,7 @@ function pendingFor(d) {
     if (pending <= 0.5) return null;
     return { category: paid > 0 ? "partial" : "full", amount: pending };
   }
-  if (st === "net_only" || st === "factored") {
+  if (st === "net_only") {
     // Lo que ya está cubierto por pagos por encima del neto se imputa al IVA.
     const ivaCovered = Math.max(0, paid - neto);
     const pending = Math.max(0, iva - ivaCovered);
@@ -414,12 +418,15 @@ export default function Facturacion() {
   }, [docs]);
 
   // Lista global de facturas pendientes (cualquier período) para la empresa
-  // seleccionada — alimenta el modal "Ver pendientes". Cada item lleva
-  // `_category` y `_pending` calculados por `pendingFor`. Ordenado por
-  // categoría (full → partial → iva) y luego por fecha ascendente.
+  // seleccionada — alimenta el modal "Ver pendientes". **Solo ventas** (kind
+  // === "venta"): las compras tienen su propio flujo de seguimiento y no
+  // mezclamos cuentas por cobrar con cuentas por pagar en la misma vista.
+  // Cada item lleva `_category` y `_pending` calculados por `pendingFor`.
+  // Ordenado por categoría (full → partial → iva) y luego por fecha ascendente.
   const pendientesList = useMemo(() => {
     const arr = [];
     for (const d of docs) {
+      if (d.kind !== "venta") continue;
       if (selectedCompanyId && d.companyId !== selectedCompanyId) continue;
       const p = pendingFor(d);
       if (!p) continue;
