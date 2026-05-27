@@ -13,6 +13,7 @@ import {
   normalizeAdvanceType,
 } from "../services/advancesService";
 import { useCatalogs } from "../contexts/CatalogsContext";
+import { useToast } from "../contexts/ToastContext";
 import { formatRutForDisplay } from "../utils/rutUtils";
 
 const fmtCurrency = (v) =>
@@ -156,6 +157,7 @@ const oneMonthAgoISO = () => {
 };
 
 export default function WorkerSummaryModal({ open, onClose, worker }) {
+  const toast = useToast();
   const { catalogs } = useCatalogs();
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState([]); // [{ cycle, faena, subfaena, rows, totals, isClosed }]
@@ -238,9 +240,9 @@ export default function WorkerSummaryModal({ open, onClose, worker }) {
       const blob = await toBlob(printRef.current, { backgroundColor: "#ffffff", pixelRatio: 2 });
       if (!blob) throw new Error("No se pudo generar la imagen");
       await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
-      alert("Imagen copiada al portapapeles");
+      toast.success("Imagen copiada al portapapeles");
     } catch (err) {
-      alert("Error: " + (err.message || err));
+      toast.error("Error: " + (err.message || err));
     } finally {
       setBusy("");
     }
@@ -869,6 +871,7 @@ const cell = { border: "1px solid #999", padding: "5px 8px", fontSize: 12 };
 // vea — si los ciclos usan unidades distintas, la columna mostraría las
 // dos juntas indistintamente (caso raro y aceptado).
 function LinearTable({ data, titles, onUpdateLinearTitles }) {
+  const toast = useToast();
   const localRef = useRef(null);
   const [busy, setBusy] = useState("");
   const [editTitles, setEditTitles] = useState(false);
@@ -936,9 +939,9 @@ function LinearTable({ data, titles, onUpdateLinearTitles }) {
       const blob = await toBlob(localRef.current, fullCaptureOpts());
       if (!blob) throw new Error("No se pudo generar la imagen");
       await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
-      alert("Imagen copiada al portapapeles");
+      toast.success("Imagen copiada al portapapeles");
     } catch (err) {
-      alert("Error: " + (err.message || err));
+      toast.error("Error: " + (err.message || err));
     } finally {
       setBusy("");
     }

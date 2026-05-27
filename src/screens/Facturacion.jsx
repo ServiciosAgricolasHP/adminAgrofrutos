@@ -13,6 +13,7 @@ import { companiesService, dteDocumentsService } from "../services";
 import { parseSiiRcvCsv, dteTypeLabel, buildDteDocId, normalizeRut, extractRutFromFilename } from "../utils/siiCsvParser";
 import { formatRutForDisplay } from "../utils/rutUtils";
 import Modal from "../components/Modal";
+import { useToast } from "../contexts/ToastContext";
 
 const fmtCurrency = (v) =>
   new Intl.NumberFormat("es-CL", { style: "currency", currency: "CLP", minimumFractionDigits: 0 }).format(
@@ -155,6 +156,7 @@ function findCancellingNcs(dteDoc, allDocs) {
 const LS_SELECTED_COMPANY = "facturacion.selectedCompanyId";
 
 export default function Facturacion() {
+  const toast = useToast();
   const [companies, setCompanies] = useState([]);
   const [selectedCompanyId, setSelectedCompanyId] = useState(() => {
     try { return localStorage.getItem(LS_SELECTED_COMPANY) || ""; } catch { return ""; }
@@ -455,7 +457,7 @@ export default function Facturacion() {
 
   const openImport = () => {
     if (companies.length === 0) {
-      alert("Tenés que registrar al menos una empresa antes de importar. Usá el botón 🏢 Empresas.");
+      toast.warning("Tenés que registrar al menos una empresa antes de importar. Usá el botón 🏢 Empresas.");
       return;
     }
     setImportCompanyId(selectedCompanyId || companies[0].id);
@@ -467,7 +469,7 @@ export default function Facturacion() {
   const onFilesPick = async (files) => {
     if (!files || files.length === 0) return;
     if (!importCompanyId) {
-      alert("Seleccioná una empresa antes de elegir los archivos.");
+      toast.warning("Seleccioná una empresa antes de elegir los archivos.");
       return;
     }
     const company = companiesById.get(importCompanyId);
@@ -546,7 +548,7 @@ export default function Facturacion() {
         .filter((f) => !f.excluded && !f.parseFailed)
         .flatMap((f) => f.records);
       if (allRecords.length === 0) {
-        alert("No hay registros para importar (todos los archivos están excluidos o fallaron).");
+        toast.warning("No hay registros para importar (todos los archivos están excluidos o fallaron).");
         setImporting(false);
         return;
       }
@@ -611,18 +613,17 @@ export default function Facturacion() {
       }
       dteDocumentsService.invalidate();
       const filesProcessed = importPreview.files.filter((f) => !f.excluded && !f.parseFailed).length;
-      alert(
-        `Importación lista (${filesProcessed} archivo${filesProcessed === 1 ? "" : "s"}).\n` +
-        `Nuevos: ${totalNew}\n` +
-        `Sobreescritos: ${totalOverwrite}\n` +
-        `Huérfanos eliminados: ${totalDeleted}\n` +
-        `Total procesado: ${allRecords.length}`,
+      toast.success(
+        `${filesProcessed} archivo${filesProcessed === 1 ? "" : "s"} procesado${filesProcessed === 1 ? "" : "s"}.\n` +
+        `Nuevos: ${totalNew} · Sobreescritos: ${totalOverwrite} · Huérfanos eliminados: ${totalDeleted}\n` +
+        `Total: ${allRecords.length}`,
+        { title: "Importación lista" },
       );
       setImportPreview(null);
       setImportCompanyId("");
       await loadAll();
     } catch (err) {
-      alert("Error al guardar: " + (err.message || String(err)));
+      toast.error("Error al guardar: " + (err.message || String(err)));
     } finally {
       setImporting(false);
     }
@@ -643,7 +644,7 @@ export default function Facturacion() {
       });
       setDocs((prev) => prev.map((d) => (d.id === dteDoc.id ? { ...d, paymentStatus: newStatus } : d)));
     } catch (err) {
-      alert("Error al cambiar estado: " + (err.message || err));
+      toast.error("Error al cambiar estado: " + (err.message || err));
     }
   };
 
@@ -655,7 +656,7 @@ export default function Facturacion() {
       setDocs((prev) => prev.map((d) => (d.id === dteDoc.id ? { ...d, notes } : d)));
       setDetailDoc((cur) => (cur?.id === dteDoc.id ? { ...cur, notes } : cur));
     } catch (err) {
-      alert("Error al guardar notas: " + (err.message || err));
+      toast.error("Error al guardar notas: " + (err.message || err));
     }
   };
 
@@ -669,7 +670,7 @@ export default function Facturacion() {
       setDocs((prev) => prev.map((d) => (d.id === dteDoc.id ? { ...d, payments, amountPaid } : d)));
       setDetailDoc((cur) => (cur?.id === dteDoc.id ? { ...cur, payments, amountPaid } : cur));
     } catch (err) {
-      alert("Error al guardar pagos: " + (err.message || err));
+      toast.error("Error al guardar pagos: " + (err.message || err));
     }
   };
 
@@ -692,9 +693,9 @@ export default function Facturacion() {
       const blob = await toBlob(retencionesPrintRef.current, { backgroundColor: "#ffffff", pixelRatio: 2 });
       if (!blob) throw new Error("No se pudo generar la imagen");
       await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
-      alert("Imagen copiada al portapapeles");
+      toast.success("Imagen copiada al portapapeles");
     } catch (err) {
-      alert("Error al copiar: " + (err.message || err));
+      toast.error("Error al copiar: " + (err.message || err));
     } finally {
       setExportBusy("");
     }
@@ -710,7 +711,7 @@ export default function Facturacion() {
       link.href = dataUrl;
       link.click();
     } catch (err) {
-      alert("Error al generar PNG: " + (err.message || err));
+      toast.error("Error al generar PNG: " + (err.message || err));
     } finally {
       setExportBusy("");
     }
@@ -880,7 +881,7 @@ export default function Facturacion() {
       link.click();
       URL.revokeObjectURL(link.href);
     } catch (err) {
-      alert("Error al generar XLSX: " + (err.message || err));
+      toast.error("Error al generar XLSX: " + (err.message || err));
     } finally {
       setExportBusy("");
     }
@@ -907,9 +908,9 @@ export default function Facturacion() {
       const blob = await toBlob(el, { backgroundColor: "#ffffff", pixelRatio: 2 });
       if (!blob) throw new Error("No se pudo generar la imagen");
       await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
-      alert(`Copiado: ${g.razon || "contraparte"}`);
+      toast.success(`Copiado: ${g.razon || "contraparte"}`);
     } catch (err) {
-      alert("Error al copiar: " + (err.message || err));
+      toast.error("Error al copiar: " + (err.message || err));
     } finally {
       setBusyFor(key, null);
     }
@@ -927,7 +928,7 @@ export default function Facturacion() {
       link.href = dataUrl;
       link.click();
     } catch (err) {
-      alert("Error al generar PNG: " + (err.message || err));
+      toast.error("Error al generar PNG: " + (err.message || err));
     } finally {
       setBusyFor(key, null);
     }
@@ -1057,7 +1058,7 @@ export default function Facturacion() {
       link.click();
       URL.revokeObjectURL(link.href);
     } catch (err) {
-      alert("Error al generar XLSX: " + (err.message || err));
+      toast.error("Error al generar XLSX: " + (err.message || err));
     } finally {
       setBusyFor(key, null);
     }
@@ -1927,6 +1928,7 @@ function RetencionesView({ groups, onSelectDoc, onSetStatus, onGroupExport, grou
 // fecha, tipo, monto y notas, calcula pagado/saldo, y permite agregar nuevos
 // con validación de no superar el total de la factura.
 function PaymentsSection({ dteDoc, payments, amountPaid, balance, onSavePayments }) {
+  const toast = useToast();
   const total = Number(dteDoc?.total) || 0;
   const [adding, setAdding] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -1955,14 +1957,15 @@ function PaymentsSection({ dteDoc, payments, amountPaid, balance, onSavePayments
 
   const submit = async () => {
     const amount = Math.round(Number(newPay.amount) || 0);
-    if (amount <= 0) { alert("El monto debe ser mayor a 0."); return; }
+    if (amount <= 0) { toast.warning("El monto debe ser mayor a 0."); return; }
     if (amountPaid + amount > total + 0.01) {
-      alert(
-        `El abono excede el total de la factura.\n\nTotal: ${fmtCurrency(total)}\nYa pagado: ${fmtCurrency(amountPaid)}\nSaldo: ${fmtCurrency(balance)}\nIntento: ${fmtCurrency(amount)}`,
+      toast.error(
+        `Total: ${fmtCurrency(total)}\nYa pagado: ${fmtCurrency(amountPaid)}\nSaldo: ${fmtCurrency(balance)}\nIntento: ${fmtCurrency(amount)}`,
+        { title: "El abono excede el total de la factura" },
       );
       return;
     }
-    if (!newPay.date) { alert("Tenés que indicar la fecha del pago."); return; }
+    if (!newPay.date) { toast.warning("Tenés que indicar la fecha del pago."); return; }
     const entry = {
       id: newPaymentId(),
       date: newPay.date,
@@ -2651,6 +2654,7 @@ function FileRow({ file, existingIds, companyRut, onToggle }) {
 // CRUD inline de empresas. Lista + formulario para agregar/editar/borrar.
 // El alias es lo que se muestra en la UI; razón social va en el detalle.
 function CompaniesModal({ companies, onClose, onChanged }) {
+  const toast = useToast();
   const [editing, setEditing] = useState(null); // { id?, rut, razonSocial, alias }
   const [busy, setBusy] = useState(false);
 
@@ -2659,7 +2663,7 @@ function CompaniesModal({ companies, onClose, onChanged }) {
 
   const save = async () => {
     if (!editing.rut.trim() || !editing.razonSocial.trim()) {
-      alert("Completá RUT y Razón Social.");
+      toast.warning("Completá RUT y Razón Social.");
       return;
     }
     setBusy(true);
@@ -2808,6 +2812,7 @@ function CompaniesModal({ companies, onClose, onChanged }) {
 // IVA pendiente) con subtotales y un total general. Toolbar de export idéntico
 // al de Retenciones: Copiar / PNG / Imprimir / XLSX.
 function PendientesModal({ items, totals, company, onClose, onSelectDoc }) {
+  const toast = useToast();
   const printRef = useRef(null);
   const [busy, setBusy] = useState("");
 
@@ -2829,9 +2834,9 @@ function PendientesModal({ items, totals, company, onClose, onSelectDoc }) {
       const blob = await toBlob(printRef.current, { backgroundColor: "#ffffff", pixelRatio: 2 });
       if (!blob) throw new Error("No se pudo generar la imagen");
       await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
-      alert("Imagen copiada al portapapeles");
+      toast.success("Imagen copiada al portapapeles");
     } catch (err) {
-      alert("Error al copiar: " + (err.message || err));
+      toast.error("Error al copiar: " + (err.message || err));
     } finally {
       setBusy("");
     }
@@ -2847,7 +2852,7 @@ function PendientesModal({ items, totals, company, onClose, onSelectDoc }) {
       link.href = dataUrl;
       link.click();
     } catch (err) {
-      alert("Error PNG: " + (err.message || err));
+      toast.error("Error PNG: " + (err.message || err));
     } finally {
       setBusy("");
     }
@@ -2989,7 +2994,7 @@ function PendientesModal({ items, totals, company, onClose, onSelectDoc }) {
       link.click();
       URL.revokeObjectURL(link.href);
     } catch (err) {
-      alert("Error XLSX: " + (err.message || err));
+      toast.error("Error XLSX: " + (err.message || err));
     } finally {
       setBusy("");
     }

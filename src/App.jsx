@@ -3,6 +3,7 @@ import { AuthProvider } from "./contexts/AuthContext";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import { CatalogsProvider } from "./contexts/CatalogsContext";
 import { CarriersProvider } from "./contexts/CarriersContext";
+import { ToastProvider } from "./contexts/ToastContext";
 import ProtectedRoute from "./components/ProtectedRoute";
 import Layout from "./components/Layout";
 import Login from "./screens/Login";
@@ -24,6 +25,7 @@ import Facturacion from "./screens/Facturacion";
 export default function App() {
   return (
     <ThemeProvider>
+      <ToastProvider>
       <AuthProvider>
         <CatalogsProvider>
           <CarriersProvider>
@@ -87,6 +89,7 @@ export default function App() {
           </CarriersProvider>
         </CatalogsProvider>
       </AuthProvider>
+      </ToastProvider>
     </ThemeProvider>
   );
 }

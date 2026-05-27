@@ -299,3 +299,10 @@ input, select, textarea {
   border-color: var(--color-accent);
   box-shadow: 0 0 0 2px var(--color-accent-soft);
 }
+
+/* Toast notifications — enter animation */
+@keyframes toastIn {
+  0%   { transform: translateY(-8px); opacity: 0; }
+  100% { transform: translateY(0);    opacity: 1; }
+}
+

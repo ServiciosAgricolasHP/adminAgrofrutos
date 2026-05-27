@@ -20,6 +20,7 @@ import { isRedDay } from "../utils/tratoHE";
 import { tripsService } from "../services/transportsService";
 import { cyclesService, workdaysService } from "../services";
 import { useCarriers } from "../contexts/CarriersContext";
+import { useToast } from "../contexts/ToastContext";
 
 const fmtCurrency = (v) =>
   new Intl.NumberFormat("es-CL", { style: "currency", currency: "CLP", minimumFractionDigits: 0 }).format(
@@ -525,6 +526,7 @@ export default function CycleSummaryModal({
   // puede tener vueltas viejas en el ciclo y necesitamos su alias para no
   // mostrar el UUID crudo.
   const { carriers } = useCarriers();
+  const toast = useToast();
   const [trips, setTrips] = useState([]);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState("");
@@ -760,7 +762,7 @@ export default function CycleSummaryModal({
         .sort((a, b) => String(b.createdAt || b.id).localeCompare(String(a.createdAt || a.id)));
       setAvailableCycles(filtered);
     } catch (err) {
-      alert("Error cargando ciclos: " + (err.message || err));
+      toast.error("Error cargando ciclos: " + (err.message || err));
       setAvailableCycles([]);
     }
   };
@@ -854,9 +856,9 @@ export default function CycleSummaryModal({
         msg += `\n\nLabores no encontradas (nombre no coincide):\n${skippedLabors.slice(0, 10).join("\n")}`;
         if (skippedLabors.length > 10) msg += `\n… +${skippedLabors.length - 10} más`;
       }
-      alert(msg);
+      toast.success(msg);
     } catch (err) {
-      alert("Error importando: " + (err.message || err));
+      toast.error("Error importando: " + (err.message || err));
     } finally {
       setBusy("");
     }
@@ -1207,9 +1209,9 @@ export default function CycleSummaryModal({
       const blob = await toBlob(printRef.current, { backgroundColor: "#ffffff", pixelRatio: 2 });
       if (!blob) throw new Error("No se pudo generar la imagen");
       await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
-      alert("Imagen copiada al portapapeles");
+      toast.success("Imagen copiada al portapapeles");
     } catch (err) {
-      alert("Error: " + (err.message || err));
+      toast.error("Error: " + (err.message || err));
     } finally { setBusy(""); }
   };
   // ============================================================
@@ -1746,7 +1748,7 @@ export default function CycleSummaryModal({
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
     } catch (err) {
-      alert("Error al exportar: " + (err.message || err));
+      toast.error("Error al exportar: " + (err.message || err));
     } finally {
       setBusy("");
     }
@@ -2988,6 +2990,7 @@ function LaborWorkerGrid({
   titles,
   dayPrices = {},
 }) {
+  const toast = useToast();
   const ref = useRef(null);
   const [busy, setBusy] = useState("");
   // Vista ampliada: la grilla se renderiza en un Modal aparte para que se
@@ -3039,9 +3042,9 @@ function LaborWorkerGrid({
       const blob = await toBlob(ref.current, fullCaptureOpts());
       if (!blob) throw new Error("No se pudo generar la imagen");
       await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
-      alert("Imagen copiada al portapapeles");
+      toast.success("Imagen copiada al portapapeles");
     } catch (err) {
-      alert("Error: " + (err.message || err));
+      toast.error("Error: " + (err.message || err));
     } finally {
       setBusy("");
     }
@@ -3532,7 +3535,7 @@ function LaborWorkerGrid({
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
     } catch (err) {
-      alert("Error al exportar: " + (err.message || err));
+      toast.error("Error al exportar: " + (err.message || err));
     } finally {
       setBusy("");
     }

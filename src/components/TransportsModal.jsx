@@ -4,6 +4,7 @@ import TextField from "./TextField";
 import Select from "./Select";
 import ConfirmDialog from "./ConfirmDialog";
 import { useCarriers } from "../contexts/CarriersContext";
+import { useToast } from "../contexts/ToastContext";
 import { tripsService, TRIP_KINDS } from "../services/transportsService";
 import { CARRIER_TYPES } from "../services/carriersService";
 
@@ -35,6 +36,7 @@ function pushRecent(cycleId, carrierId) {
 }
 
 export default function TransportsModal({ open, onClose, cycle, faena, subfaena, days = [], readOnly = false }) {
+  const toast = useToast();
   const { activeCarriers } = useCarriers();
   const [trips, setTrips] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -115,7 +117,7 @@ export default function TransportsModal({ open, onClose, cycle, faena, subfaena,
       setConfirmDel(null);
       await reload();
     } catch (err) {
-      alert(err.message || "Error al eliminar");
+      toast.error(err.message || "Error al eliminar");
     }
   };
 

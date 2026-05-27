@@ -11,6 +11,7 @@ import { formatRutForDisplay } from "../utils/rutUtils";
 import ConfirmDialog from "../components/ConfirmDialog";
 import Modal from "../components/Modal";
 import { useIsMobile } from "../hooks/useIsMobile";
+import { useToast } from "../contexts/ToastContext";
 
 const fmtCurrency = (v) =>
   new Intl.NumberFormat("es-CL", { style: "currency", currency: "CLP", minimumFractionDigits: 0 }).format(
@@ -42,6 +43,7 @@ const isoDateNDaysAgo = (n) => {
 const APPLIED_DEFAULT_DAYS = 90;
 
 export default function Advances() {
+  const toast = useToast();
   const isMobile = useIsMobile();
   const [typeFilter, setTypeFilter] = useState("all"); // all | anticipo | bono
   const [statusFilter, setStatusFilter] = useState("pending");
@@ -123,7 +125,7 @@ export default function Advances() {
       confirmDelete.status === "partial" ||
       (Number(confirmDelete.amountPaid) || 0) > 0;
     if (deleteLocked) {
-      alert("No se puede eliminar un anticipo/bono con pagos aplicados. Para perdonar el saldo, usá Editar y bajá el monto al ya pagado.");
+      toast.warning("No se puede eliminar un anticipo/bono con pagos aplicados. Para perdonar el saldo, usá Editar y bajá el monto al ya pagado.");
       setConfirmDelete(null);
       return;
     }
@@ -396,6 +398,7 @@ export default function Advances() {
 }
 
 function AdvanceFormModal({ open, item, onClose, onSaved }) {
+  const toast = useToast();
   const isEdit = item?.mode === "edit";
   // Editar un anticipo `partial` (con pagos aplicados) impone restricciones:
   // worker y type quedan locked (no se pueden reasignar pagos), y `amount` no
@@ -440,11 +443,11 @@ function AdvanceFormModal({ open, item, onClose, onSaved }) {
   }, [picker.q, picker.open]);
 
   const submit = async () => {
-    if (!form.workerRut) return alert("Selecciona un trabajador.");
-    if (!form.amount || form.amount <= 0) return alert("Monto debe ser mayor a 0.");
+    if (!form.workerRut) { toast.warning("Seleccioná un trabajador."); return; }
+    if (!form.amount || form.amount <= 0) { toast.warning("Monto debe ser mayor a 0."); return; }
     const newAmount = Math.round(Number(form.amount) || 0);
     if (isPartial && newAmount < amountPaid) {
-      return alert(`El monto no puede ser menor a lo ya pagado (${fmtCurrency(amountPaid)}). Si querés cerrar el saldo, ponelo igual a ${fmtCurrency(amountPaid)}.`);
+      { toast.warning(`El monto no puede ser menor a lo ya pagado (${fmtCurrency(amountPaid)}). Si querés cerrar el saldo, ponelo igual a ${fmtCurrency(amountPaid)}.`); return; }
     }
     setBusy(true);
     try {

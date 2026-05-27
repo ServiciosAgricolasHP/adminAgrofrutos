@@ -17,6 +17,7 @@ import {
 } from "../services/transportsService";
 import { faenasService, subfaenasService, cyclesService } from "../services";
 import { useIsMobile } from "../hooks/useIsMobile";
+import { useToast } from "../contexts/ToastContext";
 
 const DEFAULT_HISTORY_DAYS = 90;
 const isoDateNDaysAgo = (n) => {
@@ -211,6 +212,7 @@ function CarriersTab() {
 // filtrado por ciclo). Permite editar via TripEditModal y eliminar las que
 // no estén pagadas. Filtros: estado y rango de fechas.
 function CarrierTripsModal({ open, onClose, carrier }) {
+  const toast = useToast();
   const { carriers } = useCarriers();
   const [trips, setTrips] = useState([]);
   const [cycles, setCycles] = useState([]);
@@ -295,7 +297,7 @@ function CarrierTripsModal({ open, onClose, carrier }) {
       setConfirmDel(null);
       await reload();
     } catch (err) {
-      alert(err.message || "Error al eliminar");
+      toast.error(err.message || "Error al eliminar");
     }
   };
 
@@ -488,6 +490,7 @@ function CarrierTripsModal({ open, onClose, carrier }) {
 }
 
 function CarrierEditModal({ open, onClose, carrier, onSave }) {
+  const toast = useToast();
   const [alias, setAlias] = useState("");
   const [name, setName] = useState("");
   const [type, setType] = useState("contracted");
@@ -511,7 +514,7 @@ function CarrierEditModal({ open, onClose, carrier, onSave }) {
     const a = prompt("Alias del vehículo (ej: furgon, bus):");
     if (!a) return;
     const err = validateVehicleAlias({ vehicles }, a);
-    if (err) return alert(err);
+    if (err) { toast.warning(err); return; }
     setVehicles((vs) => [...vs, { alias: a.trim() }]);
   };
 
@@ -891,6 +894,7 @@ function TripsTab() {
 // ============================================================
 
 function PaymentsTab() {
+  const toast = useToast();
   const { activeCarriers, carriers } = useCarriers();
   const [payments, setPayments] = useState([]);
   const [faenas, setFaenas] = useState([]);
@@ -1078,7 +1082,7 @@ function PaymentsTab() {
             await reload();
             setBalanceVersion((v) => v + 1);
           } catch (err) {
-            alert(err.message || "Error");
+            toast.error(err.message || "Error");
           }
         }}
       />
@@ -1105,6 +1109,7 @@ function PrintMultipleModal({
   subfaenaById,
   cycleById,
 }) {
+  const toast = useToast();
   const [statusFilter, setStatusFilter] = useState("pending");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
@@ -1223,7 +1228,7 @@ function PrintMultipleModal({
     try {
       const items = await buildRenderItems();
       if (items.length === 0) {
-        alert("No hay resúmenes que coincidan con los filtros.");
+        toast.warning("No hay resúmenes que coincidan con los filtros.");
         return;
       }
       itemRefs.current = new Array(items.length).fill(null);
@@ -1235,7 +1240,7 @@ function PrintMultipleModal({
         .join("");
       const win = window.open("", "_blank", "width=1000,height=800");
       if (!win) {
-        alert("Permite las ventanas emergentes para imprimir.");
+        toast.warning("Permite las ventanas emergentes para imprimir.");
         return;
       }
       win.document.write(`<!DOCTYPE html><html><head><title>Resúmenes Transportes</title>
@@ -1264,7 +1269,7 @@ function PrintMultipleModal({
     try {
       const items = await buildRenderItems();
       if (items.length === 0) {
-        alert("No hay resúmenes que coincidan con los filtros.");
+        toast.warning("No hay resúmenes que coincidan con los filtros.");
         return;
       }
       itemRefs.current = new Array(items.length).fill(null);
@@ -1299,7 +1304,7 @@ function PrintMultipleModal({
       a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (err) {
-      alert("Error al generar el ZIP: " + (err.message || err));
+      toast.error("Error al generar el ZIP: " + (err.message || err));
     } finally {
       setRenderItems(null);
       setBusy("");
@@ -1570,6 +1575,7 @@ function PrintMultipleModal({
 // fechas: el rango se aplica a la `date` de la vuelta y al overlap del
 // período del resumen (periodFrom/periodTo).
 function BalanceSummary({ carriers, reloadVersion }) {
+  const toast = useToast();
   const [pendingTrips, setPendingTrips] = useState([]);
   const [pendingPayments, setPendingPayments] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -1669,9 +1675,9 @@ function BalanceSummary({ carriers, reloadVersion }) {
       });
       if (!blob) throw new Error("No se pudo generar la imagen");
       await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
-      alert("Imagen copiada");
+      toast.success("Imagen copiada");
     } catch (err) {
-      alert("Error: " + (err.message || err));
+      toast.error("Error: " + (err.message || err));
     } finally {
       setBusy("");
     }
@@ -2115,6 +2121,7 @@ function GenerateSummaryModal({ open, onClose, carriers, faenaById, subfaenaById
 }
 
 function PaymentDetailModal({ open, onClose, payment, carrier, faenaById, subfaenaById, cycleById, onPay, onRevert, onDelete, onChanged }) {
+  const toast = useToast();
   const [trips, setTrips] = useState([]);
   const [loading, setLoading] = useState(false);
   const printRef = useRef(null);
@@ -2158,7 +2165,7 @@ function PaymentDetailModal({ open, onClose, payment, carrier, faenaById, subfae
       link.href = dataUrl;
       link.click();
     } catch (err) {
-      alert("Error al generar imagen: " + (err.message || err));
+      toast.error("Error al generar imagen: " + (err.message || err));
     } finally {
       setBusy("");
     }
@@ -2171,9 +2178,9 @@ function PaymentDetailModal({ open, onClose, payment, carrier, faenaById, subfae
       const blob = await toBlob(printRef.current, { backgroundColor: "#ffffff", pixelRatio: 2 });
       if (!blob) throw new Error("No se pudo generar la imagen");
       await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
-      alert("Imagen copiada al portapapeles");
+      toast.success("Imagen copiada al portapapeles");
     } catch (err) {
-      alert("Error al copiar: " + (err.message || err));
+      toast.error("Error al copiar: " + (err.message || err));
     } finally {
       setBusy("");
     }
@@ -2193,7 +2200,7 @@ function PaymentDetailModal({ open, onClose, payment, carrier, faenaById, subfae
       await paymentsService.updateTotal(payment.id, newTotal);
       if (onChanged) await onChanged();
     } catch (err) {
-      alert("Error al guardar: " + (err.message || err));
+      toast.error("Error al guardar: " + (err.message || err));
       try {
         const all = await tripsService.listByCarrier(payment.carrierId);
         const filtered = all
@@ -2452,6 +2459,7 @@ const cell = {
 // ============================================================
 
 function FaenaBatchTab() {
+  const toast = useToast();
   const { carriers } = useCarriers();
   const [step, setStep] = useState(1); // 1 picker, 2 preview
   const [loading, setLoading] = useState(true);
@@ -2579,7 +2587,7 @@ function FaenaBatchTab() {
   const generate = async () => {
     const items = carrierItems.filter((p) => p.include && p.trips.length > 0);
     if (items.length === 0) {
-      alert("No hay transportistas con vueltas para pagar.");
+      toast.warning("No hay transportistas con vueltas para pagar.");
       return;
     }
     setBusy(true);
@@ -2599,7 +2607,7 @@ function FaenaBatchTab() {
         });
         created += 1;
       }
-      alert(`Se generaron ${created} resúmenes de pago.`);
+      toast.success(`Se generaron ${created} resúmenes de pago.`);
       setSelectedCycleIds(new Set());
       setCarrierItems([]);
       setStep(1);
@@ -2830,6 +2838,7 @@ function FaenaBatchTab() {
 // (tipear "Pagada" en un input) para evitar taps accidentales.
 
 function PayrollsTab() {
+  const toast = useToast();
   const { carriers } = useCarriers();
   const carriersById = useMemo(() => new Map(carriers.map((c) => [c.id, c])), [carriers]);
 
@@ -3023,7 +3032,7 @@ function PayrollsTab() {
               });
               setCreating(false);
               await load();
-            } catch (err) { alert(err?.message || "Error"); }
+            } catch (err) { toast.error(err?.message || "Error"); }
           }}
         />
       )}
@@ -3037,8 +3046,8 @@ function PayrollsTab() {
           onClose={() => setDetailId(null)}
           onEditMeta={() => setEditingId(detail.id)}
           onDeletePayroll={() => setConfirmDelete(detail)}
-          onAddSummaries={async (ids) => { try { await transportPayrollsService.addPayments(detail.id, ids); await load(); } catch (err) { alert(err?.message || "Error"); } }}
-          onRemoveSummary={async (pid) => { try { await transportPayrollsService.removePayments(detail.id, [pid]); await load(); } catch (err) { alert(err?.message || "Error"); } }}
+          onAddSummaries={async (ids) => { try { await transportPayrollsService.addPayments(detail.id, ids); await load(); } catch (err) { toast.error(err?.message || "Error"); } }}
+          onRemoveSummary={async (pid) => { try { await transportPayrollsService.removePayments(detail.id, [pid]); await load(); } catch (err) { toast.error(err?.message || "Error"); } }}
           onMarkPayrollPaid={() => askMarkPayrollPaid(detail)}
           onRevertPayroll={() => askRevertPayroll(detail)}
           onMarkItemPaid={askMarkItemPaid}
@@ -3052,7 +3061,7 @@ function PayrollsTab() {
           onClose={() => setEditingId(null)}
           onSave={async (patch) => {
             try { await transportPayrollsService.update(editingId, patch); setEditingId(null); await load(); }
-            catch (err) { alert(err?.message || "Error"); }
+            catch (err) { toast.error(err?.message || "Error"); }
           }}
         />
       )}
@@ -3066,7 +3075,7 @@ function PayrollsTab() {
         onCancel={() => setConfirmDelete(null)}
         onConfirm={async () => {
           try { await transportPayrollsService.delete(confirmDelete.id); setDetailId(null); setConfirmDelete(null); await load(); }
-          catch (err) { alert(err?.message || "Error"); }
+          catch (err) { toast.error(err?.message || "Error"); }
         }}
       />
 
@@ -3088,6 +3097,7 @@ function PayrollsTab() {
 // Modal de doble seguridad — el usuario debe escribir exactamente la palabra
 // `word` (case-insensitive) para habilitar el botón de confirmar.
 function TypeToConfirmModal({ word, title, message, confirmLabel, danger = false, onCancel, onConfirm }) {
+  const toast = useToast();
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
   useEffect(() => { setTyped(""); setBusy(false); }, [word]);
@@ -3107,7 +3117,7 @@ function TypeToConfirmModal({ word, title, message, confirmLabel, danger = false
             onClick={async () => {
               if (!ok || busy) return;
               setBusy(true);
-              try { await onConfirm(); } catch (err) { alert(err?.message || "Error"); setBusy(false); }
+              try { await onConfirm(); } catch (err) { toast.error(err?.message || "Error"); setBusy(false); }
             }}
             disabled={!ok || busy}
             className={`rounded-md px-3 py-1.5 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50 ${
@@ -3624,6 +3634,7 @@ function PayrollDetailModal({
   onClose, onEditMeta, onDeletePayroll, onAddSummaries, onRemoveSummary,
   onMarkPayrollPaid, onRevertPayroll, onMarkItemPaid, onRevertItem,
 }) {
+  const toast = useToast();
   const [addingOpen, setAddingOpen] = useState(false);
   const [adding, setAdding] = useState(new Set());
   const printRef = useRef(null);
@@ -3646,7 +3657,7 @@ function PayrollDetailModal({
       link.href = dataUrl;
       link.click();
     } catch (err) {
-      alert("Error al generar imagen: " + (err.message || err));
+      toast.error("Error al generar imagen: " + (err.message || err));
     } finally {
       setBusy("");
     }
@@ -3659,9 +3670,9 @@ function PayrollDetailModal({
       const blob = await toBlob(printRef.current, { backgroundColor: "#ffffff", pixelRatio: 2 });
       if (!blob) throw new Error("No se pudo generar la imagen");
       await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
-      alert("Imagen copiada al portapapeles");
+      toast.success("Imagen copiada al portapapeles");
     } catch (err) {
-      alert("Error al copiar: " + (err.message || err));
+      toast.error("Error al copiar: " + (err.message || err));
     } finally {
       setBusy("");
     }

@@ -42,6 +42,7 @@ import {
 } from "../utils/tratoHE";
 import { useAuth } from "../contexts/AuthContext";
 import { useCatalogs } from "../contexts/CatalogsContext";
+import { useToast } from "../contexts/ToastContext";
 import Modal from "../components/Modal";
 import TextField from "../components/TextField";
 import Select from "../components/Select";
@@ -353,6 +354,7 @@ export default function CycleDetail() {
   const { id } = useParams();
   const { isAdmin } = useAuth();
   const { catalogs, addEntry: addCatalogEntry, renameEntry: renameCatalogEntry } = useCatalogs();
+  const toast = useToast();
 
   const [cycle, setCycle] = useState(null);
   const [faena, setFaena] = useState(null);
@@ -1107,7 +1109,7 @@ export default function CycleDetail() {
     }
     const amount = effectivePiso(labor, dayPrices, date);
     if (!amount) {
-      alert("Configura primero el piso por día o el piso default en la labor.");
+      toast.warning("Configurá primero el piso por día o el piso default en la labor.");
       return;
     }
     const next = {
@@ -1270,7 +1272,7 @@ export default function CycleDetail() {
     for (const k in wdMapForLabor) {
       if (k.endsWith(`__${ck}`) && k.includes(`__${date}__`)) {
         if (Number(wdMapForLabor[k].qty) > 0) {
-          alert("No se puede quitar: hay producción registrada en este combo.");
+          toast.warning("No se puede quitar: hay producción registrada en este combo.");
           return false;
         }
       }
@@ -1692,7 +1694,7 @@ export default function CycleDetail() {
       wheres: [["cycleId", "==", id], ["date", "==", date]], take: 1,
     });
     if (wds.length) {
-      alert(`No se puede quitar ${date}: hay producción registrada en alguna labor para ese día.`);
+      toast.warning(`No se puede quitar ${date}: hay producción registrada en alguna labor para ese día.`);
       return;
     }
     if (!confirm(`¿Quitar la columna ${date}?`)) return;
@@ -1795,7 +1797,7 @@ export default function CycleDetail() {
         take: 1,
       });
       if (existing.length) {
-        alert("No se puede quitar: el trabajador tiene producción registrada en esta labor.");
+        toast.warning("No se puede quitar: el trabajador tiene producción registrada en esta labor.");
         setRemoveWorker(null);
         return;
       }
@@ -1816,7 +1818,7 @@ export default function CycleDetail() {
     if (real.isTemp) { setAssignTempRut(null); return; }
     if (real.rut === tempRut) { setAssignTempRut(null); return; }
     if (workers.some((w) => w.rut === real.rut)) {
-      alert("Ese trabajador ya existe en este ciclo. Quita primero la fila duplicada antes de asignar.");
+      toast.warning("Ese trabajador ya existe en este ciclo. Quitá primero la fila duplicada antes de asignar.");
       return;
     }
     setAssignBusy(true);
@@ -1858,7 +1860,7 @@ export default function CycleDetail() {
       setAssignTempRut(null);
     } catch (err) {
       console.error(err);
-      alert("No se pudo asignar el RUT: " + (err.message || err));
+      toast.error("No se pudo asignar el RUT: " + (err.message || err));
     } finally {
       setAssignBusy(false);
     }
@@ -1971,12 +1973,12 @@ export default function CycleDetail() {
       wheres: [["cycleId", "==", id], ["laborId", "==", removeLabor.id]], take: 1,
     });
     if (wds.length) {
-      alert("No se puede quitar: la labor tiene producción registrada.");
+      toast.warning("No se puede quitar: la labor tiene producción registrada.");
       setRemoveLabor(null);
       return;
     }
     if (cycle.labors.length === 1) {
-      alert("Debe existir al menos una labor.");
+      toast.warning("Debe existir al menos una labor.");
       setRemoveLabor(null);
       return;
     }

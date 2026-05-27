@@ -14,6 +14,7 @@ import { forwardRef, useEffect, useMemo, useRef, useState } from "react";
 import { toPng, toBlob } from "html-to-image";
 import Modal from "./Modal";
 import { useCatalogs } from "../contexts/CatalogsContext";
+import { useToast } from "../contexts/ToastContext";
 import { searchWorkers } from "../services/workersService";
 import {
   loadWorkerSummaryData,
@@ -43,6 +44,7 @@ const cellH = {
 const cell = { border: "1px solid #999", padding: "5px 8px", fontSize: 12 };
 
 export default function GroupSummaryModal({ open, onClose }) {
+  const toast = useToast();
   const { catalogs } = useCatalogs();
   const [step, setStep] = useState("build"); // build | result
   const [selected, setSelected] = useState([]); // [worker]
@@ -178,7 +180,7 @@ export default function GroupSummaryModal({ open, onClose }) {
         const blob = await toBlob(matrixRef.current, { backgroundColor: "#ffffff", pixelRatio: 2 });
         if (!blob) throw new Error("No se pudo generar la imagen");
         await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
-        alert("Imagen copiada al portapapeles");
+        toast.success("Imagen copiada al portapapeles");
       } else if (action === "download") {
         const dataUrl = await toPng(matrixRef.current, { backgroundColor: "#ffffff", pixelRatio: 2 });
         const link = document.createElement("a");
@@ -187,7 +189,7 @@ export default function GroupSummaryModal({ open, onClose }) {
         link.click();
       }
     } catch (err) {
-      alert("Error: " + (err.message || err));
+      toast.error("Error: " + (err.message || err));
     } finally {
       setBusy("");
     }
@@ -203,7 +205,7 @@ export default function GroupSummaryModal({ open, onClose }) {
         const blob = await toBlob(refEl, { backgroundColor: "#ffffff", pixelRatio: 2 });
         if (!blob) throw new Error("No se pudo generar la imagen");
         await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
-        alert("Imagen copiada al portapapeles");
+        toast.success("Imagen copiada al portapapeles");
       } else {
         const dataUrl = await toPng(refEl, { backgroundColor: "#ffffff", pixelRatio: 2 });
         const link = document.createElement("a");
@@ -212,7 +214,7 @@ export default function GroupSummaryModal({ open, onClose }) {
         link.click();
       }
     } catch (err) {
-      alert("Error: " + (err.message || err));
+      toast.error("Error: " + (err.message || err));
     } finally {
       setBusy("");
     }
@@ -233,7 +235,7 @@ export default function GroupSummaryModal({ open, onClose }) {
         });
         if (!blob) throw new Error("No se pudo generar la imagen");
         await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
-        alert("Imagen completa copiada al portapapeles");
+        toast.success("Imagen completa copiada al portapapeles");
       } else {
         const dataUrl = await toPng(everythingRef.current, {
           backgroundColor: "#ffffff",
@@ -245,7 +247,7 @@ export default function GroupSummaryModal({ open, onClose }) {
         link.click();
       }
     } catch (err) {
-      alert("Error: " + (err.message || err));
+      toast.error("Error: " + (err.message || err));
     } finally {
       setBusy("");
     }

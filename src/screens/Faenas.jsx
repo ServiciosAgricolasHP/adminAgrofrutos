@@ -15,6 +15,7 @@ import {
   normalizeLayout,
 } from "../services/userPrefsService";
 import { useAuth } from "../contexts/AuthContext";
+import { useToast } from "../contexts/ToastContext";
 import Modal from "../components/Modal";
 import ConfirmDialog from "../components/ConfirmDialog";
 import TextField from "../components/TextField";
@@ -45,6 +46,7 @@ function defaultLabors(workers = []) {
 }
 
 export default function Faenas() {
+  const toast = useToast();
   const isMobile = useIsMobile();
   const { user, isAdmin } = useAuth();
   const storageKey = orderKey(user?.uid);
@@ -379,7 +381,7 @@ export default function Faenas() {
       const existing = cyclesByFaena[faenaId] || [];
       const subs = subsByFaena[faenaId] || [];
       if (!data.subfaenaId && subs.length > 0) {
-        alert("La faena tiene subfaenas. Selecciona una subfaena para el ciclo.");
+        toast.warning("La faena tiene subfaenas. Seleccioná una subfaena para el ciclo.");
         return;
       }
     }
@@ -392,7 +394,7 @@ export default function Faenas() {
         const source = (data.importCandidates || []).find((c) => c.id === data.importSourceId);
         const picked = (source?.labors || []).filter((l) => (data.importLaborIds || new Set()).has(l.id));
         if (picked.length === 0) {
-          alert("Marcá al menos una labor a clonar (o desactivá la importación).");
+          toast.warning("Marcá al menos una labor a clonar (o desactivá la importación).");
           setBusy(false);
           return;
         }
@@ -492,7 +494,7 @@ export default function Faenas() {
           }
         }
         if (skippedPaid > 0) {
-          alert(`Se movieron ${moved} workday(s). ${skippedPaid} ya estaban en una nómina y quedaron en el ciclo origen.`);
+          toast.success(`Se movieron ${moved} workday(s). ${skippedPaid} ya estaban en una nómina y quedaron en el ciclo origen.`);
         }
       }
 
@@ -505,7 +507,7 @@ export default function Faenas() {
 
   const openCreateCycle = (faenaId, subfaenaId) => {
     if (!subfaenaId) {
-      alert("Los ciclos se crean dentro de una subfaena. Crea primero una subfaena.");
+      toast.warning("Los ciclos se crean dentro de una subfaena. Creá primero una subfaena.");
       return;
     }
     const existing = cyclesByFaena[faenaId] || [];
@@ -634,7 +636,7 @@ export default function Faenas() {
 
         if (blockers.length) {
           if (!isAdmin) {
-            alert(`No se puede eliminar:\n${blockers.join("\n")}\n\n(Pide a un admin para borrado en cascada)`);
+            toast.error(`${blockers.join("\n")}\n\n(Pide a un admin para borrado en cascada)`, { title: "No se puede eliminar" });
             setConfirm(null);
             return;
           }
@@ -656,11 +658,11 @@ export default function Faenas() {
               .map((p) => `· ${p.name}${p.status === "paid" ? " (pagada)" : ""}`)
               .join("\n");
             const taggedCount = allCycleWds.filter((w) => w.payrollId).length;
-            alert(
-              `No se puede eliminar en cascada:\n` +
-                `${taggedCount} workday(s) ya forman parte de ${taggedPayrollIds.length} nómina(s):\n` +
+            toast.error(
+              `${taggedCount} workday(s) ya forman parte de ${taggedPayrollIds.length} nómina(s):\n` +
                 `${names || "(nómina sin nombre)"}\n\n` +
                 `Eliminá primero esas nóminas y volvé a intentar.`,
+              { title: "No se puede eliminar en cascada" },
             );
             setConfirm(null);
             return;
@@ -719,11 +721,11 @@ export default function Faenas() {
                 .map((p) => `· ${p.name}${p.status === "paid" ? " (pagada)" : ""}`)
                 .join("\n");
               const taggedCount = wds.filter((w) => w.payrollId).length;
-              alert(
-                `No se puede eliminar el ciclo "${confirm.item.label}":\n` +
-                  `${taggedCount} workday(s) ya forman parte de ${taggedPayrollIds.length} nómina(s):\n` +
+              toast.error(
+                `${taggedCount} workday(s) ya forman parte de ${taggedPayrollIds.length} nómina(s):\n` +
                   `${names || "(nómina sin nombre)"}\n\n` +
                   `Eliminá primero esas nóminas y volvé a intentar.`,
+                { title: `No se puede eliminar el ciclo "${confirm.item.label}"` },
               );
               setConfirm(null);
               return;
@@ -738,8 +740,9 @@ export default function Faenas() {
               }
               for (const w of wds) await workdaysService.remove(w.id);
             } else {
-              alert(
-                `No se puede eliminar: el ciclo tiene ${wds.length} registro(s) de producción. (Pide a un admin para cascada)`,
+              toast.error(
+                `El ciclo tiene ${wds.length} registro(s) de producción. (Pide a un admin para cascada)`,
+                { title: "No se puede eliminar" },
               );
               setConfirm(null);
               return;
@@ -750,7 +753,7 @@ export default function Faenas() {
           await loadCycles(confirm.item.faenaId);
         } catch (err) {
           console.error("Error eliminando ciclo:", err);
-          alert(`Error al eliminar ciclo: ${err?.message || err}`);
+          toast.error(`Error al eliminar ciclo: ${err?.message || err}`);
           setConfirm(null);
           return;
         }
@@ -758,7 +761,7 @@ export default function Faenas() {
       setConfirm(null);
       } catch (err) {
         console.error("Error en eliminación:", err);
-        alert(`Error al eliminar: ${err?.message || err}\nRevisa la consola para detalles.`);
+        toast.error(`${err?.message || err}\nRevisá la consola para detalles.`, { title: "Error al eliminar" });
         setConfirm(null);
       }
     } finally {

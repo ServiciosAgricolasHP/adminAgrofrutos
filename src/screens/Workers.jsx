@@ -13,6 +13,7 @@ import {
   isCashBank,
 } from "../utils/banks";
 import WorkerEditModal from "../components/WorkerEditModal";
+import { useToast } from "../contexts/ToastContext";
 import WorkerSummaryModal from "../components/WorkerSummaryModal";
 import GroupSummaryModal from "../components/GroupSummaryModal";
 import ConfirmDialog from "../components/ConfirmDialog";
@@ -30,6 +31,7 @@ ModuleRegistry.registerModules([AllCommunityModule]);
 const MIN_SEARCH = 2;
 
 export default function Workers() {
+  const toast = useToast();
   const isMobile = useIsMobile();
   const [edit, setEdit] = useState(null);
   const [confirm, setConfirm] = useState(null);
@@ -175,7 +177,7 @@ export default function Workers() {
       setConfirm(null);
       await refreshCache();
     } catch (err) {
-      alert(err.message || "Error al eliminar");
+      toast.error(err.message || "Error al eliminar");
       setConfirm(null);
     }
   };

@@ -27,6 +27,7 @@ import { formatRutForDisplay } from "../utils/rutUtils";
 import { bankName, ACCOUNT_TYPES, isCashBank, CASH_BANK_CODE } from "../utils/banks";
 import { getTratoTierTotals, getDayCombos, getDaySingle, getTratoTiers, tratoTypeLabel, tratoUnitLabel, cosechaUnit, comboLabel, containerLabel, formatLaborDayPrice } from "../utils/cosechaCombos";
 import { useCatalogs } from "../contexts/CatalogsContext";
+import { useToast } from "../contexts/ToastContext";
 import {
   aggregateWorkerAmounts,
   downloadBchileXlsx,
@@ -88,6 +89,7 @@ function downloadSnapshotJson(payrollName, snapshot) {
 }
 
 export default function Payroll() {
+  const toast = useToast();
   const [tab, setTab] = useState("create"); // create | history
   const [loading, setLoading] = useState(true);
   const [faenas, setFaenas] = useState([]);
@@ -435,7 +437,7 @@ export default function Payroll() {
       (p) => p.include && (Number(p.amount) > 0 || Number(p.advance) > 0),
     );
     if (items.length === 0) {
-      alert("No hay trabajadores seleccionados con monto > 0 ni anticipos por aplicar.");
+      toast.warning("No hay trabajadores seleccionados con monto > 0 ni anticipos por aplicar.");
       return;
     }
     // Para validaciones de cuenta solo consideramos los que realmente reciben
@@ -764,7 +766,7 @@ export default function Payroll() {
       await payrollsService.remove(id);
     } catch (err) {
       console.error("Error al eliminar nómina:", err);
-      alert(`Error al eliminar la nómina: ${err?.message || err}`);
+      toast.error(`Error al eliminar la nómina: ${err?.message || err}`);
       setProgress(null);
       return;
     }
@@ -810,13 +812,13 @@ export default function Payroll() {
       } catch { /* noop */ }
       if (!snap && p.snapshot) snap = { ...p.snapshot, payrollId: p.id };
       if (!snap) {
-        alert("Esta nómina no tiene snapshot guardado (creada antes de la feature).");
+        toast.warning("Esta nómina no tiene snapshot guardado (creada antes de la feature).");
         return;
       }
       downloadSnapshotJson(p.name || "Nomina", snap);
     } catch (err) {
       console.error(err);
-      alert("No se pudo descargar el JSON.");
+      toast.error("No se pudo descargar el JSON.");
     }
   };
 
@@ -2607,8 +2609,7 @@ async function printPaymentDetails(payroll, allGroups, titleOverrides = {}, summ
   });
   const w = window.open("", "_blank", "width=900,height=700");
   if (!w) {
-    alert("Permite las ventanas emergentes para imprimir.");
-    return;
+    throw new Error("Permite las ventanas emergentes para imprimir.");
   }
   w.document.open();
   w.document.write(html);
@@ -2657,8 +2658,7 @@ async function printCashReceipts(payroll, cashGroups, titleOverrides = {}, catal
   });
   const w = window.open("", "_blank", "width=900,height=700");
   if (!w) {
-    alert("Permite las ventanas emergentes para imprimir.");
-    return;
+    throw new Error("Permite las ventanas emergentes para imprimir.");
   }
   w.document.open();
   w.document.write(html);
@@ -2667,6 +2667,7 @@ async function printCashReceipts(payroll, cashGroups, titleOverrides = {}, catal
 
 function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOnly, onDownloadSnapshot, onChanged }) {
   const { catalogs } = useCatalogs();
+  const toast = useToast();
   const items = payroll.items || [];
   const { bank, cash } = splitBankAndCash(items);
   const cashGroups = groupCashByLeader(cash);
@@ -2730,7 +2731,7 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
       await removeWorkerFromPayroll(payroll.id, item.rut);
       await onChanged?.();
     } catch (err) {
-      alert(`Error al sacar el trabajador: ${err?.message || err}`);
+      toast.error(`Error al sacar el trabajador: ${err?.message || err}`);
     } finally {
       setEditBusy(false);
     }
@@ -2747,7 +2748,7 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
       await removeCycleFromPayroll(payroll.id, cycle.id);
       await onChanged?.();
     } catch (err) {
-      alert(`Error al sacar el ciclo: ${err?.message || err}`);
+      toast.error(`Error al sacar el ciclo: ${err?.message || err}`);
     } finally {
       setEditBusy(false);
     }
@@ -2863,6 +2864,8 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
     setPrinting(true);
     try {
       await printCashReceipts(payroll, cashGroups, cycleTitleOverrides, catalogs);
+    } catch (err) {
+      toast.error(err?.message || "Error al imprimir");
     } finally {
       setPrinting(false);
     }
@@ -2872,6 +2875,8 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
     setPrintingDetail(true);
     try {
       await printPaymentDetails(payroll, allGroups, cycleTitleOverrides, detailSummaries, catalogs, subfaenaSummary);
+    } catch (err) {
+      toast.error(err?.message || "Error al imprimir");
     } finally {
       setPrintingDetail(false);
     }
