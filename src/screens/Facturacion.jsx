@@ -10,7 +10,7 @@ import { toPng, toBlob } from "html-to-image";
 import { writeBatch, doc, serverTimestamp } from "firebase/firestore";
 import { db, auth } from "../firebase";
 import { companiesService, dteDocumentsService } from "../services";
-import { parseSiiRcvCsv, dteTypeLabel, buildDteDocId, normalizeRut, extractRutFromFilename } from "../utils/siiCsvParser";
+import { parseSiiRcvCsv, dteTypeLabel, buildDteDocId, normalizeRut, extractRutFromFilename, otroImpuestoLabel, otroImpuestoCategory, OTRO_IMP_CATEGORIES } from "../utils/siiCsvParser";
 import { formatRutForDisplay } from "../utils/rutUtils";
 import Modal from "../components/Modal";
 import { useToast } from "../contexts/ToastContext";
@@ -32,6 +32,30 @@ const CREDIT_NOTE_TYPES = new Set([61, 112]);
 function currentPeriod() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+// Convierte un periodo "YYYY-MM" a "Mes Año" (ej. "2026-05" → "Mayo 2026").
+// Si el periodo está vacío, devuelve "Todos los períodos" para que los
+// títulos de export tengan algo legible cuando el usuario auditó sin filtrar.
+const MONTH_NAMES_ES = [
+  "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+  "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
+];
+function formatPeriodPretty(periodo) {
+  if (!periodo) return "Todos los períodos";
+  const m = String(periodo).match(/^(\d{4})-(\d{2})$/);
+  if (!m) return periodo;
+  const idx = Number(m[2]) - 1;
+  return `${MONTH_NAMES_ES[idx] || m[2]} ${m[1]}`;
+}
+
+// Label de tipo para títulos de export (no el tab interno — el tab sigue
+// diciendo "Facturas"). En print decimos "Ventas/Facturas" para que el
+// receptor del documento entienda el contexto fiscal.
+function kindTitleLabel(kind) {
+  if (kind === "venta") return "Ventas/Facturas";
+  if (kind === "compra") return "Compras";
+  return kind;
 }
 
 // Etiquetas + colores para los estados de pago. Los 5 estados aplicables a
@@ -185,7 +209,23 @@ export default function Facturacion() {
   const [detailDoc, setDetailDoc] = useState(null);
   // Off-screen ref del printable de Retenciones (para html-to-image / print).
   const retencionesPrintRef = useRef(null);
+  const docListPrintRef = useRef(null);
+  const resumenPrintRef = useRef(null);
   const [exportBusy, setExportBusy] = useState("");
+  const [docListBusy, setDocListBusy] = useState("");
+  const [resumenBusy, setResumenBusy] = useState("");
+  // Año del tab "Resumen" — su propio selector, independiente del filtro de mes
+  // (que ahí no aplica: el resumen cruza los 12 meses del año elegido).
+  const [resumenYear, setResumenYear] = useState(() => String(new Date().getFullYear()));
+  // Toggle "Separar por centro de costo" — agrupa el export por contraparte,
+  // con combustibles juntos como un único centro de costo arriba. Persistido
+  // por tab para que el usuario no tenga que activarlo cada vez.
+  const [groupByCostCenter, setGroupByCostCenter] = useState(() => {
+    try { return localStorage.getItem("facturacion.groupByCostCenter") === "true"; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("facturacion.groupByCostCenter", String(groupByCostCenter)); } catch { /* noop */ }
+  }, [groupByCostCenter]);
   // Refs por contraparte (mapa rut→DOM node) + flag de busy por grupo. Cada
   // grupo se renderiza off-screen con su propio printable individual y los
   // handlers usan estos refs para exportar/copiar/imprimir ese grupo solo.
@@ -452,6 +492,61 @@ export default function Facturacion() {
     }
     return t;
   }, [pendientesList]);
+
+  // ===== Resumen anual (tab "Resumen") =====
+  // Años disponibles para el selector — derivados de los períodos de la empresa
+  // seleccionada. Siempre incluye el año actual aunque no tenga docs todavía.
+  const resumenYears = useMemo(() => {
+    const set = new Set();
+    for (const d of docs) {
+      if (selectedCompanyId && d.companyId !== selectedCompanyId) continue;
+      const y = String(d.periodo || "").slice(0, 4);
+      if (y) set.add(y);
+    }
+    set.add(String(new Date().getFullYear()));
+    return [...set].sort().reverse();
+  }, [docs, selectedCompanyId]);
+
+  // Resumen mensual del año elegido para la empresa seleccionada. Por cada mes
+  // acumula ventas/compras con signo (NC restan) separando IVA débito (ventas)
+  // de IVA crédito (compras). El IVA de las facturas "Solo neto" (net_only) se
+  // suma normalmente al débito/crédito que corresponda —no se trackea aparte—.
+  // IVA a pagar del mes = débito − crédito.
+  const resumenData = useMemo(() => {
+    const mk = () => ({
+      ventasNeto: 0, ivaDebito: 0, ventasTotal: 0, ventasCount: 0,
+      comprasNeto: 0, ivaCredito: 0, comprasTotal: 0, comprasCount: 0,
+    });
+    const months = Array.from({ length: 12 }, mk);
+    for (const d of docs) {
+      if (selectedCompanyId && d.companyId !== selectedCompanyId) continue;
+      const p = String(d.periodo || "");
+      if (p.slice(0, 4) !== resumenYear) continue;
+      const mi = Number(p.slice(5, 7)) - 1;
+      if (mi < 0 || mi > 11) continue;
+      const m = months[mi];
+      const sign = CREDIT_NOTE_TYPES.has(Number(d.tipo)) ? -1 : 1;
+      const neto = Number(d.neto) || 0;
+      const iva = Number(d.iva) || 0;
+      const total = Number(d.total) || 0;
+      if (d.kind === "venta") {
+        m.ventasNeto += sign * neto;
+        m.ivaDebito += sign * iva;
+        m.ventasTotal += sign * total;
+        m.ventasCount++;
+      } else if (d.kind === "compra") {
+        m.comprasNeto += sign * neto;
+        m.ivaCredito += sign * iva;
+        m.comprasTotal += sign * total;
+        m.comprasCount++;
+      }
+    }
+    const total = mk();
+    for (const m of months) {
+      for (const k of Object.keys(total)) total[k] += m[k];
+    }
+    return { months, total };
+  }, [docs, selectedCompanyId, resumenYear]);
 
   // --- IMPORT ---
 
@@ -1071,6 +1166,371 @@ export default function Facturacion() {
     if (action === "xlsx") return handleGroupXlsx(g);
   };
 
+  // ===== Export del listado de Facturas / Compras (vista no-retenciones) =====
+  // Mismo patrón que Retenciones: el printable se renderiza off-screen con la
+  // misma data filtrada/ordenada que la tabla en pantalla.
+  const docListFileBase = useMemo(() => {
+    const alias = (selectedCompany?.alias || selectedCompany?.razonSocial || "empresa").replace(/[^\w-]+/g, "_");
+    const kindLabel = kindTab === "venta" ? "Ventas-Facturas" : "Compras";
+    const period = periodoFilter || "todos";
+    return `${kindLabel}_${alias}_${period}`;
+  }, [selectedCompany, kindTab, periodoFilter]);
+
+  const handleDocListCopy = async () => {
+    if (!docListPrintRef.current) return;
+    setDocListBusy("copy");
+    try {
+      const blob = await toBlob(docListPrintRef.current, { backgroundColor: "#ffffff", pixelRatio: 2 });
+      if (!blob) throw new Error("No se pudo generar la imagen");
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+      toast.success("Imagen copiada al portapapeles");
+    } catch (err) {
+      toast.error("Error al copiar: " + (err.message || err));
+    } finally {
+      setDocListBusy("");
+    }
+  };
+
+  const handleDocListPng = async () => {
+    if (!docListPrintRef.current) return;
+    setDocListBusy("png");
+    try {
+      const dataUrl = await toPng(docListPrintRef.current, { backgroundColor: "#ffffff", pixelRatio: 2 });
+      const link = document.createElement("a");
+      link.download = `${docListFileBase}.png`;
+      link.href = dataUrl;
+      link.click();
+    } catch (err) {
+      toast.error("Error al generar PNG: " + (err.message || err));
+    } finally {
+      setDocListBusy("");
+    }
+  };
+
+  const handleDocListPrint = () => {
+    if (!docListPrintRef.current) return;
+    const html = docListPrintRef.current.outerHTML;
+    const win = window.open("", "_blank", "width=1000,height=700");
+    if (!win) { toast.warning("Permite las ventanas emergentes para imprimir."); return; }
+    const titleLabel = `${kindTitleLabel(kindTab)} — ${selectedCompany?.alias || selectedCompany?.razonSocial || ""} — ${formatPeriodPretty(periodoFilter)}`;
+    win.document.write(`<!DOCTYPE html><html><head><title>${titleLabel}</title>
+      <style>
+        * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; color-adjust: exact !important; }
+        body { font-family: ui-sans-serif, system-ui, sans-serif; padding: 20px; color: #000; }
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid #999; padding: 5px 7px; font-size: 11px; }
+        thead th { background: #92d050 !important; text-align: left; }
+        @media print { @page { size: landscape; margin: 10mm; } }
+      </style>
+    </head><body>${html}</body></html>`);
+    win.document.close();
+    win.focus();
+    setTimeout(() => { win.print(); }, 250);
+  };
+
+  const handleDocListXlsx = async () => {
+    setDocListBusy("xlsx");
+    try {
+      const ExcelJS = (await import("exceljs")).default || (await import("exceljs"));
+      const wb = new ExcelJS.Workbook();
+      const company = selectedCompany;
+      const period = formatPeriodPretty(periodoFilter);
+      const kindLabel = kindTitleLabel(kindTab).toUpperCase();
+      const contraLabel = kindTab === "venta" ? "Cliente" : "Proveedor";
+      const showEstado = kindTab === "venta";
+      const ws = wb.addWorksheet(kindTab === "venta" ? "Ventas-Facturas" : "Compras");
+      ws.getColumn(1).width = 6;  // col A vacía half-width (convención)
+      ws.getColumn(2).width = 12; // Fecha
+      ws.getColumn(3).width = 26; // Documento
+      ws.getColumn(4).width = 10; // Folio
+      ws.getColumn(5).width = 34; // Contraparte
+      ws.getColumn(6).width = 16; // RUT
+      ws.getColumn(7).width = 14; // Neto
+      ws.getColumn(8).width = 14; // IVA
+      ws.getColumn(9).width = 14; // Total
+      ws.getColumn(10).width = 14; // Pagado
+      if (showEstado) ws.getColumn(11).width = 16; // Estado
+
+      const lastCol = showEstado ? 11 : 10;
+      const lastColLetter = String.fromCharCode(64 + lastCol); // J o K
+
+      ws.getCell("B2").value = `${kindLabel} — ${company?.alias || company?.razonSocial || ""} — ${period}`;
+      ws.getCell("B2").font = { bold: true, size: 14 };
+      ws.mergeCells(`B2:${lastColLetter}2`);
+      ws.getCell("B3").value = `${sortedFiltered.length} documento${sortedFiltered.length === 1 ? "" : "s"} · Neto ${fmtCurrency(totals.neto)} · IVA ${fmtCurrency(totals.iva)} · Total ${fmtCurrency(totals.total)}${totals.ncCount > 0 ? ` · NC: -${fmtCurrency(totals.ncTotal)} (${totals.ncCount})` : ""}${groupByCostCenter ? " · Agrupado por centro de costo" : ""}`;
+      ws.getCell("B3").font = { italic: true, color: { argb: "FF555555" } };
+      ws.mergeCells(`B3:${lastColLetter}3`);
+
+      const HR = 5;
+      const headers = ["Fecha", "Documento", "Folio", contraLabel, "RUT", "Neto", "IVA", "Total", "Pagado"];
+      if (showEstado) headers.push("Estado");
+      headers.forEach((h, i) => {
+        const c = ws.getCell(HR, 2 + i);
+        c.value = h;
+        c.font = { bold: true };
+        c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF92D050" } };
+        c.alignment = { horizontal: i <= 4 ? "left" : i === 9 ? "center" : "right", vertical: "middle" };
+        c.border = { top: { style: "thin" }, left: { style: "thin" }, right: { style: "thin" }, bottom: { style: "thin" } };
+      });
+
+      const writeDocRow = (r, d) => {
+        const isNC = CREDIT_NOTE_TYPES.has(Number(d.tipo));
+        const sign = isNC ? -1 : 1;
+        const razon = d.kind === "venta" ? d.razonSocialReceptor : d.razonSocialEmisor;
+        const rut = d.kind === "venta" ? d.rutReceptor : d.rutEmisor;
+        const paid = Number(d.amountPaid) || 0;
+        const estadoLabel = isNC
+          ? NC_STATE.label
+          : (PAYMENT_STATUSES[d.paymentStatus || "unpaid"]?.label || "—");
+        const cells = [
+          d.fechaEmision || "",
+          d.tipoLabel || dteTypeLabel(d.tipo),
+          d.folio,
+          razon || "",
+          formatRutForDisplay(rut) || "",
+          sign * (Number(d.neto) || 0),
+          sign * (Number(d.iva) || 0),
+          sign * (Number(d.total) || 0),
+          paid,
+        ];
+        if (showEstado) cells.push(estadoLabel);
+        cells.forEach((v, j) => {
+          const c = ws.getCell(r, 2 + j);
+          c.value = v;
+          c.alignment = { horizontal: j <= 3 ? "left" : j === 9 ? "center" : "right" };
+          c.border = { top: { style: "thin" }, left: { style: "thin" }, right: { style: "thin" }, bottom: { style: "thin" } };
+          if (j >= 5 && j <= 8) c.numFmt = '"$"#,##0';
+          if (isNC && j >= 5 && j <= 7) c.font = { color: { argb: "FFCC0000" } };
+        });
+      };
+
+      const writeGroupHeader = (r, label, count, isFuel) => {
+        ws.getCell(r, 2).value = `${isFuel ? "⛽ COMBUSTIBLES" : label} · ${count} doc${count === 1 ? "" : "s"}`;
+        ws.getCell(r, 2).font = { bold: true };
+        ws.mergeCells(r, 2, r, lastCol);
+        for (let col = 2; col <= lastCol; col++) {
+          ws.getCell(r, col).fill = { type: "pattern", pattern: "solid", fgColor: { argb: isFuel ? "FFFDE2CC" : "FFE2EFDA" } };
+          ws.getCell(r, col).border = { top: { style: "thin" }, left: { style: "thin" }, right: { style: "thin" }, bottom: { style: "thin" } };
+        }
+      };
+
+      const writeSubtotalRow = (r, g) => {
+        ws.getCell(r, 2).value = "Subtotal";
+        ws.getCell(r, 2).font = { bold: true };
+        ws.mergeCells(r, 2, r, 6);
+        for (let col = 2; col <= lastCol; col++) {
+          ws.getCell(r, col).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF2F2F2" } };
+          ws.getCell(r, col).border = { top: { style: "thin" }, left: { style: "thin" }, right: { style: "thin" }, bottom: { style: "thin" } };
+          ws.getCell(r, col).font = { bold: true };
+        }
+        const subs = [g.neto, g.iva, g.total];
+        subs.forEach((v, j) => {
+          const c = ws.getCell(r, 7 + j);
+          c.value = v;
+          c.numFmt = '"$"#,##0';
+          c.alignment = { horizontal: "right" };
+        });
+      };
+
+      const dataStart = HR + 1;
+      let r = dataStart;
+      if (groupByCostCenter) {
+        const groups = groupDocsByCostCenter(sortedFiltered, kindTab);
+        for (const g of groups) {
+          writeGroupHeader(r, g.razon, g.docs.length, g.isFuel);
+          r++;
+          for (const d of g.docs) {
+            writeDocRow(r, d);
+            r++;
+          }
+          writeSubtotalRow(r, g);
+          r++;
+        }
+      } else {
+        for (const d of sortedFiltered) {
+          writeDocRow(r, d);
+          r++;
+        }
+      }
+      const lastDataRow = r - 1;
+      const totalRow = r;
+      ws.getCell(totalRow, 2).value = `TOTAL (${sortedFiltered.length})`;
+      ws.mergeCells(totalRow, 2, totalRow, 6);
+      for (let col = 2; col <= lastCol; col++) {
+        const c = ws.getCell(totalRow, col);
+        c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFC6EFCE" } };
+        c.border = { top: { style: "thin" }, left: { style: "thin" }, right: { style: "thin" }, bottom: { style: "thin" } };
+        c.font = { bold: true };
+      }
+      // Cuando es vista plana podemos usar SUM sobre el rango; en vista
+      // agrupada hay filas intermedias (headers, subtotales) — escribimos
+      // los totales como valores precomputados para no sumar dos veces.
+      if (!groupByCostCenter && lastDataRow >= dataStart) {
+        ws.getCell(totalRow, 7).value = { formula: `SUM(G${dataStart}:G${lastDataRow})`, result: totals.neto };
+        ws.getCell(totalRow, 8).value = { formula: `SUM(H${dataStart}:H${lastDataRow})`, result: totals.iva };
+        ws.getCell(totalRow, 9).value = { formula: `SUM(I${dataStart}:I${lastDataRow})`, result: totals.total };
+        ws.getCell(totalRow, 10).value = { formula: `SUM(J${dataStart}:J${lastDataRow})`, result: 0 };
+      } else {
+        ws.getCell(totalRow, 7).value = Number(totals.neto) || 0;
+        ws.getCell(totalRow, 8).value = Number(totals.iva) || 0;
+        ws.getCell(totalRow, 9).value = Number(totals.total) || 0;
+        ws.getCell(totalRow, 10).value = 0;
+      }
+      for (let col = 7; col <= 10; col++) {
+        ws.getCell(totalRow, col).alignment = { horizontal: "right" };
+        ws.getCell(totalRow, col).numFmt = '"$"#,##0';
+      }
+
+      const buf = await wb.xlsx.writeBuffer();
+      const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = `${docListFileBase}.xlsx`;
+      link.click();
+      URL.revokeObjectURL(link.href);
+    } catch (err) {
+      toast.error("Error al generar XLSX: " + (err.message || err));
+    } finally {
+      setDocListBusy("");
+    }
+  };
+
+  // ===== Export del Resumen anual =====
+  const resumenFileBase = useMemo(() => {
+    const alias = (selectedCompany?.alias || selectedCompany?.razonSocial || "empresa").replace(/[^\w-]+/g, "_");
+    return `Resumen_${alias}_${resumenYear}`;
+  }, [selectedCompany, resumenYear]);
+
+  const handleResumenCopy = async () => {
+    if (!resumenPrintRef.current) return;
+    setResumenBusy("copy");
+    try {
+      const blob = await toBlob(resumenPrintRef.current, { backgroundColor: "#ffffff", pixelRatio: 2 });
+      if (!blob) throw new Error("No se pudo generar la imagen");
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+      toast.success("Imagen copiada al portapapeles");
+    } catch (err) {
+      toast.error("Error al copiar: " + (err.message || err));
+    } finally {
+      setResumenBusy("");
+    }
+  };
+
+  const handleResumenPng = async () => {
+    if (!resumenPrintRef.current) return;
+    setResumenBusy("png");
+    try {
+      const dataUrl = await toPng(resumenPrintRef.current, { backgroundColor: "#ffffff", pixelRatio: 2 });
+      const link = document.createElement("a");
+      link.download = `${resumenFileBase}.png`;
+      link.href = dataUrl;
+      link.click();
+    } catch (err) {
+      toast.error("Error al generar PNG: " + (err.message || err));
+    } finally {
+      setResumenBusy("");
+    }
+  };
+
+  const handleResumenPrint = () => {
+    if (!resumenPrintRef.current) return;
+    const html = resumenPrintRef.current.outerHTML;
+    const win = window.open("", "_blank", "width=1000,height=700");
+    if (!win) { toast.warning("Permite las ventanas emergentes para imprimir."); return; }
+    const titleLabel = `Resumen ${resumenYear} — ${selectedCompany?.alias || selectedCompany?.razonSocial || ""}`;
+    win.document.write(`<!DOCTYPE html><html><head><title>${titleLabel}</title>
+      <style>
+        * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; color-adjust: exact !important; }
+        body { font-family: ui-sans-serif, system-ui, sans-serif; padding: 20px; color: #000; }
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid #999; padding: 5px 7px; font-size: 11px; }
+        thead th { background: #92d050 !important; text-align: left; }
+        @media print { @page { size: landscape; margin: 10mm; } }
+      </style>
+    </head><body>${html}</body></html>`);
+    win.document.close();
+    win.focus();
+    setTimeout(() => { win.print(); }, 250);
+  };
+
+  const handleResumenXlsx = async () => {
+    setResumenBusy("xlsx");
+    try {
+      const ExcelJS = (await import("exceljs")).default || (await import("exceljs"));
+      const wb = new ExcelJS.Workbook();
+      const company = selectedCompany;
+      const { months, total } = resumenData;
+      const ws = wb.addWorksheet(`Resumen ${resumenYear}`);
+      // Convención del proyecto: col A vacía (media), fila 1 vacía.
+      ws.getColumn(1).width = 6;
+      ws.getColumn(2).width = 14; // Mes
+      ws.getColumn(3).width = 16; // Ventas Neto
+      ws.getColumn(4).width = 16; // IVA Débito
+      ws.getColumn(5).width = 16; // Compras Neto
+      ws.getColumn(6).width = 16; // IVA Crédito
+      ws.getColumn(7).width = 16; // IVA a pagar
+
+      ws.getCell("B2").value = `RESUMEN ${resumenYear} — ${company?.alias || company?.razonSocial || ""}`;
+      ws.getCell("B2").font = { bold: true, size: 14 };
+      ws.mergeCells(`B2:G2`);
+      const ivaAnual = total.ivaDebito - total.ivaCredito;
+      ws.getCell("B3").value = `IVA Débito ${fmtCurrency(total.ivaDebito)} · IVA Crédito ${fmtCurrency(total.ivaCredito)} · IVA ${ivaAnual >= 0 ? "a pagar" : "a favor"} ${fmtCurrency(Math.abs(ivaAnual))}`;
+      ws.getCell("B3").font = { italic: true, color: { argb: "FF555555" } };
+      ws.mergeCells(`B3:G3`);
+
+      const HR = 5;
+      const headers = ["Mes", "Ventas Neto", "IVA Débito", "Compras Neto", "IVA Crédito", "IVA a pagar"];
+      headers.forEach((h, i) => {
+        const c = ws.getCell(HR, 2 + i);
+        c.value = h;
+        c.font = { bold: true };
+        c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF92D050" } };
+        c.alignment = { horizontal: i === 0 ? "left" : "right", vertical: "middle" };
+        c.border = { top: { style: "thin" }, left: { style: "thin" }, right: { style: "thin" }, bottom: { style: "thin" } };
+      });
+
+      let r = HR + 1;
+      months.forEach((m, idx) => {
+        const ivaMes = m.ivaDebito - m.ivaCredito;
+        const cells = [MONTH_NAMES_ES[idx], m.ventasNeto, m.ivaDebito, m.comprasNeto, m.ivaCredito, ivaMes];
+        cells.forEach((v, j) => {
+          const c = ws.getCell(r, 2 + j);
+          c.value = v;
+          c.alignment = { horizontal: j === 0 ? "left" : "right" };
+          c.border = { top: { style: "thin" }, left: { style: "thin" }, right: { style: "thin" }, bottom: { style: "thin" } };
+          if (j >= 1) c.numFmt = '"$"#,##0';
+          if (j === 5) c.font = { bold: true, color: { argb: ivaMes < 0 ? "FF1F7A1F" : "FF000000" } };
+        });
+        r++;
+      });
+
+      const totalRow = r;
+      const ivaAnualVal = total.ivaDebito - total.ivaCredito;
+      const tCells = ["TOTAL", total.ventasNeto, total.ivaDebito, total.comprasNeto, total.ivaCredito, ivaAnualVal];
+      tCells.forEach((v, j) => {
+        const c = ws.getCell(totalRow, 2 + j);
+        c.value = v;
+        c.font = { bold: true, ...(j === 5 ? { color: { argb: ivaAnualVal < 0 ? "FF1F7A1F" : "FF000000" } } : {}) };
+        c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFC6EFCE" } };
+        c.alignment = { horizontal: j === 0 ? "left" : "right" };
+        c.border = { top: { style: "thin" }, left: { style: "thin" }, right: { style: "thin" }, bottom: { style: "thin" } };
+        if (j >= 1) c.numFmt = '"$"#,##0';
+      });
+
+      const buf = await wb.xlsx.writeBuffer();
+      const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = `${resumenFileBase}.xlsx`;
+      link.click();
+      URL.revokeObjectURL(link.href);
+    } catch (err) {
+      toast.error("Error al generar XLSX: " + (err.message || err));
+    } finally {
+      setResumenBusy("");
+    }
+  };
+
   return (
     <div className="flex h-full flex-col">
       <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
@@ -1119,6 +1579,7 @@ export default function Facturacion() {
             { v: "venta", label: "📤 Facturas" },
             { v: "compra", label: "📥 Compras" },
             { v: "retenciones", label: "📑 Retenciones" },
+            { v: "resumen", label: "📊 Resumen" },
           ].map((t) => (
             <button
               key={t.v}
@@ -1134,6 +1595,7 @@ export default function Facturacion() {
           ))}
         </div>
 
+        {kindTab !== "resumen" && (<>
         <button
           onClick={() => setAuditMode((v) => !v)}
           className={`rounded-md border px-3 py-1.5 text-sm ${
@@ -1161,9 +1623,11 @@ export default function Facturacion() {
             </span>
           )}
         </button>
+        </>)}
       </div>
 
       {/* Sub-filtros */}
+      {kindTab !== "resumen" && (
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <select
           value={periodoFilter}
@@ -1189,7 +1653,7 @@ export default function Facturacion() {
             <option key={t} value={t}>{t} · {dteTypeLabel(t)}</option>
           ))}
         </select>
-        {!isRetencionesView && (
+        {!isRetencionesView && kindTab === "venta" && (
           <div className="flex gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] p-0.5 text-xs">
             {[
               { v: "", label: "Todos" },
@@ -1230,7 +1694,9 @@ export default function Facturacion() {
           ))}
         </datalist>
       </div>
+      )}
 
+      {kindTab !== "resumen" && (
       <div className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-5">
         <SummaryCard label="Documentos" value={fmtNumber(totals.count)} />
         <SummaryCard label="Neto" value={fmtCurrency(totals.neto)} />
@@ -1242,8 +1708,9 @@ export default function Facturacion() {
           subtle
         />
       </div>
+      )}
 
-      {selectedCompany && !auditMode && !isRetencionesView && (
+      {selectedCompany && !auditMode && !isRetencionesView && kindTab !== "resumen" && (
         <div className="mb-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
           <SummaryCard label="No pagado del período" value={fmtCurrency(totals.unpaidTotal)} warning />
           <SummaryCard label="Solo neto (IVA retenido)" value={fmtCurrency(totals.netOnlyTotal)} />
@@ -1272,6 +1739,98 @@ export default function Facturacion() {
             🏢 Registrar la primera empresa
           </button>
         </div>
+      ) : kindTab === "resumen" ? (
+        (() => {
+          const { months, total } = resumenData;
+          const ivaAnual = total.ivaDebito - total.ivaCredito;
+          const exportDisabled = total.ventasCount === 0 && total.comprasCount === 0;
+          return (
+            <div className="flex flex-1 flex-col gap-3 overflow-auto">
+              <div className="flex flex-wrap items-center gap-2">
+                <label className="text-xs text-[var(--color-muted)]">Año</label>
+                <select
+                  value={resumenYear}
+                  onChange={(e) => setResumenYear(e.target.value)}
+                  className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1.5 text-sm"
+                >
+                  {resumenYears.map((y) => (
+                    <option key={y} value={y}>{y}</option>
+                  ))}
+                </select>
+                <div className="ml-auto flex flex-wrap gap-1">
+                  <button onClick={handleResumenCopy} disabled={resumenBusy === "copy" || exportDisabled} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)] disabled:opacity-60" title="Copiar como imagen">
+                    {resumenBusy === "copy" ? "Copiando..." : "📋 Copiar"}
+                  </button>
+                  <button onClick={handleResumenPng} disabled={resumenBusy === "png" || exportDisabled} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)] disabled:opacity-60" title="Descargar PNG">
+                    {resumenBusy === "png" ? "..." : "📥 PNG"}
+                  </button>
+                  <button onClick={handleResumenPrint} disabled={exportDisabled} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)] disabled:opacity-60" title="Imprimir">
+                    🖨 Imprimir
+                  </button>
+                  <button onClick={handleResumenXlsx} disabled={resumenBusy === "xlsx" || exportDisabled} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)] disabled:opacity-60" title="Exportar XLSX">
+                    {resumenBusy === "xlsx" ? "..." : "📊 XLSX"}
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                <SummaryCard label="IVA Débito (ventas)" value={fmtCurrency(total.ivaDebito)} />
+                <SummaryCard label="IVA Crédito (compras)" value={fmtCurrency(total.ivaCredito)} />
+                <SummaryCard label={ivaAnual >= 0 ? "IVA a pagar (año)" : "IVA a favor (remanente)"} value={fmtCurrency(Math.abs(ivaAnual))} highlight />
+              </div>
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                <SummaryCard label="Ventas netas (año)" value={fmtCurrency(total.ventasNeto)} />
+                <SummaryCard label="Compras netas (año)" value={fmtCurrency(total.comprasNeto)} />
+                <SummaryCard label="Documentos" value={fmtNumber(total.ventasCount + total.comprasCount)} subtle />
+              </div>
+
+              <div style={{ position: "absolute", left: -99999, top: 0, pointerEvents: "none" }} aria-hidden>
+                <PrintableResumen ref={resumenPrintRef} data={resumenData} year={resumenYear} company={selectedCompany} />
+              </div>
+
+              <div className="overflow-auto rounded-md border border-[var(--color-border)]">
+                <table className="w-full text-sm">
+                  <thead className="sticky top-0 bg-[var(--color-surface-2)] text-xs uppercase tracking-wide text-[var(--color-muted)]">
+                    <tr>
+                      <th className="px-2 py-2 text-left">Mes</th>
+                      <th className="px-2 py-2 text-right">Ventas Neto</th>
+                      <th className="px-2 py-2 text-right">IVA Débito</th>
+                      <th className="px-2 py-2 text-right">Compras Neto</th>
+                      <th className="px-2 py-2 text-right">IVA Crédito</th>
+                      <th className="px-2 py-2 text-right">IVA a pagar</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {months.map((m, idx) => {
+                      const ivaMes = m.ivaDebito - m.ivaCredito;
+                      const empty = m.ventasCount === 0 && m.comprasCount === 0;
+                      return (
+                        <tr key={idx} className={`border-t border-[var(--color-border)] ${empty ? "text-[var(--color-muted)]" : ""}`}>
+                          <td className="px-2 py-1.5">{MONTH_NAMES_ES[idx]}</td>
+                          <td className="px-2 py-1.5 text-right tabular-nums">{fmtCurrency(m.ventasNeto)}</td>
+                          <td className="px-2 py-1.5 text-right tabular-nums">{fmtCurrency(m.ivaDebito)}</td>
+                          <td className="px-2 py-1.5 text-right tabular-nums">{fmtCurrency(m.comprasNeto)}</td>
+                          <td className="px-2 py-1.5 text-right tabular-nums">{fmtCurrency(m.ivaCredito)}</td>
+                          <td className={`px-2 py-1.5 text-right font-semibold tabular-nums ${ivaMes < 0 ? "text-[var(--color-success)]" : ""}`}>{fmtCurrency(ivaMes)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                  <tfoot>
+                    <tr className="border-t-2 border-[var(--color-border)] bg-[var(--color-surface-2)] font-semibold">
+                      <td className="px-2 py-2">TOTAL {resumenYear}</td>
+                      <td className="px-2 py-2 text-right tabular-nums">{fmtCurrency(total.ventasNeto)}</td>
+                      <td className="px-2 py-2 text-right tabular-nums">{fmtCurrency(total.ivaDebito)}</td>
+                      <td className="px-2 py-2 text-right tabular-nums">{fmtCurrency(total.comprasNeto)}</td>
+                      <td className="px-2 py-2 text-right tabular-nums">{fmtCurrency(total.ivaCredito)}</td>
+                      <td className={`px-2 py-2 text-right tabular-nums ${ivaAnual < 0 ? "text-[var(--color-success)]" : ""}`}>{fmtCurrency(ivaAnual)}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            </div>
+          );
+        })()
       ) : filtered.length === 0 ? (
         <div className="flex h-40 items-center justify-center rounded-md border border-dashed border-[var(--color-border)] text-sm text-[var(--color-muted)]">
           {docs.some((d) => (isRetencionesView || d.kind === kindTab) && d.companyId === selectedCompanyId)
@@ -1357,6 +1916,71 @@ export default function Facturacion() {
           />
         </>
       ) : (
+        <>
+          {/* Toolbar de export para Facturas / Compras (mismo patrón que
+              Retenciones). Captura el listado tal cual está filtrado y ordenado. */}
+          <div className="mb-2 flex flex-wrap gap-1">
+            <button
+              onClick={handleDocListCopy}
+              disabled={docListBusy === "copy" || sortedFiltered.length === 0}
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)] disabled:opacity-60"
+              title="Copiar tabla como imagen"
+            >
+              {docListBusy === "copy" ? "Copiando..." : "📋 Copiar"}
+            </button>
+            <button
+              onClick={handleDocListPng}
+              disabled={docListBusy === "png" || sortedFiltered.length === 0}
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)] disabled:opacity-60"
+              title="Descargar como PNG"
+            >
+              {docListBusy === "png" ? "..." : "📥 PNG"}
+            </button>
+            <button
+              onClick={handleDocListPrint}
+              disabled={sortedFiltered.length === 0}
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)] disabled:opacity-60"
+              title="Imprimir"
+            >
+              🖨 Imprimir
+            </button>
+            <button
+              onClick={handleDocListXlsx}
+              disabled={docListBusy === "xlsx" || sortedFiltered.length === 0}
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)] disabled:opacity-60"
+              title="Exportar XLSX"
+            >
+              {docListBusy === "xlsx" ? "..." : "📊 XLSX"}
+            </button>
+            <button
+              onClick={() => setGroupByCostCenter((v) => !v)}
+              className={`rounded-md border px-2 py-1 text-xs ${
+                groupByCostCenter
+                  ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+                  : "border-[var(--color-border)] bg-[var(--color-surface-2)] hover:bg-[var(--color-accent-soft)]"
+              }`}
+              title={groupByCostCenter
+                ? "Export agrupado por centro de costo (combustibles juntos, resto por proveedor). Click para volver a vista plana."
+                : "Agrupar el export por centro de costo: combustibles como un grupo aparte y el resto por proveedor."}
+            >
+              {groupByCostCenter ? "🗂 Centro de costo · ON" : "🗂 Centro de costo"}
+            </button>
+          </div>
+
+          {/* Off-screen printable — capturado por html-to-image / print. */}
+          <div style={{ position: "absolute", left: -99999, top: 0, pointerEvents: "none" }} aria-hidden>
+            <PrintableDocList
+              ref={docListPrintRef}
+              kind={kindTab}
+              docs={sortedFiltered}
+              company={selectedCompany}
+              periodo={periodoFilter}
+              totals={totals}
+              groupByCostCenter={groupByCostCenter}
+              showEstado={kindTab === "venta"}
+            />
+          </div>
+
         <div className="flex-1 overflow-auto rounded-md border border-[var(--color-border)]">
           <table className="w-full text-sm">
             <thead className="sticky top-0 bg-[var(--color-surface-2)] text-xs uppercase tracking-wide text-[var(--color-muted)]">
@@ -1370,12 +1994,15 @@ export default function Facturacion() {
                 <SortHeader sortKey="iva" sortBy={sortBy} onToggle={toggleSort} align="right">IVA</SortHeader>
                 <SortHeader sortKey="total" sortBy={sortBy} onToggle={toggleSort} align="right">Total</SortHeader>
                 <SortHeader sortKey="pagado" sortBy={sortBy} onToggle={toggleSort} align="right">Abonos</SortHeader>
-                <SortHeader sortKey="estado" sortBy={sortBy} onToggle={toggleSort} align="center">Estado</SortHeader>
+                {kindTab === "venta" && (
+                  <SortHeader sortKey="estado" sortBy={sortBy} onToggle={toggleSort} align="center">Estado</SortHeader>
+                )}
                 <th className="px-2 py-2"></th>
               </tr>
             </thead>
             <tbody>
-              {sortedFiltered.map((d) => {
+              {(() => {
+                const renderDocRow = (d) => {
                 const razon = kindTab === "venta" ? d.razonSocialReceptor : d.razonSocialEmisor;
                 const rut = kindTab === "venta" ? d.rutReceptor : d.rutEmisor;
                 const isNC = CREDIT_NOTE_TYPES.has(Number(d.tipo));
@@ -1385,10 +2012,10 @@ export default function Facturacion() {
                   <tr key={d.id} className="border-t border-[var(--color-border)] hover:bg-[var(--color-surface-2)]">
                     <td className="px-2 py-1.5 font-mono text-xs">{d.fechaEmision}</td>
                     <td className="px-2 py-1.5 text-xs">
-                      <span className={`rounded px-1.5 py-0.5 ${isNC ? "bg-[var(--color-danger-soft)] text-[var(--color-danger)]" : "bg-[var(--color-surface-2)]"}`}>
-                        {d.tipo}
+                      <span className={isNC ? "rounded px-1.5 py-0.5 bg-[var(--color-danger-soft)] text-[var(--color-danger)]" : ""}>
+                        {d.tipoLabel || dteTypeLabel(d.tipo)}
                       </span>
-                      <span className="ml-1 text-[var(--color-muted)]">{d.tipoLabel}</span>
+                      <OtroImpChip code={d.otroImpuestoCodigo} />
                     </td>
                     <td className="px-2 py-1.5 text-right font-mono tabular-nums">{d.folio}</td>
                     <td className="px-2 py-1.5 truncate max-w-[260px]">{razon || "—"}</td>
@@ -1420,29 +2047,31 @@ export default function Facturacion() {
                         );
                       })()}
                     </td>
-                    <td className="px-2 py-1.5 text-center">
-                      {isNC ? (
-                        <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${NC_STATE.chip}`}>
-                          {NC_STATE.label}
-                        </span>
-                      ) : (
-                        <div className="flex items-center justify-center gap-1">
-                          <PaymentStatusSelect
-                            value={st}
-                            onChange={(next) => setPaymentStatus(d, next)}
-                          />
-                          {cancellingByDocId.has(d.id) && st !== "cancelled" && (
-                            <button
-                              onClick={() => setDetailDoc(d)}
-                              title={`Posible NC anula esta factura (${cancellingByDocId.get(d.id).length} candidata${cancellingByDocId.get(d.id).length === 1 ? "" : "s"}). Click para revisar.`}
-                              className="rounded-full bg-[var(--color-danger-soft)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-danger)] hover:opacity-80"
-                            >
-                              ⚠ NC?
-                            </button>
-                          )}
-                        </div>
-                      )}
-                    </td>
+                    {kindTab === "venta" && (
+                      <td className="px-2 py-1.5 text-center">
+                        {isNC ? (
+                          <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${NC_STATE.chip}`}>
+                            {NC_STATE.label}
+                          </span>
+                        ) : (
+                          <div className="flex items-center justify-center gap-1">
+                            <PaymentStatusSelect
+                              value={st}
+                              onChange={(next) => setPaymentStatus(d, next)}
+                            />
+                            {cancellingByDocId.has(d.id) && st !== "cancelled" && (
+                              <button
+                                onClick={() => setDetailDoc(d)}
+                                title={`Posible NC anula esta factura (${cancellingByDocId.get(d.id).length} candidata${cancellingByDocId.get(d.id).length === 1 ? "" : "s"}). Click para revisar.`}
+                                className="rounded-full bg-[var(--color-danger-soft)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-danger)] hover:opacity-80"
+                              >
+                                ⚠ NC?
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </td>
+                    )}
                     <td className="px-2 py-1.5 text-center">
                       <button
                         onClick={() => setDetailDoc(d)}
@@ -1454,10 +2083,38 @@ export default function Facturacion() {
                     </td>
                   </tr>
                 );
-              })}
+                };
+
+                if (!groupByCostCenter) return sortedFiltered.map(renderDocRow);
+
+                const totalCols = kindTab === "venta" ? 11 : 10;
+                const groups = groupDocsByCostCenter(sortedFiltered, kindTab);
+                return groups.map((g) => (
+                  <React.Fragment key={`g_${g.key}`}>
+                    <tr className={g.isFuel ? "bg-[var(--color-warning-soft)]" : "bg-[var(--color-accent-soft)]"}>
+                      <td colSpan={totalCols} className="px-2 py-1.5 text-xs font-semibold">
+                        {g.isFuel ? "⛽ COMBUSTIBLES" : (g.razon || "—")}
+                        {!g.isFuel && g.rut && (
+                          <span className="ml-2 font-normal text-[var(--color-muted)]">· {formatRutForDisplay(g.rut)}</span>
+                        )}
+                        <span className="ml-2 font-normal text-[var(--color-muted)]">· {g.docs.length} doc{g.docs.length === 1 ? "" : "s"}</span>
+                      </td>
+                    </tr>
+                    {g.docs.map(renderDocRow)}
+                    <tr className="border-t border-[var(--color-border)] bg-[var(--color-surface-2)] text-xs font-semibold">
+                      <td colSpan={5} className="px-2 py-1.5">Subtotal</td>
+                      <td className="px-2 py-1.5 text-right tabular-nums">{fmtCurrency(g.neto)}</td>
+                      <td className="px-2 py-1.5 text-right tabular-nums">{fmtCurrency(g.iva)}</td>
+                      <td className="px-2 py-1.5 text-right tabular-nums">{fmtCurrency(g.total)}</td>
+                      <td colSpan={kindTab === "venta" ? 3 : 2}></td>
+                    </tr>
+                  </React.Fragment>
+                ));
+              })()}
             </tbody>
           </table>
         </div>
+        </>
       )}
 
       {importPreview && (
@@ -1713,9 +2370,264 @@ const pCell = {
   fontSize: 12,
 };
 
+// Printable del Resumen anual (off-screen, fondo blanco). Misma tabla mensual
+// que la vista en pantalla, con el balance de IVA arriba como métricas
+// explícitas. El IVA a pagar = débito − crédito.
+const PrintableResumen = forwardRef(function PrintableResumen(
+  { data, year, company },
+  ref,
+) {
+  const { months, total } = data;
+  const ivaAnual = total.ivaDebito - total.ivaCredito;
+  const metric = (label, value, opts = {}) => (
+    <div style={{ border: "1px solid #999", borderRadius: 6, padding: "8px 10px", background: opts.bg || "#f7f7f7", minWidth: 150 }}>
+      <div style={{ fontSize: 11, color: "#555" }}>{label}</div>
+      <div style={{ fontSize: 16, fontWeight: 700, color: opts.color || "#000" }}>{value}</div>
+    </div>
+  );
+  return (
+    <div
+      ref={ref}
+      style={{
+        background: "#ffffff",
+        color: "#000",
+        padding: 16,
+        fontFamily: "ui-sans-serif, system-ui, sans-serif",
+        minWidth: 1000,
+      }}
+    >
+      <div style={{ marginBottom: 6, fontWeight: 700, fontSize: 16, textTransform: "uppercase" }}>
+        Resumen {year} — {(company?.alias || company?.razonSocial || "—").toString().toUpperCase()}
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
+        {metric("IVA Débito (ventas)", fmtCurrency(total.ivaDebito))}
+        {metric("IVA Crédito (compras)", fmtCurrency(total.ivaCredito))}
+        {metric(
+          ivaAnual >= 0 ? "IVA a pagar (año)" : "IVA a favor (remanente)",
+          fmtCurrency(Math.abs(ivaAnual)),
+          { bg: "#fff4ce", color: ivaAnual < 0 ? "#1f7a1f" : "#000" },
+        )}
+      </div>
+      <table style={{ borderCollapse: "collapse", width: "100%" }}>
+        <thead>
+          <tr style={{ background: "#92d050" }}>
+            <th style={pCellH}>MES</th>
+            <th style={{ ...pCellH, textAlign: "right" }}>VENTAS NETO</th>
+            <th style={{ ...pCellH, textAlign: "right" }}>IVA DÉBITO</th>
+            <th style={{ ...pCellH, textAlign: "right" }}>COMPRAS NETO</th>
+            <th style={{ ...pCellH, textAlign: "right" }}>IVA CRÉDITO</th>
+            <th style={{ ...pCellH, textAlign: "right" }}>IVA A PAGAR</th>
+          </tr>
+        </thead>
+        <tbody>
+          {months.map((m, idx) => {
+            const ivaMes = m.ivaDebito - m.ivaCredito;
+            const numCell = { ...pCell, textAlign: "right", fontVariantNumeric: "tabular-nums" };
+            return (
+              <tr key={idx}>
+                <td style={pCell}>{MONTH_NAMES_ES[idx]}</td>
+                <td style={numCell}>{fmtCurrency(m.ventasNeto)}</td>
+                <td style={numCell}>{fmtCurrency(m.ivaDebito)}</td>
+                <td style={numCell}>{fmtCurrency(m.comprasNeto)}</td>
+                <td style={numCell}>{fmtCurrency(m.ivaCredito)}</td>
+                <td style={{ ...numCell, fontWeight: 700, color: ivaMes < 0 ? "#1f7a1f" : "#000" }}>{fmtCurrency(ivaMes)}</td>
+              </tr>
+            );
+          })}
+          <tr style={{ background: "#c6efce" }}>
+            <td style={{ ...pCell, fontWeight: 700 }}>TOTAL {year}</td>
+            <td style={{ ...pCell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(total.ventasNeto)}</td>
+            <td style={{ ...pCell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(total.ivaDebito)}</td>
+            <td style={{ ...pCell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(total.comprasNeto)}</td>
+            <td style={{ ...pCell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(total.ivaCredito)}</td>
+            <td style={{ ...pCell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums", color: ivaAnual < 0 ? "#1f7a1f" : "#000" }}>{fmtCurrency(ivaAnual)}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  );
+});
+
 // Printable de una sola contraparte (resumen individual). Se renderiza N veces
 // off-screen — uno por grupo — para que cada uno pueda exportarse a
 // imagen/PDF/XLSX de manera independiente.
+// Printable plano del listado de Facturas o Compras. Respeta los filtros + sort
+// que ya están aplicados en `docs` (el caller pasa `sortedFiltered`). NCs se
+// muestran en rojo con signo "−" en los montos para mantener la convención
+// visual del listado en pantalla.
+// Agrupa docs por centro de costo. Convención:
+//   - Combustibles (cualquier doc con `otroImpuestoCategory === "combustible"`)
+//     se juntan en un grupo virtual único "⛽ COMBUSTIBLES", ordenado por fecha.
+//     Este grupo va primero (centro de costo agregado, no por proveedor).
+//   - El resto se agrupa por contraparte (rutEmisor para compras, rutReceptor
+//     para ventas). Cada proveedor / cliente queda como un grupo individual.
+//   - Los grupos no-combustible se ordenan por total desc.
+function groupDocsByCostCenter(docs, kind) {
+  const fuel = { key: "__combustibles__", isFuel: true, razon: "Combustibles", rut: "", docs: [], neto: 0, iva: 0, total: 0 };
+  const byContra = new Map();
+  for (const d of docs) {
+    const isFuel = d.otroImpuestoCategory === "combustible";
+    if (isFuel) {
+      fuel.docs.push(d);
+    } else {
+      const rut = d.kind === "venta" ? d.rutReceptor : d.rutEmisor;
+      const razon = d.kind === "venta" ? d.razonSocialReceptor : d.razonSocialEmisor;
+      const key = rut || `__norut_${razon || "_"}`;
+      if (!byContra.has(key)) {
+        byContra.set(key, { key, isFuel: false, razon: razon || "—", rut, docs: [], neto: 0, iva: 0, total: 0 });
+      }
+      byContra.get(key).docs.push(d);
+    }
+  }
+  // Acumular totales con signo (NCs restan).
+  const accumulate = (g) => {
+    for (const d of g.docs) {
+      const s = CREDIT_NOTE_TYPES.has(Number(d.tipo)) ? -1 : 1;
+      g.neto += s * (Number(d.neto) || 0);
+      g.iva += s * (Number(d.iva) || 0);
+      g.total += s * (Number(d.total) || 0);
+    }
+    g.docs.sort((a, b) => String(a.fechaEmision || "").localeCompare(String(b.fechaEmision || "")));
+  };
+  accumulate(fuel);
+  for (const g of byContra.values()) accumulate(g);
+  const others = [...byContra.values()].sort((a, b) => Math.abs(b.total) - Math.abs(a.total));
+  return fuel.docs.length > 0 ? [fuel, ...others] : others;
+}
+
+const PrintableDocList = forwardRef(function PrintableDocList(
+  { kind, docs, company, periodo, totals, groupByCostCenter = false, showEstado = true },
+  ref,
+) {
+  const periodLabel = formatPeriodPretty(periodo);
+  const kindTitle = kindTitleLabel(kind).toUpperCase();
+  const contraLabel = kind === "venta" ? "Cliente" : "Proveedor";
+  const groups = groupByCostCenter ? groupDocsByCostCenter(docs, kind) : null;
+
+  // Columnas: en venta ocultamos Estado (sin control real); el colSpan del
+  // TOTAL al pie se ajusta dinámicamente.
+  const colCount = showEstado ? 10 : 9;
+
+  // Render de las celdas de un doc (reutilizado en flat y grouped).
+  const renderDocRow = (d) => {
+    const isNC = CREDIT_NOTE_TYPES.has(Number(d.tipo));
+    const sign = isNC ? "−" : "";
+    const razon = d.kind === "venta" ? d.razonSocialReceptor : d.razonSocialEmisor;
+    const rut = d.kind === "venta" ? d.rutReceptor : d.rutEmisor;
+    const paid = Number(d.amountPaid) || 0;
+    const estadoLabel = isNC
+      ? NC_STATE.label
+      : (PAYMENT_STATUSES[d.paymentStatus || "unpaid"]?.label || "—");
+    const ncColor = isNC ? { color: "#cc0000" } : null;
+    return (
+      <tr key={d.id}>
+        <td style={{ ...pCell, fontVariantNumeric: "tabular-nums" }}>{d.fechaEmision || "—"}</td>
+        <td style={{ ...pCell, ...(ncColor || {}) }}>{d.tipoLabel || dteTypeLabel(d.tipo)}</td>
+        <td style={{ ...pCell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{d.folio}</td>
+        <td style={pCell}>{razon || "—"}</td>
+        <td style={{ ...pCell, fontVariantNumeric: "tabular-nums" }}>{formatRutForDisplay(rut) || "—"}</td>
+        <td style={{ ...pCell, textAlign: "right", fontVariantNumeric: "tabular-nums", ...(ncColor || {}) }}>{sign}{fmtCurrency(d.neto)}</td>
+        <td style={{ ...pCell, textAlign: "right", fontVariantNumeric: "tabular-nums", ...(ncColor || {}) }}>{sign}{fmtCurrency(d.iva)}</td>
+        <td style={{ ...pCell, textAlign: "right", fontVariantNumeric: "tabular-nums", fontWeight: 600, ...(ncColor || {}) }}>{sign}{fmtCurrency(d.total)}</td>
+        <td style={{ ...pCell, textAlign: "right", fontVariantNumeric: "tabular-nums", color: paid > 0 ? "#000" : "#999" }}>{paid > 0 ? fmtCurrency(paid) : "—"}</td>
+        {showEstado && (
+          <td style={{ ...pCell, textAlign: "center", fontSize: 11, ...(isNC ? { color: "#cc0000", fontWeight: 600 } : {}) }}>
+            {estadoLabel}
+          </td>
+        )}
+      </tr>
+    );
+  };
+
+  return (
+    <div
+      ref={ref}
+      style={{
+        background: "#ffffff",
+        color: "#000",
+        padding: 16,
+        fontFamily: "ui-sans-serif, system-ui, sans-serif",
+        minWidth: 1100,
+      }}
+    >
+      <div style={{ marginBottom: 6, fontWeight: 700, fontSize: 16, textTransform: "uppercase" }}>
+        {kindTitle} — {(company?.alias || company?.razonSocial || "—").toString().toUpperCase()} — {periodLabel.toUpperCase()}
+      </div>
+      <div style={{ marginBottom: 8, fontSize: 11, color: "#444" }}>
+        {docs.length} documento{docs.length === 1 ? "" : "s"}
+        {totals?.ncCount > 0 && (
+          <span style={{ marginLeft: 8, color: "#cc0000" }}>
+            · NC: {totals.ncCount} (−{fmtCurrency(totals.ncTotal)})
+          </span>
+        )}
+        {groupByCostCenter && (
+          <span style={{ marginLeft: 8 }}>· Agrupado por centro de costo</span>
+        )}
+      </div>
+      <table style={{ borderCollapse: "collapse", width: "100%" }}>
+        <thead>
+          <tr style={{ background: "#92d050" }}>
+            <th style={{ ...pCellH, width: 80 }}>FECHA</th>
+            <th style={pCellH}>DOCUMENTO</th>
+            <th style={{ ...pCellH, textAlign: "right", width: 60 }}>FOLIO</th>
+            <th style={pCellH}>{contraLabel.toUpperCase()}</th>
+            <th style={pCellH}>RUT</th>
+            <th style={{ ...pCellH, textAlign: "right" }}>NETO</th>
+            <th style={{ ...pCellH, textAlign: "right" }}>IVA</th>
+            <th style={{ ...pCellH, textAlign: "right" }}>TOTAL</th>
+            <th style={{ ...pCellH, textAlign: "right" }}>PAGADO</th>
+            {showEstado && <th style={{ ...pCellH, textAlign: "center" }}>ESTADO</th>}
+          </tr>
+        </thead>
+        <tbody>
+          {docs.length === 0 && (
+            <tr>
+              <td style={pCell} colSpan={colCount}>(sin documentos para mostrar)</td>
+            </tr>
+          )}
+          {/* Vista plana */}
+          {docs.length > 0 && !groupByCostCenter && docs.map(renderDocRow)}
+          {/* Vista agrupada por centro de costo */}
+          {docs.length > 0 && groupByCostCenter && groups.map((g) => (
+            <React.Fragment key={`g_${g.key}`}>
+              <tr style={{ background: g.isFuel ? "#fde2cc" : "#e2efda" }}>
+                <td style={{ ...pCell, fontWeight: 700 }} colSpan={colCount}>
+                  {g.isFuel ? "⛽ COMBUSTIBLES" : g.razon}
+                  {!g.isFuel && g.rut && (
+                    <span style={{ marginLeft: 8, fontWeight: 400, color: "#555" }}>
+                      · {formatRutForDisplay(g.rut)}
+                    </span>
+                  )}
+                  <span style={{ marginLeft: 8, fontWeight: 400, color: "#555" }}>
+                    · {g.docs.length} doc{g.docs.length === 1 ? "" : "s"}
+                  </span>
+                </td>
+              </tr>
+              {g.docs.map(renderDocRow)}
+              <tr style={{ background: "#f2f2f2" }}>
+                <td style={{ ...pCell, fontWeight: 700 }} colSpan={5}>Subtotal</td>
+                <td style={{ ...pCell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(g.neto)}</td>
+                <td style={{ ...pCell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(g.iva)}</td>
+                <td style={{ ...pCell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(g.total)}</td>
+                <td style={pCell} colSpan={showEstado ? 2 : 1}></td>
+              </tr>
+            </React.Fragment>
+          ))}
+          {docs.length > 0 && (
+            <tr style={{ background: "#c6efce" }}>
+              <td style={{ ...pCell, fontWeight: 700 }} colSpan={5}>TOTAL ({docs.length})</td>
+              <td style={{ ...pCell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(totals?.neto || 0)}</td>
+              <td style={{ ...pCell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(totals?.iva || 0)}</td>
+              <td style={{ ...pCell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(totals?.total || 0)}</td>
+              <td style={pCell} colSpan={showEstado ? 2 : 1}></td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+});
+
 const PrintableRetencionesGroup = forwardRef(function PrintableRetencionesGroup(
   { group, company, periodo },
   ref,
@@ -2249,6 +3161,22 @@ function DocDetailModal({ dteDoc, candidateNcs = [], onClose, onSaveNotes, onSet
             <div className="text-[10px] uppercase tracking-wide text-[var(--color-muted)]">Período</div>
             <div className="font-mono">{dteDoc.periodo || "—"}</div>
           </div>
+          {dteDoc.otroImpuestoCodigo && (
+            <div className="col-span-2">
+              <div className="text-[10px] uppercase tracking-wide text-[var(--color-muted)]">Otro impuesto (SII)</div>
+              <div className="flex items-center gap-2 text-sm">
+                <span className="font-mono text-xs">Cód. {dteDoc.otroImpuestoCodigo}</span>
+                <span>·</span>
+                <span>{otroImpuestoLabel(dteDoc.otroImpuestoCodigo)}</span>
+                <OtroImpChip code={dteDoc.otroImpuestoCodigo} />
+                {dteDoc.otrosImpuestos > 0 && (
+                  <span className="ml-auto text-xs text-[var(--color-muted)]">
+                    Valor: <span className="tabular-nums text-[var(--color-text)]">{fmtCurrency(dteDoc.otrosImpuestos)}</span>
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -2308,6 +3236,33 @@ function DocDetailModal({ dteDoc, candidateNcs = [], onClose, onSaveNotes, onSet
         )}
       </div>
     </Modal>
+  );
+}
+
+// Chip pequeño que muestra el "Otro Impuesto" detectado del SII. Cuando el
+// código es de combustible (28 gasolina, 35 diésel, etc.) lo destacamos en
+// rojo + emoji ⛽ para que se identifique de un pantallazo. Para los demás
+// códigos cae al label genérico. Si no hay código, no renderiza nada.
+function OtroImpChip({ code }) {
+  if (!code) return null;
+  const cat = otroImpuestoCategory(code);
+  const meta = cat ? OTRO_IMP_CATEGORIES[cat] : null;
+  const label = otroImpuestoLabel(code) || `Cód. ${code}`;
+  const colorCls = !meta || meta.color === "muted"
+    ? "bg-[var(--color-surface-2)] text-[var(--color-muted)]"
+    : meta.color === "danger"
+      ? "bg-[var(--color-danger-soft)] text-[var(--color-danger)]"
+      : meta.color === "warning"
+        ? "bg-[var(--color-warning-soft)] text-[var(--color-warning)]"
+        : "bg-[var(--color-accent-soft)] text-[var(--color-accent)]";
+  return (
+    <span
+      title={`Otro impuesto SII código ${code} — ${label}`}
+      className={`ml-1 inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[9px] font-medium ${colorCls}`}
+    >
+      <span>{meta?.emoji || "•"}</span>
+      <span className="hidden sm:inline">{meta?.label || label}</span>
+    </span>
   );
 }
 

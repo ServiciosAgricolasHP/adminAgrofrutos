@@ -372,11 +372,13 @@ Exporta: `parseSiiRcvCsv(buffer, { companyRut })`, `dteTypeLabel(tipo)`, `normal
 
 ### UI
 
-- Tabs **📤 Facturas** (kind=venta — antes "Ventas", renombrado a Facturas), **📥 Compras**, **📑 Retenciones**.
+- Tabs **📤 Facturas** (kind=venta — antes "Ventas", renombrado a Facturas), **📥 Compras**, **📑 Retenciones**, **📊 Resumen** (resumen anual + balance de IVA).
 - **Vista default = mes actual**. Toggle **🔍 Auditoría** habilita navegar todos los períodos.
 - Filtros: período, tipo de DTE, **estado de pago** (chips: Todos / No pagado / Pagado / Solo neto / Solo IVA / Anulada), búsqueda libre con `<datalist>` autocomplete de contrapartes únicas.
 - Cards de totales: Documentos, Neto, IVA, Total. **NCs (tipos 61/112) restan con signo** en los totales y se cuentan aparte en una card específica. Para vista normal: cards adicionales de No pagado del período / Solo neto / Cedidas. Para Retenciones: Facturas con retención / IVA retenido / Total facturado.
 - **Tabla principal sortable**: click en cualquier header (Fecha, Tipo, Folio, Cliente/Proveedor, RUT, Neto, IVA, Total, Abonos, Estado) alterna asc/desc con flecha ▲/▼. Default `fechaEmision desc`. Sort sobre "estado" empuja NCs al final (clave virtual `zz_anulada`).
+- **Columna Estado solo para Facturas (ventas)**: en Compras se oculta (header, celda, chips de filtro de pago y export) porque ahí no hay control de pago real. El control de cobros vive en ventas.
+- **Tipo sin código numérico en pantalla**: la columna Tipo muestra solo el label (Factura / Nota de Crédito / etc.), no el número de tipo DTE. Las NCs van con chip rojo.
 - **Columna Abonos**: muestra el monto pagado + sub-text "Saldo $X" (warning) o "✓ N abonos" (success) cuando está totalmente pagada. NCs: "—".
 
 ### Estados de pago (`PAYMENT_STATUSES`)
@@ -439,6 +441,28 @@ Skip: NCs, `paid`, `cancelled`, **`factored`** (Solo IVA / cedida — se conside
 UI: summary cards por categoría + tabla agrupada con sub-headers de color (`#ffd6d6`/`#fff2cc`/`#dde9ff`), subtotales por grupo, total general destacado al final. Cada fila tiene ℹ para abrir el detalle. Misma toolbar de 4 exports.
 
 **`PrintablePendientes`** off-screen replica el layout para captura. **XLSX** baja workbook con secciones por categoría, subtotales con fórmulas y total general en verde.
+
+### Exports de Facturas / Compras + centro de costo
+
+Las tabs Facturas y Compras tienen la misma toolbar de 4 exports (📋📥🖨📊) que Retenciones, capturando el listado **tal cual filtrado y ordenado** (`sortedFiltered`). Título de print/export: `{kindTitleLabel} — {empresa} — {Mes Año}` (ventas = "Ventas/Facturas", compras = "Compras"). `PrintableDocList` (forwardRef) renderiza off-screen. La columna Estado solo aparece en ventas (`showEstado={kindTab === "venta"}`).
+
+- **Toggle 🗂 Centro de costo** (`groupByCostCenter`, persistido en `localStorage`): agrupa por contraparte. **Afecta tanto el export como el grid en pantalla.** Helper `groupDocsByCostCenter(docs, kind)`:
+  - **Combustibles** (cualquier doc con `otroImpuestoCategory === "combustible"`) se juntan en un grupo virtual único **⛽ COMBUSTIBLES**, ordenado por fecha, que va **primero** (centro de costo agregado, no por proveedor).
+  - El resto se agrupa por contraparte (rutEmisor en compras / rutReceptor en ventas), ordenado por total desc.
+  - Cada grupo lleva header + filas de docs + **fila Subtotal** (Neto/IVA/Total). Total general al final. En XLSX agrupado los totales son **precomputados** (no fórmulas SUM) para no doble-contar las filas de subtotal.
+
+### Detección de combustibles (Otros Impuestos del SII)
+
+`siiCsvParser.js` lee el campo **`Codigo Otro Impuesto`** del RCV. Mapa `OTRO_IMP_CODES` + categorías `OTRO_IMP_CATEGORIES`; códigos **28 / 35 / 271 / 272 = combustible**. El doc queda con `otroImpuestoCodigo` (number) y `otroImpuestoCategory` (string). En la tabla se muestra un `OtroImpChip` y alimenta el agrupado por centro de costo. Helpers: `otroImpuestoLabel(code)`, `otroImpuestoCategory(code)`.
+
+### Resumen anual (tab + balance de IVA)
+
+Tab **📊 Resumen**: vista que **cruza los 12 meses** de un año para la empresa seleccionada, con **selector de año propio** (`resumenYear`, default año actual; opciones derivadas de los períodos de la empresa). Ignora el filtro de mes; en esta tab se ocultan Auditoría, Ver pendientes, los sub-filtros y las cards operativas.
+
+- Memo `resumenData`: por mes acumula ventas/compras **con signo** (NCs restan) separando **IVA Débito** (ventas) de **IVA Crédito** (compras). El IVA de facturas "Solo neto" (`net_only`) **se suma normalmente** al débito/crédito que corresponde — no se trackea aparte.
+- **Métricas explícitas (KPI cards)**: IVA Débito, IVA Crédito, **IVA a pagar (año) = débito − crédito** (highlight; si es negativo → "IVA a favor (remanente)" en verde), + Ventas netas / Compras netas / Documentos.
+- **Tabla mensual** (Ene–Dic + TOTAL): Ventas Neto · IVA Débito · Compras Neto · IVA Crédito · **IVA a pagar del mes**. Meses sin actividad atenuados.
+- Exports: misma toolbar 📋📥🖨📊. `PrintableResumen` (forwardRef) off-screen. XLSX respeta la convención col A vacía width 6 + fila 1 vacía, con el balance de IVA en el encabezado. Filename `Resumen_{empresa}_{año}`.
 
 ## Links útiles
 

@@ -43,6 +43,58 @@ export function dteTypeLabel(tipo) {
   return DTE_TYPES[t] || `Tipo ${tipo}`;
 }
 
+// Tabla de "Códigos Otros Impuestos" del SII. La lista oficial cubre decenas
+// de códigos (alcoholes, tabacos, bebidas, etc.); nos quedamos con los que
+// efectivamente se ven en compras agrícolas + los de combustible (que son
+// los que el usuario quería detectar para taggear automáticamente como
+// "petróleo"). Para los códigos no mapeados, el helper devuelve solo el
+// número crudo y la categoría queda en null.
+//
+// Códigos de combustibles (foco del usuario):
+//   28  → Gasolinas automotrices
+//   35  → Petróleo diésel (vehicular)
+//   271 → Petróleo diésel (industrial)
+//   272 → Otros petróleos
+export const OTRO_IMP_CODES = {
+  14: { label: "Bebidas analcohólicas",         category: "bebidas" },
+  15: { label: "Cervezas, vinos, sidras",       category: "alcohol" },
+  17: { label: "Bebidas analcohólicas azucar.", category: "bebidas" },
+  19: { label: "Licores fina destilación",      category: "alcohol" },
+  23: { label: "Pisco",                          category: "alcohol" },
+  24: { label: "Licores",                        category: "alcohol" },
+  25: { label: "Vinos",                          category: "alcohol" },
+  26: { label: "Tabaco cigarrillos",             category: "tabaco" },
+  27: { label: "Tabaco elaborado",               category: "tabaco" },
+  28: { label: "Gasolinas automotrices",         category: "combustible" },
+  29: { label: "Impuesto adicional",             category: "otros" },
+  35: { label: "Petróleo diésel",                category: "combustible" },
+  271: { label: "Petróleo diésel industrial",    category: "combustible" },
+  272: { label: "Otros petróleos",               category: "combustible" },
+};
+
+// Mapeo categoría → display (emoji + color) usado en chips de la UI.
+export const OTRO_IMP_CATEGORIES = {
+  combustible: { emoji: "⛽", label: "Combustible", color: "danger" },
+  alcohol:     { emoji: "🍷", label: "Alcohol",      color: "warning" },
+  tabaco:      { emoji: "🚬", label: "Tabaco",       color: "warning" },
+  bebidas:     { emoji: "🥤", label: "Bebidas",      color: "accent" },
+  otros:       { emoji: "•",  label: "Otro impuesto", color: "muted" },
+};
+
+export function otroImpuestoLabel(code) {
+  if (code == null || code === "") return null;
+  const n = Number(code);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return OTRO_IMP_CODES[n]?.label || `Código ${n}`;
+}
+
+export function otroImpuestoCategory(code) {
+  if (code == null || code === "") return null;
+  const n = Number(code);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return OTRO_IMP_CODES[n]?.category || null;
+}
+
 // Decodifica el ArrayBuffer del archivo intentando UTF-8 primero. Si el
 // resultado tiene caracteres de reemplazo (U+FFFD) que sugieren mojibake,
 // reintenta con ISO-8859-1 (latin-1). Cubre los dos formatos comunes del SII.
@@ -208,6 +260,9 @@ export function parseSiiRcvCsv(buffer, { companyRut } = {}) {
   const iIvaRec = colIdx(headers, "monto iva recuperable", "monto iva");
   const iIvaNoRec = colIdx(headers, "monto iva no recuperable");
   const iOtroImp = colIdx(headers, "valor otro imp");
+  // Código del "Otro Impuesto" (ej. 28 gasolina, 35 diésel). Sirve para
+  // taggear automáticamente compras de combustible — ver `OTRO_IMP_CODES`.
+  const iOtroImpCod = colIdx(headers, "codigo otro imp", "código otro imp", "cod otro imp");
   const iTotal = colIdx(headers, "monto total");
 
   if (iTipo < 0 || iFolio < 0 || iFecha < 0 || iRutContraparte < 0 || iTotal < 0) {
@@ -236,6 +291,8 @@ export function parseSiiRcvCsv(buffer, { companyRut } = {}) {
       const ivaRec = iIvaRec >= 0 ? parseAmount(cols[iIvaRec]) : 0;
       const ivaNoRec = iIvaNoRec >= 0 ? parseAmount(cols[iIvaNoRec]) : 0;
       const otroImp = iOtroImp >= 0 ? parseAmount(cols[iOtroImp]) : 0;
+      const otroImpCodRaw = iOtroImpCod >= 0 ? cols[iOtroImpCod] : "";
+      const otroImpCod = otroImpCodRaw ? Number(String(otroImpCodRaw).trim()) || null : null;
       const total = parseAmount(cols[iTotal]);
 
       // En ventas el emisor somos nosotros (companyRut si lo pasaron, sino vacío
@@ -265,6 +322,8 @@ export function parseSiiRcvCsv(buffer, { companyRut } = {}) {
         neto,
         iva: ivaRec + ivaNoRec,
         otrosImpuestos: otroImp,
+        otroImpuestoCodigo: otroImpCod,
+        otroImpuestoCategory: otroImpuestoCategory(otroImpCod),
         total,
         source: "sii_import",
       };
