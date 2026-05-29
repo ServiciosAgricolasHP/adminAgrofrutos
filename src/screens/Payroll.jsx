@@ -157,10 +157,7 @@ export default function Payroll() {
           const type = laborTypeMap.get(wd.laborId);
           let amount = 0;
           if (type === "trato") {
-            const tiers = wd.tiers ? Object.values(wd.tiers) : null;
-            amount = tiers
-              ? tiers.reduce((s, t) => s + (Number(t?.amount) || 0), 0)
-              : Number(wd.amount) || 0;
+            amount = getTratoTierTotals(wd).amount;
           } else {
             amount = Number(wd.amount) || 0;
           }
@@ -1834,17 +1831,10 @@ function buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut, catalogs
         for (const tier of tiersForDay) {
           if (tier.unit != null) tratoUnits.add(tier.unit);
         }
-        if (wd.tiers) {
-          for (const [idx, tt] of Object.entries(wd.tiers)) {
-            const i = Number(idx);
-            const q = Number(tt?.qty) || 0;
-            const a = Number(tt?.amount) || 0;
-            if (!q && !a) continue;
-            if (!c.byTier[idx]) c.byTier[idx] = { index: i, jornadas: 0, amount: 0 };
-            c.byTier[idx].jornadas += q;
-            c.byTier[idx].amount += a;
-          }
-        } else if (t.qty || t.amount) {
+        // Desglose por tramo del comprobante. Cada doc de trato es single-tier
+        // (clave "0") y `t` ya viene reconciliado (top-level por sobre el espejo
+        // `tiers`), así que lo usamos para que el desglose cuadre con el total.
+        if (t.qty || t.amount) {
           const idx = "0";
           if (!c.byTier[idx]) c.byTier[idx] = { index: 0, jornadas: 0, amount: 0 };
           c.byTier[idx].jornadas += t.qty;

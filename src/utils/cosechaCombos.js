@@ -233,10 +233,25 @@ export function formatLaborDayPrice(labor, date, dayPrices, catalogs = {}) {
   return "";
 }
 
-// Get total qty and amount from a workday record (supports both legacy and new format)
+// Total de qty/amount de un workday de trato.
+//
+// Un workday de trato tiene DOS representaciones del mismo dato:
+//   - top-level `qty`/`amount`: lo que muestra el grid de la faena y lo que el
+//     editor SIEMPRE escribe en cada edición.
+//   - `tiers["0"]`: un espejo denormalizado que se agregó después. Algunos
+//     flujos de escritura pueden actualizarlo y otros no, así que puede quedar
+//     DESINCRONIZADO respecto del top-level (bug: grid muestra el valor nuevo
+//     pero resumen/nómina —que leían el espejo— mostraban el viejo).
+//
+// En el modelo actual cada tier es un documento aparte y `tiers` siempre tiene
+// una sola clave "0", así que el top-level es la fuente confiable. Lo
+// priorizamos para que resumen, nómina y grid coincidan. Sólo sumamos `tiers`
+// cuando hay más de un tier en el mismo doc (caso legacy que no debería
+// ocurrir) o cuando el doc no trae qty/amount top-level.
 export function getTratoTierTotals(wd) {
   if (!wd) return { qty: 0, amount: 0 };
-  if (wd.tiers) {
+  const tierKeys = wd.tiers ? Object.keys(wd.tiers) : [];
+  if (tierKeys.length > 1) {
     let qty = 0, amount = 0;
     for (const t of Object.values(wd.tiers)) {
       qty += Number(t?.qty) || 0;
@@ -244,5 +259,12 @@ export function getTratoTierTotals(wd) {
     }
     return { qty, amount };
   }
-  return { qty: Number(wd.qty) || 0, amount: Number(wd.amount) || 0 };
+  if (wd.qty != null || wd.amount != null) {
+    return { qty: Number(wd.qty) || 0, amount: Number(wd.amount) || 0 };
+  }
+  if (tierKeys.length === 1) {
+    const t = wd.tiers[tierKeys[0]];
+    return { qty: Number(t?.qty) || 0, amount: Number(t?.amount) || 0 };
+  }
+  return { qty: 0, amount: 0 };
 }

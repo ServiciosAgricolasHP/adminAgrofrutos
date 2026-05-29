@@ -5,7 +5,7 @@ import { faenasService, subfaenasService, cyclesService, workersService } from "
 import { tripsService } from "../services/transportsService";
 import { useCarriers } from "../contexts/CarriersContext";
 import { useCatalogs } from "../contexts/CatalogsContext";
-import { tratoTypeLabel, cosechaUnit, qualityLabel, containerLabel } from "../utils/cosechaCombos";
+import { tratoTypeLabel, cosechaUnit, qualityLabel, containerLabel, getTratoTierTotals } from "../utils/cosechaCombos";
 import { useIsMobile } from "../hooks/useIsMobile";
 
 // ============================================================================
@@ -794,11 +794,7 @@ function DayDetailDrawer({ date, subfaenaId, workdays, trips, cycleById, subfaen
         cosechaContainers.add(Number(wd.containerY) || 0);
       } else if (t === "trato") {
         tratoTypes.add(labor?.tratoType ?? 0);
-        if (wd.tiers && typeof wd.tiers === "object") {
-          for (const tier of Object.values(wd.tiers)) tratoQty += Number(tier?.qty) || 0;
-        } else {
-          tratoQty += Number(wd.qty) || 0;
-        }
+        tratoQty += getTratoTierTotals(wd).qty;
       } else if (t === "tratoHE") {
         jornadas += Number(wd.qty) || 0;
         overtimeHours += Number(wd.overtimeHours) || 0;
@@ -905,13 +901,7 @@ function DayDetailDrawer({ date, subfaenaId, workdays, trips, cycleById, subfaen
         q.kilos += kg;
         q.amount += wdAmount;
       } else if (t === "trato") {
-        // qty puede venir directo o sumar todos los tiers
-        let q = 0;
-        if (wd.tiers && typeof wd.tiers === "object") {
-          for (const tier of Object.values(wd.tiers)) q += Number(tier?.qty) || 0;
-        } else {
-          q = Number(wd.qty) || 0;
-        }
+        const q = getTratoTierTotals(wd).qty;
         e.tratoQty += q;
         wEntry.tratoQty += q;
       } else if (t === "tratoHE") {
