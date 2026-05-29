@@ -189,6 +189,49 @@ Resumen de pago a un transportista (lote de `transports`).
 | `paidAt`, `paidBy` | ts?, string? | |
 | `notes` | string? | |
 
+### `companies`
+Empresas (emisoras/receptoras) del módulo de Facturación. Multi-empresa: el usuario elige cuál opera y se persiste en `localStorage`.
+| Campo | Tipo | Notas |
+|---|---|---|
+| `id` (docId) | string | autoId |
+| `rut` | string | normalizado `"76123456-7"` (`normalizeRut`) |
+| `razonSocial` | string | |
+| `alias` | string | display; default = `razonSocial` |
+| `enabled` | bool | |
+
+### `dteDocuments`
+Documento tributario electrónico (factura / boleta / NC / etc.) importado del **RCV del SII**. **DocId determinístico** (`buildDteDocId`) para que reimportar el mismo período sea idempotente:
+- ventas: `{companyId}_V_{tipo}_{folio}`
+- compras: `{companyId}_C_{rutProveedorNumérico}_{tipo}_{folio}`
+
+| Campo | Tipo | Notas |
+|---|---|---|
+| `id` (docId) | string | determinístico (ver arriba) |
+| `companyId` | ref→`companies` | empresa dueña |
+| `companyAlias` | string | snapshot |
+| `kind` | `"venta"` \| `"compra"` | detectado del header del CSV |
+| `tipo` | number | código DTE del SII (33, 34, 61, 112, …) |
+| `tipoLabel` | string | label legible (`dteTypeLabel`) |
+| `folio` | number | |
+| `fechaEmision` | string (YYYY-MM-DD) | |
+| `periodo` | string (YYYY-MM) | derivado de `fechaEmision`; clave de filtro/agrupación (incl. tab Resumen) |
+| `rutEmisor`, `razonSocialEmisor` | string | en ventas el emisor somos nosotros |
+| `rutReceptor`, `razonSocialReceptor` | string | en compras el receptor somos nosotros |
+| `exento`, `neto`, `iva`, `otrosImpuestos`, `total` | number | montos. **NCs (61/112) restan con signo** en los totales de la UI |
+| `otroImpuestoCodigo` | number? | "Código Otro Impuesto" del RCV (**28/35/271/272 = combustible**) |
+| `otroImpuestoCategory` | string? | `combustible` \| `alcohol` \| `tabaco` \| `bebidas` \| `otros` |
+| `source` | `"sii_import"` | |
+| `sourceFile` | string | filename original del CSV |
+| `paymentStatus` | `"unpaid"`\|`"paid"`\|`"net_only"`\|`"factored"`\|`"cancelled"` | default `unpaid` al importar; **preservado al reimportar** |
+| `amountPaid` | number | denormalizado = `Σ payments[].amount` |
+| `payments` | `Payment[]` | abonos (ver abajo) |
+| `notes` | string? | notas editables / auditoría de anulación por NC |
+| `importedAt`, `importedBy` | ts, string? | sello del import (writeBatch chunks de 450) |
+
+`Payment` (embebido en `dteDocuments.payments`):
+- `id` (local), `date` (YYYY-MM-DD), `kind` (`abono` \| `neto` \| `iva` \| `total`), `amount: number`, `notes: string`
+- **Invariante**: `Σ amount ≤ total` (validado al guardar).
+
 ### `groupLeader`
 Listado curado de líderes de grupo disponibles para asignación. La idea es que la lista no crezca con valores ad-hoc.
 | Campo | Tipo | Notas |
@@ -240,6 +283,7 @@ erDiagram
     CARRIERS ||--o{ TRANSPORTS : "ejecuta"
     CARRIERS ||--o{ TRANSPORT_PAYMENTS : "cobra"
     TRANSPORT_PAYMENTS ||--o{ TRANSPORTS : "agrupa (paymentId)"
+    COMPANIES ||--o{ DTE_DOCUMENTS : "tiene (companyId)"
     USERS ||--o| FAENAS : "layout pref"
     LOGS }o--|| WORKER : "audita"
     LOGS }o--|| CYCLES : "audita"
@@ -320,6 +364,26 @@ erDiagram
         number total
         string status
     }
+    COMPANIES {
+        string id PK
+        string rut
+        string razonSocial
+        string alias
+        bool   enabled
+    }
+    DTE_DOCUMENTS {
+        string id PK "determinístico"
+        string companyId FK
+        string kind
+        number tipo
+        number folio
+        string periodo
+        number neto
+        number iva
+        number total
+        string paymentStatus
+        array  payments
+    }
     USERS {
         string id PK "uid"
         map    faenaLayout
@@ -343,4 +407,5 @@ erDiagram
 - **workday.payrollId**: tag inverso. Una nómina "reclama" sus workdays vía `workdayIds[]` y a la vez cada workday queda apuntando a la nómina.
 - **advance.status / appliedPayrollId**: paralelo al de workdays — se "aplican" a una nómina y se "restauran" a `pending` si la nómina se borra.
 - **transport.paymentId ↔ transportPayment.tripIds**: misma idea de tag bidireccional para transportistas.
+- **company → dteDocuments** (`companyId`): los DTE cuelgan de una empresa. El docId es **determinístico** (no autoId) → reimportar el mismo período es idempotente; el "replace por período" borra huérfanos y preserva `paymentStatus`/`payments` existentes.
 - **catalogs / users**: docIds estables (nombre / uid), no autoId.
