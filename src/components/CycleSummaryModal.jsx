@@ -2649,7 +2649,12 @@ function LaborTable({
                           onChange={(e) => handleField(r, "qty", e.target.value)}
                           style={cobrarInputStyle}
                         />
-                      ) : formatRowMetric(r, laborType, catalogs)}
+                      ) : (
+                        // Cuando NO está en edit, `r.qty` es el original — para que el
+                        // display refleje los overrides aplicados (cobrar mode) pasamos
+                        // el `qty` ya resuelto (= chargedQty en cobrar, qty en pagar).
+                        formatRowMetric({ ...r, qty, overtimeHours: heHrs }, laborType, catalogs)
+                      )}
                     </td>
                   )
                 )}
