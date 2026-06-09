@@ -535,7 +535,7 @@ export default function CycleSummaryModal({
   // muestran las filas de IVA 19%. Algunos cobros van sin IVA (servicios
   // exentos, boletas, acuerdos netos) — el toggle queda persistido por ciclo
   // así no hay que setearlo cada vez.
-  const [cobrar, setCobrar] = useState({ labors: {}, carriers: {}, withIva: true });
+  const [cobrar, setCobrar] = useState({ labors: {}, carriers: {}, withIva: true, discount: 0, discountNote: "" });
   const [titles, setTitles] = useState({ main: "DETALLE DE JORNADA", subtitle: "", laborNames: {}, carrierNames: {} });
   const [showTitleEditor, setShowTitleEditor] = useState(false);
   const [showCobrarEditor, setShowCobrarEditor] = useState(true);
@@ -557,9 +557,10 @@ export default function CycleSummaryModal({
   useEffect(() => {
     if (!open || !cycle?.id) return;
     setCobrar(() => {
-      const loaded = loadJSON(cobrarStorageKey(cycle.id), { labors: {}, carriers: {}, withIva: true });
-      // Backfill para ciclos guardados antes de que existiera el toggle.
-      return { withIva: true, ...loaded };
+      const loaded = loadJSON(cobrarStorageKey(cycle.id), { labors: {}, carriers: {}, withIva: true, discount: 0, discountNote: "" });
+      // Backfill para ciclos guardados antes de que existieran los campos
+      // (withIva, discount, discountNote — todos defaults seguros).
+      return { withIva: true, discount: 0, discountNote: "", ...loaded };
     });
     const defaultSubtitle = [faena?.name, subfaena?.name, cycle.label].filter(Boolean).join(" · ");
     setTitles(loadJSON(titlesStorageKey(cycle.id), {
@@ -604,6 +605,19 @@ export default function CycleSummaryModal({
   const setCobrarWithIva = (next) => {
     setCobrar((prev) => {
       const n = { ...prev, withIva: !!next };
+      saveJSON(cobrarStorageKey(cycle?.id), n);
+      return n;
+    });
+  };
+
+  // Descuento global aplicado al neto del cobro (antes del IVA, si está activo).
+  // `patch` puede traer `amount` (number) y/o `note` (string). Se persiste con
+  // el resto del estado de cobrar por ciclo en localStorage.
+  const setCobrarDiscount = (patch) => {
+    setCobrar((prev) => {
+      const n = { ...prev };
+      if (patch.amount !== undefined) n.discount = Math.max(0, Number(patch.amount) || 0);
+      if (patch.note !== undefined) n.discountNote = String(patch.note || "");
       saveJSON(cobrarStorageKey(cycle?.id), n);
       return n;
     });
@@ -1157,12 +1171,21 @@ export default function CycleSummaryModal({
     });
   }, [transportData, cobrar.carriers]);
 
-  const grandTotalCobrar = useMemo(() => {
+  // Subtotal del cobro = suma de labors + carriers incluidos. NO descuenta nada.
+  // Se usa como fila "Subtotal" en el desglose cuando hay descuento aplicado.
+  const subtotalCobrar = useMemo(() => {
     let sum = 0;
     for (const cl of cobrarLabors) if (cl.include) sum += cl.chargedTotals?.amount || 0;
     for (const cc of cobrarCarriers) if (cc.include) sum += cc.chargedTotalAmount || 0;
     return sum;
   }, [cobrarLabors, cobrarCarriers]);
+  // Grand total final = subtotal − descuento. Sobre este valor se calculan el
+  // IVA (19%) y el total con IVA incluido, así que el descuento queda aplicado
+  // antes de impuestos como pidió el usuario.
+  const grandTotalCobrar = useMemo(
+    () => Math.max(0, subtotalCobrar - (Number(cobrar.discount) || 0)),
+    [subtotalCobrar, cobrar.discount],
+  );
 
   // Wrappers que dispatchan a updateRow / updateExtra según el tipo de fila.
   // Simplifican la API que recibe LaborTable / TransportTable: ellos sólo
@@ -1693,6 +1716,39 @@ export default function CycleSummaryModal({
       }
       const totalEnd = totalRow - 1;
 
+      // Si hay descuento (cobrar), insertamos Subtotal + Descuento antes del
+      // total final. El total final = subtotal − descuento. Sobre ese total se
+      // calcula el IVA si está activo.
+      const discountValue = mode === "cobrar" ? Math.max(0, Number(cobrar.discount) || 0) : 0;
+      const discountNoteValue = mode === "cobrar" ? (cobrar.discountNote || "") : "";
+      let subtotalRow = null;
+      let discountRow = null;
+      if (discountValue > 0) {
+        subtotalRow = totalRow;
+        wsTotal.getCell(`B${subtotalRow}`).value = "Subtotal";
+        wsTotal.getCell(`B${subtotalRow}`).font = { bold: true };
+        const sub = wsTotal.getCell(`C${subtotalRow}`);
+        if (totalEnd >= totalStart) {
+          sub.value = { formula: `SUM(C${totalStart}:C${totalEnd})`, result: subtotalCobrar };
+        } else {
+          sub.value = 0;
+        }
+        sub.numFmt = moneyFmt;
+        sub.font = { bold: true };
+        totalRow++;
+
+        discountRow = totalRow;
+        wsTotal.getCell(`B${discountRow}`).value = discountNoteValue
+          ? `Descuento · ${discountNoteValue}`
+          : "Descuento";
+        wsTotal.getCell(`B${discountRow}`).font = { bold: true, color: { argb: "FFBB0000" } };
+        const disc = wsTotal.getCell(`C${discountRow}`);
+        disc.value = -discountValue;
+        disc.numFmt = moneyFmt;
+        disc.font = { bold: true, color: { argb: "FFBB0000" } };
+        totalRow++;
+      }
+
       const grandRow = totalRow;
       wsTotal.getCell(`B${grandRow}`).value = mode === "cobrar"
         ? (cobrar.withIva !== false ? "TOTAL A FACTURAR" : "TOTAL A COBRAR (sin IVA)")
@@ -1701,7 +1757,10 @@ export default function CycleSummaryModal({
       wsTotal.getCell(`B${grandRow}`).fill = titleFill;
       const grand = wsTotal.getCell(`C${grandRow}`);
       const grandFallback = mode === "cobrar" ? grandTotalCobrar : grandTotalPagar;
-      if (totalEnd >= totalStart) {
+      if (subtotalRow != null && discountRow != null) {
+        // Total final = Subtotal + Descuento (descuento es negativo en su celda).
+        grand.value = { formula: `C${subtotalRow}+C${discountRow}`, result: grandFallback };
+      } else if (totalEnd >= totalStart) {
         grand.value = { formula: `SUM(C${totalStart}:C${totalEnd})`, result: grandFallback };
       } else {
         grand.value = 0;
@@ -1924,6 +1983,10 @@ export default function CycleSummaryModal({
           carriers={mode === "cobrar" ? cobrarCarriers : transportData}
           carrierById={carrierById}
           grandTotal={mode === "cobrar" ? grandTotalCobrar : grandTotalPagar}
+          subtotal={mode === "cobrar" ? subtotalCobrar : null}
+          discount={mode === "cobrar" ? (Number(cobrar.discount) || 0) : 0}
+          discountNote={mode === "cobrar" ? (cobrar.discountNote || "") : ""}
+          onChangeDiscount={mode === "cobrar" ? setCobrarDiscount : undefined}
           catalogs={catalogs}
           dayPrices={dayPrices}
           editLaborRow={editCobrarLaborRow}
@@ -2351,6 +2414,10 @@ const PrintableSummary = forwardRef(function PrintableSummary(
     carriers,
     carrierById,
     grandTotal,
+    subtotal = null,
+    discount = 0,
+    discountNote = "",
+    onChangeDiscount,
     catalogs,
     dayPrices = {},
     editLaborRow,
@@ -2444,9 +2511,55 @@ const PrintableSummary = forwardRef(function PrintableSummary(
         );
       })}
 
-      {/* Grand total — en modo cobrar incluye desglose de IVA (19%) abajo. */}
+      {/* Grand total — en modo cobrar incluye opcionalmente fila de Subtotal,
+          Descuento, y desglose de IVA (19%) abajo. */}
       <table style={{ borderCollapse: "collapse", width: "100%", marginTop: 12 }}>
         <tbody>
+          {/* Subtotal (pre-descuento) — solo en cobrar cuando hay descuento o se
+              está editando, para evidenciar el origen del número antes del
+              descuento. */}
+          {mode === "cobrar" && (discount > 0 || editMode) && subtotal != null && (
+            <tr style={{ background: "#fff" }}>
+              <td style={{ ...cell, fontWeight: 600 }}>Subtotal</td>
+              <td style={{ ...cell, textAlign: "right", fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
+                {fmtCurrency(subtotal)}
+              </td>
+            </tr>
+          )}
+          {/* Descuento — visible cuando hay valor o cuando se está editando.
+              En editMode pone inputs (monto + motivo). Fuera de editMode lo
+              muestra como texto con signo negativo. */}
+          {mode === "cobrar" && (discount > 0 || editMode) && (
+            <tr style={{ background: "#fffbeb" }}>
+              <td style={{ ...cell, fontWeight: 600 }}>
+                Descuento
+                {editMode ? (
+                  <input
+                    type="text"
+                    placeholder="motivo (opcional)"
+                    value={discountNote || ""}
+                    onChange={(e) => onChangeDiscount && onChangeDiscount({ note: e.target.value })}
+                    style={{ ...cobrarDateInputStyle, marginLeft: 8, width: 220 }}
+                  />
+                ) : (
+                  discountNote ? <span style={{ marginLeft: 8, fontWeight: 400, color: "#666" }}>· {discountNote}</span> : null
+                )}
+              </td>
+              <td style={{ ...cell, textAlign: "right", fontWeight: 600, fontVariantNumeric: "tabular-nums", color: "#b00" }}>
+                {editMode ? (
+                  <input
+                    type="number"
+                    value={discount > 0 ? discount : ""}
+                    placeholder="0"
+                    onChange={(e) => onChangeDiscount && onChangeDiscount({ amount: e.target.value })}
+                    style={{ ...cobrarInputStyle, width: 120 }}
+                  />
+                ) : (
+                  `− ${fmtCurrency(discount)}`
+                )}
+              </td>
+            </tr>
+          )}
           <tr style={{ background: "#a9d08e" }}>
             <td style={{ ...cell, fontWeight: 700, fontSize: 14 }}>
               {mode === "cobrar"
