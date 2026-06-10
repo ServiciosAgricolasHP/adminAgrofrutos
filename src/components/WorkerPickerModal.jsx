@@ -41,7 +41,7 @@ function emptyNewWorker() {
   };
 }
 
-export default function WorkerPickerModal({ open, onClose, onPick, excludeRuts = [], allowTemp = false, title = "Agregar trabajador", availableLeaders = [] }) {
+export default function WorkerPickerModal({ open, onClose, onPick, excludeRuts = [], allowTemp = false, title = "Agregar trabajador", availableLeaders = [], excludedLabel = "Ya en la labor" }) {
   const [allWorkers, setAllWorkers] = useState([]);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
@@ -94,6 +94,11 @@ export default function WorkerPickerModal({ open, onClose, onPick, excludeRuts =
   // case-insensitive. Matches against name OR rut so the user can type either
   // "Perez" (matches any worker whose name contains "Perez", including those
   // with it as a last name) or partial RUT digits.
+  //
+  // Los trabajadores en `excluded` (ya en la labor/ciclo) **sí** aparecen en
+  // los resultados, marcados como excluidos. Así el usuario que escribe el
+  // nombre y no lo encuentra no duda si tiene que crearlo — lo ve listado con
+  // el tag "Ya en la labor".
   const filtered = useMemo(() => {
     if (!queryReady) return [];
     const q = norm(queryRaw);
@@ -101,14 +106,13 @@ export default function WorkerPickerModal({ open, onClose, onPick, excludeRuts =
     const qDigits = queryRaw.replace(/[.\s-]/g, "").toLowerCase();
     const out = [];
     for (const w of allWorkers) {
-      if (excluded.has(w.id)) continue;
       const nameMatch = norm(w.name).includes(q);
       const rutMatch = isDigits && String(w.id).toLowerCase().includes(qDigits);
       if (nameMatch || rutMatch) out.push(w);
       if (out.length >= 50) break;
     }
     return out;
-  }, [queryReady, queryRaw, allWorkers, excluded]);
+  }, [queryReady, queryRaw, allWorkers]);
 
   const accType = Number(newWorker.bd_accountType);
   const isCash = String(newWorker.bd_bankCode).toUpperCase() === CASH_BANK_CODE;
@@ -274,17 +278,33 @@ export default function WorkerPickerModal({ open, onClose, onPick, excludeRuts =
               <div className="p-3 text-sm text-[var(--color-muted)]">Sin coincidencias.</div>
             ) : (
               <ul className="divide-y divide-[var(--color-border)]">
-                {filtered.map((w) => (
-                  <li key={w.id}>
-                    <button
-                      onClick={() => onPick({ rut: w.id, name: w.name })}
-                      className="flex w-full items-center justify-between px-3 py-2 text-left hover:bg-[var(--color-accent-soft)]"
-                    >
-                      <span className="text-sm font-medium">{w.name}</span>
-                      <span className="text-xs text-[var(--color-muted)]">{formatRutForDisplay(w.id)}</span>
-                    </button>
-                  </li>
-                ))}
+                {filtered.map((w) => {
+                  const isExcluded = excluded.has(w.id);
+                  return (
+                    <li key={w.id}>
+                      <button
+                        onClick={() => !isExcluded && onPick({ rut: w.id, name: w.name })}
+                        disabled={isExcluded}
+                        title={isExcluded ? excludedLabel : ""}
+                        className={`flex w-full items-center justify-between gap-2 px-3 py-2 text-left ${
+                          isExcluded
+                            ? "cursor-not-allowed opacity-60"
+                            : "hover:bg-[var(--color-accent-soft)]"
+                        }`}
+                      >
+                        <span className="flex min-w-0 items-center gap-2">
+                          <span className="text-sm font-medium">{w.name}</span>
+                          {isExcluded && (
+                            <span className="rounded-full bg-[var(--color-success-soft)] px-2 py-0.5 text-[10px] font-medium text-[var(--color-success)]">
+                              ✓ {excludedLabel}
+                            </span>
+                          )}
+                        </span>
+                        <span className="text-xs text-[var(--color-muted)] whitespace-nowrap">{formatRutForDisplay(w.id)}</span>
+                      </button>
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </div>
