@@ -535,7 +535,7 @@ export default function CycleSummaryModal({
   // muestran las filas de IVA 19%. Algunos cobros van sin IVA (servicios
   // exentos, boletas, acuerdos netos) — el toggle queda persistido por ciclo
   // así no hay que setearlo cada vez.
-  const [cobrar, setCobrar] = useState({ labors: {}, carriers: {}, withIva: true, discount: 0, discountNote: "" });
+  const [cobrar, setCobrar] = useState({ labors: {}, carriers: {}, withIva: true, discount: 0, discountNote: "", pendingBalance: 0, pendingBalanceNote: "" });
   const [titles, setTitles] = useState({ main: "DETALLE DE JORNADA", subtitle: "", laborNames: {}, carrierNames: {} });
   const [showTitleEditor, setShowTitleEditor] = useState(false);
   const [showCobrarEditor, setShowCobrarEditor] = useState(true);
@@ -557,10 +557,10 @@ export default function CycleSummaryModal({
   useEffect(() => {
     if (!open || !cycle?.id) return;
     setCobrar(() => {
-      const loaded = loadJSON(cobrarStorageKey(cycle.id), { labors: {}, carriers: {}, withIva: true, discount: 0, discountNote: "" });
+      const loaded = loadJSON(cobrarStorageKey(cycle.id), { labors: {}, carriers: {}, withIva: true, discount: 0, discountNote: "", pendingBalance: 0, pendingBalanceNote: "" });
       // Backfill para ciclos guardados antes de que existieran los campos
       // (withIva, discount, discountNote — todos defaults seguros).
-      return { withIva: true, discount: 0, discountNote: "", ...loaded };
+      return { withIva: true, discount: 0, discountNote: "", pendingBalance: 0, pendingBalanceNote: "", ...loaded };
     });
     const defaultSubtitle = [faena?.name, subfaena?.name, cycle.label].filter(Boolean).join(" · ");
     setTitles(loadJSON(titlesStorageKey(cycle.id), {
@@ -618,6 +618,18 @@ export default function CycleSummaryModal({
       const n = { ...prev };
       if (patch.amount !== undefined) n.discount = Math.max(0, Number(patch.amount) || 0);
       if (patch.note !== undefined) n.discountNote = String(patch.note || "");
+      saveJSON(cobrarStorageKey(cycle?.id), n);
+      return n;
+    });
+  };
+
+  // Saldo pendiente global aplicado al neto del cobro (suma, antes del IVA).
+  // Espejo simétrico del descuento — `patch` puede traer `amount` y/o `note`.
+  const setCobrarPendingBalance = (patch) => {
+    setCobrar((prev) => {
+      const n = { ...prev };
+      if (patch.amount !== undefined) n.pendingBalance = Math.max(0, Number(patch.amount) || 0);
+      if (patch.note !== undefined) n.pendingBalanceNote = String(patch.note || "");
       saveJSON(cobrarStorageKey(cycle?.id), n);
       return n;
     });
@@ -1182,6 +1194,8 @@ export default function CycleSummaryModal({
   // Grand total final = subtotal − descuento. Sobre este valor se calculan el
   // IVA (19%) y el total con IVA incluido, así que el descuento queda aplicado
   // antes de impuestos como pidió el usuario.
+  // Neto del cobro (pre-IVA). El saldo pendiente NO entra acá — se suma
+  // después del IVA (ver bloque del XLSX y del PrintableSummary).
   const grandTotalCobrar = useMemo(
     () => Math.max(0, subtotalCobrar - (Number(cobrar.discount) || 0)),
     [subtotalCobrar, cobrar.discount],
@@ -1721,8 +1735,12 @@ export default function CycleSummaryModal({
       // calcula el IVA si está activo.
       const discountValue = mode === "cobrar" ? Math.max(0, Number(cobrar.discount) || 0) : 0;
       const discountNoteValue = mode === "cobrar" ? (cobrar.discountNote || "") : "";
+      const pendingValue = mode === "cobrar" ? Math.max(0, Number(cobrar.pendingBalance) || 0) : 0;
+      const pendingNoteValue = mode === "cobrar" ? (cobrar.pendingBalanceNote || "") : "";
       let subtotalRow = null;
       let discountRow = null;
+      // El saldo pendiente NO va acá — se aplica DESPUÉS del IVA (al final).
+      // Solo el descuento entra antes del grand total.
       if (discountValue > 0) {
         subtotalRow = totalRow;
         wsTotal.getCell(`B${subtotalRow}`).value = "Subtotal";
@@ -1758,7 +1776,6 @@ export default function CycleSummaryModal({
       const grand = wsTotal.getCell(`C${grandRow}`);
       const grandFallback = mode === "cobrar" ? grandTotalCobrar : grandTotalPagar;
       if (subtotalRow != null && discountRow != null) {
-        // Total final = Subtotal + Descuento (descuento es negativo en su celda).
         grand.value = { formula: `C${subtotalRow}+C${discountRow}`, result: grandFallback };
       } else if (totalEnd >= totalStart) {
         grand.value = { formula: `SUM(C${totalStart}:C${totalEnd})`, result: grandFallback };
@@ -1771,6 +1788,10 @@ export default function CycleSummaryModal({
 
       // En modo cobrar agregamos abajo: Valor IVA (19%) y total con IVA incluido.
       // Si el toggle "Sin IVA" está activo, se omiten estas filas.
+      let postIvaRow = grandRow; // referencia al "subtotal" para sumar el saldo
+      const postIvaFallback = (cobrar.withIva !== false)
+        ? Math.round((Number(grandFallback) || 0) * 1.19)
+        : Number(grandFallback) || 0;
       if (mode === "cobrar" && cobrar.withIva !== false) {
         const ivaRow = grandRow + 1;
         wsTotal.getCell(`B${ivaRow}`).value = "Valor IVA (19%)";
@@ -1785,10 +1806,48 @@ export default function CycleSummaryModal({
         wsTotal.getCell(`B${totIvaRow}`).font = { bold: true, size: 12 };
         wsTotal.getCell(`B${totIvaRow}`).fill = titleFill;
         const totIva = wsTotal.getCell(`C${totIvaRow}`);
-        totIva.value = { formula: `C${grandRow}+C${ivaRow}`, result: Math.round((Number(grandFallback) || 0) * 1.19) };
+        totIva.value = { formula: `C${grandRow}+C${ivaRow}`, result: postIvaFallback };
         totIva.numFmt = moneyFmt;
         totIva.font = { bold: true, size: 12 };
         totIva.fill = titleFill;
+        postIvaRow = totIvaRow;
+        totalRow = totIvaRow + 1;
+      } else {
+        totalRow = grandRow + 1;
+      }
+
+      // Saldo pendiente — se aplica DESPUÉS del IVA. Si hay saldo > 0,
+      // agregamos fila de Saldo pendiente y una fila de TOTAL FINAL que suma
+      // el total post-IVA + el saldo.
+      if (mode === "cobrar" && pendingValue > 0) {
+        const pendingRow = totalRow;
+        wsTotal.getCell(`B${pendingRow}`).value = pendingNoteValue
+          ? `Saldo pendiente · ${pendingNoteValue}`
+          : "Saldo pendiente";
+        wsTotal.getCell(`B${pendingRow}`).font = { bold: true, color: { argb: "FF0A7D3B" } };
+        const pend = wsTotal.getCell(`C${pendingRow}`);
+        pend.value = pendingValue;
+        pend.numFmt = moneyFmt;
+        pend.font = { bold: true, color: { argb: "FF0A7D3B" } };
+        totalRow++;
+
+        const finalRow = totalRow;
+        wsTotal.getCell(`B${finalRow}`).value = "TOTAL FINAL";
+        wsTotal.getCell(`B${finalRow}`).font = { bold: true, size: 12, color: { argb: "FFFFFFFF" } };
+        wsTotal.getCell(`B${finalRow}`).fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: "FF6AA84F" },
+        };
+        const fin = wsTotal.getCell(`C${finalRow}`);
+        fin.value = { formula: `C${postIvaRow}+C${pendingRow}`, result: postIvaFallback + pendingValue };
+        fin.numFmt = moneyFmt;
+        fin.font = { bold: true, size: 12, color: { argb: "FFFFFFFF" } };
+        fin.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: "FF6AA84F" },
+        };
       }
 
       wsTotal.getColumn(2).width = 32;
@@ -1987,6 +2046,9 @@ export default function CycleSummaryModal({
           discount={mode === "cobrar" ? (Number(cobrar.discount) || 0) : 0}
           discountNote={mode === "cobrar" ? (cobrar.discountNote || "") : ""}
           onChangeDiscount={mode === "cobrar" ? setCobrarDiscount : undefined}
+          pendingBalance={mode === "cobrar" ? (Number(cobrar.pendingBalance) || 0) : 0}
+          pendingBalanceNote={mode === "cobrar" ? (cobrar.pendingBalanceNote || "") : ""}
+          onChangePendingBalance={mode === "cobrar" ? setCobrarPendingBalance : undefined}
           catalogs={catalogs}
           dayPrices={dayPrices}
           editLaborRow={editCobrarLaborRow}
@@ -2418,6 +2480,9 @@ const PrintableSummary = forwardRef(function PrintableSummary(
     discount = 0,
     discountNote = "",
     onChangeDiscount,
+    pendingBalance = 0,
+    pendingBalanceNote = "",
+    onChangePendingBalance,
     catalogs,
     dayPrices = {},
     editLaborRow,
@@ -2518,7 +2583,7 @@ const PrintableSummary = forwardRef(function PrintableSummary(
           {/* Subtotal (pre-descuento) — solo en cobrar cuando hay descuento o se
               está editando, para evidenciar el origen del número antes del
               descuento. */}
-          {mode === "cobrar" && (discount > 0 || editMode) && subtotal != null && (
+          {mode === "cobrar" && (discount > 0 || pendingBalance > 0 || editMode) && subtotal != null && (
             <tr style={{ background: "#fff" }}>
               <td style={{ ...cell, fontWeight: 600 }}>Subtotal</td>
               <td style={{ ...cell, textAlign: "right", fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
@@ -2586,6 +2651,55 @@ const PrintableSummary = forwardRef(function PrintableSummary(
               </tr>
             </>
           )}
+          {/* Saldo pendiente — se aplica DESPUÉS del IVA, así que sale debajo
+              del "IVA incluido" (o del total neto si no hay IVA). */}
+          {mode === "cobrar" && (pendingBalance > 0 || editMode) && (() => {
+            const postIvaTotal = withIva
+              ? Math.round((Number(grandTotal) || 0) * 1.19)
+              : (Number(grandTotal) || 0);
+            const finalTotal = postIvaTotal + (Number(pendingBalance) || 0);
+            return (
+              <>
+                <tr style={{ background: "#ecfdf5" }}>
+                  <td style={{ ...cell, fontWeight: 600 }}>
+                    Saldo pendiente
+                    {editMode ? (
+                      <input
+                        type="text"
+                        placeholder="motivo (opcional)"
+                        value={pendingBalanceNote || ""}
+                        onChange={(e) => onChangePendingBalance && onChangePendingBalance({ note: e.target.value })}
+                        style={{ ...cobrarDateInputStyle, marginLeft: 8, width: 220 }}
+                      />
+                    ) : (
+                      pendingBalanceNote ? <span style={{ marginLeft: 8, fontWeight: 400, color: "#666" }}>· {pendingBalanceNote}</span> : null
+                    )}
+                  </td>
+                  <td style={{ ...cell, textAlign: "right", fontWeight: 600, fontVariantNumeric: "tabular-nums", color: "#0a7d3b" }}>
+                    {editMode ? (
+                      <input
+                        type="number"
+                        value={pendingBalance > 0 ? pendingBalance : ""}
+                        placeholder="0"
+                        onChange={(e) => onChangePendingBalance && onChangePendingBalance({ amount: e.target.value })}
+                        style={{ ...cobrarInputStyle, width: 120 }}
+                      />
+                    ) : (
+                      `+ ${fmtCurrency(pendingBalance)}`
+                    )}
+                  </td>
+                </tr>
+                {pendingBalance > 0 && (
+                  <tr style={{ background: "#6aa84f" }}>
+                    <td style={{ ...cell, fontWeight: 700, fontSize: 14, color: "#fff" }}>TOTAL FINAL</td>
+                    <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontSize: 14, fontVariantNumeric: "tabular-nums", color: "#fff" }}>
+                      {fmtCurrency(finalTotal)}
+                    </td>
+                  </tr>
+                )}
+              </>
+            );
+          })()}
         </tbody>
       </table>
     </div>

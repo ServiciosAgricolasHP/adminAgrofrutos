@@ -115,6 +115,11 @@ export default function Payroll() {
   // 0-100. Si es `null`, no se muestra overlay.
   const [progress, setProgress] = useState(null);
   const [payrollName, setPayrollName] = useState("");
+  // Clasificación de la nómina: "nomina" (default) o "diferencia". Las
+  // diferencias suelen ser nóminas chicas (ajustes / pagos puntuales) y se
+  // muestran en una pestaña aparte del historial para no alargar la lista
+  // principal de nóminas.
+  const [payrollClassification, setPayrollClassification] = useState("nomina");
 
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [detailPayroll, setDetailPayroll] = useState(null);
@@ -536,6 +541,7 @@ export default function Payroll() {
         payroll: {
           name: finalName,
           format: "bchile",
+          classification: payrollClassification || "nomina",
           status: "pending",
           total, bankTotal, cashTotal,
           workerCount: cleanItems.length,
@@ -592,6 +598,7 @@ export default function Payroll() {
       const created = await payrollsService.create({
         name: finalName,
         format: "bchile",
+        classification: payrollClassification || "nomina",
         status: "pending",
         cycleIds,
         cycleLabels,
@@ -693,6 +700,12 @@ export default function Payroll() {
   };
   const onMarkPending = async (p) => {
     await markPayrollPending(p.id, p.workdayIds || []);
+    await load();
+  };
+  const onChangeClassification = async (p) => {
+    const current = p.classification || "nomina";
+    const next = current === "diferencia" ? "nomina" : "diferencia";
+    await payrollsService.update(p.id, { classification: next });
     await load();
   };
   const [payConfirm, setPayConfirm] = useState(null); // { payroll, mode: "pay" | "revert" }
@@ -870,6 +883,8 @@ export default function Payroll() {
             bulkUpdate={bulkUpdate}
             payrollName={payrollName}
             setPayrollName={setPayrollName}
+            payrollClassification={payrollClassification}
+            setPayrollClassification={setPayrollClassification}
             totalSelected={totalSelected}
             countSelected={countSelected}
             cycleOptions={cycles
@@ -889,6 +904,7 @@ export default function Payroll() {
           onRedownload={onRedownload}
           onDownloadNominaOnly={onDownloadNominaOnly}
           onDownloadSnapshot={onDownloadSnapshot}
+          onChangeClassification={onChangeClassification}
           onOpen={setDetailPayroll}
         />
       )}
@@ -1073,6 +1089,8 @@ function PreviewTable({
   bulkUpdate,
   payrollName,
   setPayrollName,
+  payrollClassification,
+  setPayrollClassification,
   totalSelected,
   countSelected,
   cycleOptions = [],
@@ -1148,6 +1166,16 @@ function PreviewTable({
             onChange={(e) => setPayrollName(e.target.value)}
             className="w-72 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-sm outline-none focus:border-[var(--color-accent)]"
           />
+          <label className="ml-2 text-sm text-[var(--color-muted)]">Tipo:</label>
+          <select
+            value={payrollClassification || "nomina"}
+            onChange={(e) => setPayrollClassification(e.target.value)}
+            title="Las diferencias son nóminas chicas de ajuste y se listan aparte"
+            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1.5 text-sm outline-none focus:border-[var(--color-accent)]"
+          >
+            <option value="nomina">Nómina</option>
+            <option value="diferencia">Diferencia</option>
+          </select>
         </div>
         <div className="text-sm">
           <div className="text-right">
@@ -1460,11 +1488,24 @@ function PayConfirmModal({ info, onCancel, onConfirm }) {
   );
 }
 
-function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedownload, onDownloadNominaOnly, onDownloadSnapshot, onOpen }) {
+function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedownload, onDownloadNominaOnly, onDownloadSnapshot, onChangeClassification, onOpen }) {
   const isMobile = useIsMobile();
   const [statusFilter, setStatusFilter] = useState("all"); // all | pending | paid
   const [monthFilter, setMonthFilter] = useState("all"); // all | YYYY-MM
   const [search, setSearch] = useState("");
+  // "nomina" (default) | "diferencia". Las diferencias son nóminas chicas de
+  // ajuste; viven en una pestaña aparte para no alargar la lista principal.
+  // Nóminas viejas sin `classification` cuentan como "nomina".
+  const [classificationTab, setClassificationTab] = useState("nomina");
+  const classify = (p) => p.classification || "nomina";
+  const classificationCounts = useMemo(() => {
+    let nomina = 0, diferencia = 0;
+    for (const p of payrolls) {
+      if (classify(p) === "diferencia") diferencia += 1;
+      else nomina += 1;
+    }
+    return { nomina, diferencia };
+  }, [payrolls]);
 
   const monthKey = (v) => {
     const d = v?.toDate ? v.toDate() : v ? new Date(v) : null;
@@ -1484,12 +1525,13 @@ function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedow
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return payrolls.filter((p) => {
+      if (classify(p) !== classificationTab) return false;
       if (statusFilter !== "all" && (p.status || "pending") !== statusFilter) return false;
       if (monthFilter !== "all" && monthKey(p.createdAt) !== monthFilter) return false;
       if (q && !(p.name || "").toLowerCase().includes(q)) return false;
       return true;
     });
-  }, [payrolls, statusFilter, monthFilter, search]);
+  }, [payrolls, classificationTab, statusFilter, monthFilter, search]);
 
   const totals = useMemo(() => {
     let pending = 0, paid = 0;
@@ -1509,6 +1551,24 @@ function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedow
   }
   return (
     <div className="flex flex-1 flex-col gap-3 overflow-hidden">
+      <div className="flex gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-1 w-fit">
+        {[
+          { key: "nomina", label: "Nóminas", count: classificationCounts.nomina },
+          { key: "diferencia", label: "Diferencias", count: classificationCounts.diferencia },
+        ].map((t) => (
+          <button
+            key={t.key}
+            onClick={() => setClassificationTab(t.key)}
+            className={`rounded-md px-3 py-1.5 text-sm ${
+              classificationTab === t.key
+                ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
+                : "text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)]"
+            }`}
+          >
+            {t.label} <span className="ml-1 text-xs opacity-75">({t.count})</span>
+          </button>
+        ))}
+      </div>
       <div className="flex flex-wrap items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2">
         <input
           value={search}
@@ -1633,6 +1693,13 @@ function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedow
                   </button>
                 )}
                 <button
+                  onClick={() => onChangeClassification(p)}
+                  title={classify(p) === "diferencia" ? "Mover a Nóminas" : "Mover a Diferencias"}
+                  className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
+                >
+                  🏷️ {classify(p) === "diferencia" ? "→ Nómina" : "→ Diferencia"}
+                </button>
+                <button
                   onClick={() => onAskDelete(p)}
                   className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs text-[var(--color-danger)] hover:bg-[var(--color-danger-soft)]"
                 >
@@ -1735,6 +1802,13 @@ function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedow
                       ✓ Pagada
                     </button>
                   )}
+                  <button
+                    onClick={() => onChangeClassification(p)}
+                    title={classify(p) === "diferencia" ? "Mover a Nóminas" : "Mover a Diferencias"}
+                    className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
+                  >
+                    🏷️ {classify(p) === "diferencia" ? "→ Nómina" : "→ Diferencia"}
+                  </button>
                   <button
                     onClick={() => onAskDelete(p)}
                     className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs text-[var(--color-danger)] hover:bg-[var(--color-danger-soft)]"
