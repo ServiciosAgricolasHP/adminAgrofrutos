@@ -1695,9 +1695,9 @@ function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedow
                 <button
                   onClick={() => onChangeClassification(p)}
                   title={classify(p) === "diferencia" ? "Mover a Nóminas" : "Mover a Diferencias"}
-                  className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
+                  className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-1 py-0.5 text-[10px] leading-none hover:bg-[var(--color-accent-soft)]"
                 >
-                  🏷️ {classify(p) === "diferencia" ? "→ Nómina" : "→ Diferencia"}
+                  🏷️
                 </button>
                 <button
                   onClick={() => onAskDelete(p)}
@@ -1805,9 +1805,9 @@ function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedow
                   <button
                     onClick={() => onChangeClassification(p)}
                     title={classify(p) === "diferencia" ? "Mover a Nóminas" : "Mover a Diferencias"}
-                    className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
+                    className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-1 py-0.5 text-[10px] leading-none hover:bg-[var(--color-accent-soft)]"
                   >
-                    🏷️ {classify(p) === "diferencia" ? "→ Nómina" : "→ Diferencia"}
+                    🏷️
                   </button>
                   <button
                     onClick={() => onAskDelete(p)}

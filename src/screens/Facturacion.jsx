@@ -188,9 +188,9 @@ export default function Facturacion() {
   const [docs, setDocs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [kindTab, setKindTab] = useState("venta");
-  // Vista por defecto = mes actual. Toggle "Auditoría" libera el filtro de
-  // período (permite navegar todos los meses por empresa).
-  const [auditMode, setAuditMode] = useState(false);
+  // Vista por defecto = mes actual. El selector de período siempre está
+  // habilitado — el usuario puede navegar a cualquier mes pasado o pedir
+  // "Todos los períodos" sin pasar por un modo especial.
   const [periodoFilter, setPeriodoFilter] = useState(currentPeriod());
   const [tipoFilter, setTipoFilter] = useState("");
   const [paymentFilter, setPaymentFilter] = useState(""); // "" | "unpaid" | "paid" | "factored"
@@ -270,12 +270,6 @@ export default function Facturacion() {
   useEffect(() => {
     try { localStorage.setItem(LS_SELECTED_COMPANY, selectedCompanyId || ""); } catch { /* noop */ }
   }, [selectedCompanyId]);
-
-  // Cuando se entra en auditoría, dejamos que el usuario navegue períodos.
-  // Cuando se sale, volvemos a fijar el mes actual.
-  useEffect(() => {
-    if (!auditMode) setPeriodoFilter(currentPeriod());
-  }, [auditMode]);
 
   // Tab "Retenciones" muestra todos los DTE (ventas y compras) con estado
   // `net_only` agrupados por contraparte. Es ortogonal a kindTab pero lo
@@ -393,13 +387,19 @@ export default function Facturacion() {
   const periodoOptions = useMemo(() => {
     const set = new Set();
     for (const d of docs) {
-      if (d.kind === kindTab && d.periodo) {
+      // En retenciones la pestaña no corresponde a un `kind` (venta/compra),
+      // así que tomamos cualquier doc con estado net_only para que el dropdown
+      // ofrezca los meses pasados que tienen retenciones reales.
+      const matchesTab = isRetencionesView
+        ? (d.paymentStatus || "unpaid") === "net_only"
+        : d.kind === kindTab;
+      if (matchesTab && d.periodo) {
         if (!selectedCompanyId || d.companyId === selectedCompanyId) set.add(d.periodo);
       }
     }
     set.add(currentPeriod());
     return [...set].sort().reverse();
-  }, [docs, kindTab, selectedCompanyId]);
+  }, [docs, kindTab, isRetencionesView, selectedCompanyId]);
 
   const tipoOptions = useMemo(() => {
     const set = new Set();
@@ -1597,20 +1597,6 @@ export default function Facturacion() {
 
         {kindTab !== "resumen" && (<>
         <button
-          onClick={() => setAuditMode((v) => !v)}
-          className={`rounded-md border px-3 py-1.5 text-sm ${
-            auditMode
-              ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
-              : "border-[var(--color-border)] bg-[var(--color-surface-2)] hover:bg-[var(--color-accent-soft)]"
-          }`}
-          title={auditMode
-            ? "Volver a vista operativa (mes actual)"
-            : "Activar auditoría — navegar todos los meses históricos"}
-        >
-          {auditMode ? "🔍 Auditoría · ON" : "🔍 Auditoría"}
-        </button>
-
-        <button
           onClick={() => setPendientesModalOpen(true)}
           disabled={noCompany}
           title="Ver todas las facturas con saldo pendiente (cualquier período): factura completa, abonos parciales o IVA pendiente."
@@ -1632,11 +1618,10 @@ export default function Facturacion() {
         <select
           value={periodoFilter}
           onChange={(e) => setPeriodoFilter(e.target.value)}
-          disabled={!auditMode}
-          title={!auditMode ? "Activá Auditoría para cambiar de período" : "Filtrar por período"}
-          className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1.5 text-xs disabled:opacity-60"
+          title="Filtrar por período"
+          className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1.5 text-xs"
         >
-          {auditMode && <option value="">Todos los períodos</option>}
+          <option value="">Todos los períodos</option>
           {periodoOptions.map((p) => (
             <option key={p} value={p}>
               {p === currentPeriod() ? `${p} (actual)` : p}
@@ -1710,7 +1695,7 @@ export default function Facturacion() {
       </div>
       )}
 
-      {selectedCompany && !auditMode && !isRetencionesView && kindTab !== "resumen" && (
+      {selectedCompany && !isRetencionesView && kindTab !== "resumen" && (
         <div className="mb-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
           <SummaryCard label="No pagado del período" value={fmtCurrency(totals.unpaidTotal)} warning />
           <SummaryCard label="Solo neto (IVA retenido)" value={fmtCurrency(totals.netOnlyTotal)} />

@@ -432,6 +432,91 @@ export default function Calendar() {
     setMonth(today.getMonth() + 1);
     setSelectedDay(null);
   };
+  // Export imprimible del mes completo. Genera HTML standalone en una nueva
+  // ventana y dispara window.print(). A diferencia del grid en pantalla (que
+  // recorta a 4 pills + "+N más"), acá se listan TODAS las subfaenas de cada
+  // día con su faena para que el impreso refleje toda la actividad.
+  // Usa visibleDayIndex para respetar el filtro de subfaenas activo.
+  const handlePrintMonth = () => {
+    const { lastDay } = monthBounds(year, month);
+    const firstWeekday = new Date(year, month - 1, 1).getDay(); // 0=Domingo
+    const offset = (firstWeekday + 6) % 7; // semana arranca lunes
+
+    const cells = [];
+    for (let i = 0; i < offset; i++) cells.push({ empty: true });
+    for (let d = 1; d <= lastDay; d++) {
+      const date = `${year}-${String(month).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+      cells.push({ date, day: d });
+    }
+    while (cells.length % 7 !== 0) cells.push({ empty: true });
+
+    const escapeHtml = (s) =>
+      String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+    const weeks = [];
+    for (let i = 0; i < cells.length; i += 7) weeks.push(cells.slice(i, i + 7));
+
+    const renderCell = (c) => {
+      if (c.empty) return `<td class="empty"></td>`;
+      const items = visibleDayIndex[c.date] || [];
+      const weekend = isWeekendDate(c.date);
+      const pills = items
+        .map((it) => {
+          const faena = it.faenaName ? `<span class="f">${escapeHtml(it.faenaName)}</span>` : "";
+          const sub = `<span class="s">${escapeHtml(it.name)}</span>`;
+          const count = it.workerCount ? `<span class="n">${it.workerCount}</span>` : "";
+          return `<div class="pill" style="background:${it.color}">${faena}${sub}${count}</div>`;
+        })
+        .join("");
+      return `<td class="day"><div class="dnum ${weekend ? "wknd" : ""}">${c.day}</div>${pills}</td>`;
+    };
+
+    const tableRows = weeks.map((w) => `<tr>${w.map(renderCell).join("")}</tr>`).join("");
+    const title = `${MONTH_NAMES[month - 1]} ${year}`;
+    const win = window.open("", "_blank", "width=1200,height=850");
+    if (!win) return;
+    win.document.write(`<!DOCTYPE html><html><head><title>Calendario · ${title}</title>
+      <style>
+        * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; box-sizing: border-box; }
+        body { font-family: ui-sans-serif, system-ui, sans-serif; padding: 12px 16px; color: #000; margin: 0; }
+        h1 { text-align: center; font-size: 18px; margin: 0 0 10px; letter-spacing: 1px; }
+        table { border-collapse: collapse; width: 100%; table-layout: fixed; }
+        thead th {
+          background: #f3f4f6; border: 1px solid #888; padding: 4px 6px;
+          font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: #444;
+        }
+        td { border: 1px solid #888; padding: 4px; vertical-align: top; height: 110px; width: 14.285%; }
+        td.empty { background: #fafafa; }
+        td.day { background: #fff; }
+        .dnum { font-size: 11px; color: #666; font-weight: 600; margin-bottom: 3px; }
+        .dnum.wknd { color: #dc2626; }
+        .pill {
+          color: #fff; border-radius: 3px; padding: 2px 4px;
+          margin-bottom: 2px; font-size: 9px; line-height: 1.15;
+          display: flex; align-items: baseline; gap: 4px;
+        }
+        .pill .f { font-weight: 400; opacity: 0.85; font-size: 8px; }
+        .pill .s { font-weight: 600; flex: 1; }
+        .pill .n {
+          background: rgba(255,255,255,0.25); border-radius: 8px;
+          padding: 0 4px; font-size: 8px; font-weight: 600;
+        }
+        tr { page-break-inside: avoid; }
+        @media print { @page { size: landscape; margin: 8mm; } body { padding: 0; } }
+      </style>
+    </head><body>
+      <h1>${title}</h1>
+      <table>
+        <thead><tr>
+          <th>Lun</th><th>Mar</th><th>Mié</th><th>Jue</th><th>Vie</th><th>Sáb</th><th>Dom</th>
+        </tr></thead>
+        <tbody>${tableRows}</tbody>
+      </table>
+      <script>window.onload = () => { window.focus(); window.print(); };</script>
+    </body></html>`);
+    win.document.close();
+  };
+
   const refresh = () => {
     invalidateMonthCache(year, month);
     loadMonth(year, month, { forceFresh: true });
@@ -484,6 +569,15 @@ export default function Calendar() {
             title="Forzar refresh (ignora cache)"
           >
             ↻
+          </button>
+          <button
+            type="button"
+            onClick={handlePrintMonth}
+            disabled={loading}
+            className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1.5 text-sm hover:bg-[var(--color-accent-soft)] disabled:opacity-50"
+            title="Imprimir el mes completo (todas las faenas de cada día)"
+          >
+            🖨️
           </button>
         </div>
       </header>

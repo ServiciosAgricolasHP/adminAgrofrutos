@@ -130,6 +130,26 @@ export default function Faenas() {
   const [layout, setLayout] = useState(defaultLayout);
   const [editLayout, setEditLayout] = useState(false);
   const layoutSaveTimer = useRef(null);
+  // Set de groupIds colapsados. Local al dispositivo (localStorage) — el
+  // layout viaja con el usuario, pero plegar/desplegar es preferencia visual
+  // del momento.
+  const [collapsedGroups, setCollapsedGroups] = useState(() => {
+    try {
+      const raw = localStorage.getItem("faenas.collapsedGroups");
+      return new Set(raw ? JSON.parse(raw) : []);
+    } catch {
+      return new Set();
+    }
+  });
+  const toggleGroupCollapsed = (gid) => {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(gid)) next.delete(gid);
+      else next.add(gid);
+      try { localStorage.setItem("faenas.collapsedGroups", JSON.stringify([...next])); } catch { /* noop */ }
+      return next;
+    });
+  };
 
   useEffect(() => {
     if (!user?.uid) return;
@@ -875,10 +895,12 @@ export default function Faenas() {
                   count={groupFaenas.length}
                   editable={editLayout}
                   isUngrouped={g.id === UNGROUPED_ID}
+                  collapsed={collapsedGroups.has(g.id)}
+                  onToggleCollapsed={() => toggleGroupCollapsed(g.id)}
                   onUpdate={(patch) => updateGroup(g.id, patch)}
                   onRemove={() => removeGroup(g.id)}
                 />
-                {groupFaenas.length === 0 ? (
+                {collapsedGroups.has(g.id) ? null : groupFaenas.length === 0 ? (
                   <div className={`rounded-lg border border-dashed border-[var(--color-border)] p-6 text-center text-xs text-[var(--color-muted)] ${editLayout ? "" : "hidden"}`}>
                     Arrastra una tarjeta aquí.
                   </div>
@@ -958,7 +980,7 @@ export default function Faenas() {
                     })}
                   </div>
                 )}
-                {!isMobile && selectedGroupId === g.id && renderSelectedDetail()}
+                {!isMobile && !collapsedGroups.has(g.id) && selectedGroupId === g.id && renderSelectedDetail()}
               </section>
             );
           })}
@@ -1654,7 +1676,7 @@ function SelectedDetail({
 // Group sub-components
 // ============================================================
 
-function GroupHeader({ group, count, editable, isUngrouped, onUpdate, onRemove }) {
+function GroupHeader({ group, count, editable, isUngrouped, collapsed, onToggleCollapsed, onUpdate, onRemove }) {
   const [editingName, setEditingName] = useState(false);
   const [name, setName] = useState(group.name);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -1670,6 +1692,14 @@ function GroupHeader({ group, count, editable, isUngrouped, onUpdate, onRemove }
   return (
     <div className="mb-3 flex items-center justify-between gap-2 border-b border-[var(--color-border)] pb-2">
       <div className="flex items-center gap-2 min-w-0">
+        <button
+          type="button"
+          onClick={onToggleCollapsed}
+          title={collapsed ? "Expandir grupo" : "Colapsar grupo"}
+          className="shrink-0 rounded px-1 text-sm text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)] hover:text-[var(--color-accent)]"
+        >
+          {collapsed ? "▸" : "▾"}
+        </button>
         {group.color && (
           <span
             aria-hidden
