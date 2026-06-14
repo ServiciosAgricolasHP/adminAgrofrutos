@@ -38,15 +38,29 @@ if (typeof window !== "undefined") {
         await Promise.all(regs.map((r) => r.unregister()));
       }
     } catch {
-      /* noop — igual recargamos abajo */
+      /* noop — igual navegamos abajo */
     }
-    window.location.reload();
+    // CRUCIAL: navegamos con un query param nuevo para bustear el HTTP cache
+    // del navegador. `location.reload()` no alcanza porque sirve el index.html
+    // cacheado por HTTP que sigue apuntando a los chunks viejos. Cambiar la
+    // URL fuerza al browser a pedir el index fresh, y el header `?__v=` no
+    // afecta ninguna ruta del router.
+    const url = new URL(window.location.href);
+    url.searchParams.set("__v", String(Date.now()));
+    window.location.replace(url.toString());
   });
   // Cuando la nueva carga termina ok (sin disparar otro preloadError en los
-  // primeros 5s), reseteamos el contador. Si llegamos hasta acá el fix anduvo.
+  // primeros 5s), reseteamos el contador y limpiamos el query param. Si
+  // llegamos hasta acá el fix anduvo.
   window.addEventListener("load", () => {
     setTimeout(() => {
       try { sessionStorage.removeItem(attemptsKey); } catch { /* noop */ }
+      // Sacar el ?__v= de la URL para no dejar basura visible.
+      const url = new URL(window.location.href);
+      if (url.searchParams.has("__v")) {
+        url.searchParams.delete("__v");
+        window.history.replaceState({}, "", url.toString());
+      }
     }, 5000);
   });
 }
