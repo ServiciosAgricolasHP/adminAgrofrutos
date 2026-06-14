@@ -52,15 +52,37 @@ export default defineConfig({
         ],
       },
       workbox: {
-        // Precachea todos los assets del build (JS/CSS/HTML/imgs).
-        globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
-        // El bundle de exceljs es >2MB, sube el limite para que entre.
+        // Precachea SOLO assets estables (imgs, fonts, íconos). NO incluimos
+        // js/css/html porque esos son los que cambian cada deploy (con hash
+        // en el nombre) y eran los que dejaban al usuario atascado con
+        // chunks borrados — el SW servía un index.js viejo que apuntaba a
+        // un exceljs.min-XXXX.js que el deploy nuevo ya borró.
+        // Ahora esos archivos van por NetworkFirst (ver runtimeCaching), así
+        // siempre que haya red el navegador trae lo último.
+        globPatterns: ['**/*.{ico,png,svg,woff2}'],
         maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
-        // No interceptamos llamadas a Firestore — el SDK ya maneja su propio
-        // cache en IndexedDB. Tampoco el navigation fallback para no romper
-        // el truco 404.html → index.html?/... de GitHub Pages.
+        // Que el SW nuevo tome control de los tabs abiertos en cuanto activa,
+        // sin esperar a que se cierren — sino los usuarios con la pestaña
+        // abierta pueden quedar con el SW viejo controlando.
+        skipWaiting: true,
+        clientsClaim: true,
         navigateFallback: null,
         runtimeCaching: [
+          {
+            // HTML / JS / CSS de la app: NetworkFirst. Si la red anda, trae
+            // lo último (cierra el bug de chunks borrados). Si la red falla
+            // o tarda más de 3s, usa el cache para mantener offline parcial.
+            urlPattern: ({ request }) =>
+              request.destination === 'document' ||
+              request.destination === 'script' ||
+              request.destination === 'style',
+            handler: 'NetworkFirst',
+            options: {
+              cacheName: 'app-shell',
+              networkTimeoutSeconds: 3,
+              expiration: { maxEntries: 60, maxAgeSeconds: 60 * 60 * 24 * 7 },
+            },
+          },
           {
             // Logo y otros assets externos (firebase storage, etc.) si los hay.
             urlPattern: /^https:\/\/firebasestorage\.googleapis\.com\/.*/i,
