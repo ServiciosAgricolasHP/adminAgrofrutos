@@ -169,24 +169,52 @@ function formatTotalsMetric(totals, type, rows, catalogs) {
 // `dayPrices[labor.id][date].t0.unit`, queda en `row.unit` (índice del
 // catálogo `tratoUnits`). Display la convierte a label vía `tratoUnitLabel`.
 function buildDailyRows(labor, wdMap, dayPrices = {}) {
-  const byDate = new Map();
+  const byKey = new Map();
   const containers = new Set();
   const isTrato = labor?.type === "trato";
+  // Para trato agrupamos por (date, tierKey). Sin tierKey usable caemos a
+  // "t0" (compatibilidad con docs viejos). El groupKey es lo que indexa
+  // `byKey`, pero el rowKey final que ve la UI también incluye el tier
+  // para distinguir filas del mismo día en el render y en los overrides.
   for (const k in wdMap) {
     const wd = wdMap[k];
     const d = wd.date;
-    if (!byDate.has(d)) {
-      const row = { date: d, qty: 0, overtimeHours: 0, amount: 0, pisoAmount: 0, pisoCount: 0, workersSet: new Set(), pisoWorkersSet: new Set() };
-      if (isTrato) {
-        // Lee la unidad del primer tier — en práctica cada día usa una
-        // sola unidad. Si más adelante un tier diferente del mismo día
-        // usara otra, el display lo trata como mixto (formatRowMetric).
-        const tiers = getTratoTiers(dayPrices, labor.id, d);
-        row.unit = tiers[0]?.unit ?? null;
-      }
-      byDate.set(d, row);
+    let tierKey = null;
+    let tierIdx = 0;
+    if (isTrato && !wd.pisoOnly) {
+      const parts = String(k).split("__");
+      tierKey = parts[2] || "t0";
+      tierIdx = tierKey.startsWith("t") ? Number(tierKey.slice(1)) || 0 : 0;
     }
-    const g = byDate.get(d);
+    const groupKey = isTrato && tierKey ? `${d}|${tierKey}` : d;
+    if (!byKey.has(groupKey)) {
+      const row = {
+        date: d,
+        qty: 0,
+        overtimeHours: 0,
+        amount: 0,
+        pisoAmount: 0,
+        pisoCount: 0,
+        workersSet: new Set(),
+        pisoWorkersSet: new Set(),
+      };
+      if (isTrato) {
+        const tiers = getTratoTiers(dayPrices, labor.id, d);
+        if (tierKey) {
+          row.tierKey = tierKey;
+          row.tierIdx = tierIdx;
+          row.unit = tiers[tierIdx]?.unit ?? tiers[0]?.unit ?? null;
+          // rowKey único por (date, tier) — la UI lo usa como React key
+          // y cobrar mode lo usa como clave de rowOverrides.
+          row.rowKey = `${d}__${tierKey}`;
+        } else {
+          // wd.pisoOnly → cae acá; no es un tier real.
+          row.unit = tiers[0]?.unit ?? null;
+        }
+      }
+      byKey.set(groupKey, row);
+    }
+    const g = byKey.get(groupKey);
     if (wd.pisoOnly) {
       const pa = Number(wd.amount) || 0;
       g.pisoAmount += pa;
@@ -216,7 +244,7 @@ function buildDailyRows(labor, wdMap, dayPrices = {}) {
   const overtimeRate = labor?.type === "tratoHE"
     ? (Number(labor?.overtimeRate) > 0 ? Number(labor.overtimeRate) : 3500)
     : 0;
-  const rows = [...byDate.values()]
+  const rows = [...byKey.values()]
     .map((g) => {
       // bonosTotal = amount - base - HE_hrs * tarifa. Suma manejo + supervision
       // + extras a través de TODOS los trabajadores del día. Es derivado del
@@ -234,7 +262,12 @@ function buildDailyRows(labor, wdMap, dayPrices = {}) {
         bonosTotal,
       };
     })
-    .sort((a, b) => (a.date < b.date ? -1 : 1));
+    // Para trato puede haber varias filas en el mismo día (una por tier);
+    // las ordenamos por (date, tierIdx) para que aparezcan juntas y en orden.
+    .sort((a, b) => {
+      if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+      return (a.tierIdx ?? 0) - (b.tierIdx ?? 0);
+    });
   return { rows, containers };
 }
 
@@ -1012,6 +1045,27 @@ export default function CycleSummaryModal({
       const medianRate = Math.round(medianOf(perDayRates));
       const defaultRate = medianRate || meanRate;
       const rate = cfg.chargeRate != null ? Number(cfg.chargeRate) : defaultRate;
+
+      // Para trato multi-tier la tarifa "promedio del labor" miente — cada
+      // tier suele tener precio distinto. Calculamos mediana por tierIdx
+      // para sugerir una tarifa más cercana al precio real de ese tier.
+      // La tarifa explícita del labor (`cfg.chargeRate`) sigue mandando si
+      // el usuario la fijó; sino usamos la mediana del tier para cada fila.
+      const tierRateMedians = new Map();
+      if (ld.labor.type === "trato") {
+        const ratesByTier = new Map();
+        for (const r of ld.rows || []) {
+          if (r.tierIdx == null) continue;
+          const q = Number(r.qty) || 0;
+          if (q <= 0) continue;
+          const ratesArr = ratesByTier.get(r.tierIdx) || [];
+          ratesArr.push((Number(r.amount) || 0) / q);
+          ratesByTier.set(r.tierIdx, ratesArr);
+        }
+        for (const [idx, arr] of ratesByTier) {
+          tierRateMedians.set(idx, Math.round(medianOf(arr)));
+        }
+      }
       const activity = activityLabel(ld.labor, catalogs, ld.containers, ld.tratoUnitsSet);
 
       // Aplicar overrides por fila + sumar extraRows. Cada chargedRow trae los
@@ -1040,12 +1094,25 @@ export default function CycleSummaryModal({
         }
       }
       const chargedRows = (ld.rows || []).map((r) => {
-        const ov = rowOverrides[r.date] || {};
+        // Para trato multi-tier el rowKey lleva el tier (`${date}__${tierKey}`),
+        // y los overrides nuevos se guardan con esa clave. Las nóminas viejas
+        // tenían un único override por día — si no hay override en la clave
+        // nueva pero sí en la clave legacy (solo fecha), lo usamos para no
+        // perder ediciones previas.
+        const newKey = r.rowKey || r.date;
+        const ov = rowOverrides[newKey] || rowOverrides[r.date] || {};
         const qty = ov.qty != null && ov.qty !== "" ? Number(ov.qty) : Number(r.qty) || 0;
         const overtimeHours = ov.overtimeHours != null && ov.overtimeHours !== ""
           ? Number(ov.overtimeHours)
           : Number(r.overtimeHours) || 0;
-        const rowRate = ov.rate != null && ov.rate !== "" ? Number(ov.rate) : rate;
+        // Prioridad de tarifa: override del row → tarifa explícita del labor
+        // (cfg.chargeRate) → mediana del tier (solo trato multi-tier) →
+        // mediana global del labor.
+        const tierDefault = r.tierIdx != null ? tierRateMedians.get(r.tierIdx) : null;
+        const baseRate = cfg.chargeRate != null
+          ? Number(cfg.chargeRate)
+          : (tierDefault != null && tierDefault > 0 ? tierDefault : rate);
+        const rowRate = ov.rate != null && ov.rate !== "" ? Number(ov.rate) : baseRate;
         const computedAmount = computeAmount(qty, overtimeHours, rowRate);
         const amount = ov.amount != null && ov.amount !== "" ? Number(ov.amount) : computedAmount;
         const hasOverride = Object.keys(ov).length > 0;
@@ -1055,7 +1122,7 @@ export default function CycleSummaryModal({
           chargedOvertimeHours: overtimeHours,
           chargedRate: rowRate,
           chargedAmount: amount,
-          rowKey: r.date,
+          rowKey: newKey,
           isExtra: false,
           hasOverride,
           override: ov,
@@ -1216,7 +1283,10 @@ export default function CycleSummaryModal({
   const editCobrarLaborRow = (laborId, row, patch) => {
     const finalPatch = clearAmountIfFactorEdit(patch, ["qty", "rate", "overtimeHours"]);
     if (row?.isExtra) updateCobrarLaborExtraRow(laborId, row.extraId, finalPatch);
-    else updateCobrarLaborRow(laborId, row.date, finalPatch);
+    // Para trato multi-tier el rowKey incluye el tier — escribimos con esa
+    // clave para que cada tier tenga su override independiente. Otros tipos
+    // siguen escribiendo con date como clave (compatible con overrides viejos).
+    else updateCobrarLaborRow(laborId, row.rowKey || row.date, finalPatch);
   };
   const editCobrarCarrierRow = (carrierId, row, patch) => {
     const finalPatch = clearAmountIfFactorEdit(patch, ["count", "rate"]);
@@ -2773,6 +2843,28 @@ function LaborTable({
     const value = raw === "" ? "" : Number(raw);
     onEditRow(laborId, r, { [field]: value });
   };
+  // Para trato: si el día tiene más de una fila (multi-tier) mostramos un
+  // badge al lado de la fecha con la unidad del tier (Árbol/Metro/...) o
+  // un fallback "T2/T3/..." si no hay unidad configurada. La 1ra fila del
+  // día solo lleva badge cuando hay otra fila el mismo día (para diferenciar).
+  const isTrato = laborType === "trato";
+  const rowCountByDate = (() => {
+    if (!isTrato) return new Map();
+    const m = new Map();
+    for (const r of rows) {
+      if (!r.date || r.isExtra) continue;
+      m.set(r.date, (m.get(r.date) || 0) + 1);
+    }
+    return m;
+  })();
+  const tierBadgeFor = (r) => {
+    if (!isTrato || r.isExtra) return null;
+    const same = rowCountByDate.get(r.date) || 0;
+    if (same < 2 && (r.tierIdx ?? 0) === 0) return null;
+    const unitLbl = r.unit != null ? tratoUnitLabel(catalogs, r.unit) : null;
+    if (unitLbl) return unitLbl;
+    return `T${(r.tierIdx ?? 0) + 1}`;
+  };
   const handleDateChange = (r, raw) => {
     if (!onEditRow) return;
     onEditRow(laborId, r, { date: raw });
@@ -2835,7 +2927,30 @@ function LaborTable({
                       style={cobrarDateInputStyle}
                     />
                   ) : (
-                    dateLabel(r.date)
+                    <>
+                      {dateLabel(r.date)}
+                      {(() => {
+                        const tb = tierBadgeFor(r);
+                        if (!tb) return null;
+                        return (
+                          <span
+                            style={{
+                              marginLeft: 6,
+                              padding: "1px 6px",
+                              fontSize: 10,
+                              fontWeight: 600,
+                              background: "#e0e7ff",
+                              color: "#3730a3",
+                              borderRadius: 4,
+                              verticalAlign: "middle",
+                            }}
+                            title="Tier de precio"
+                          >
+                            {tb}
+                          </span>
+                        );
+                      })()}
+                    </>
                   )}
                 </td>
                 {isHE ? (

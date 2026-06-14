@@ -45,7 +45,7 @@ const loadTitles = (rut, defaultSubtitle) => {
         subtitle: defaultSubtitle,
         ...parsed,
         cycles: parsed.cycles || {},
-        linear: parsed.linear || { main: "DETALLE DE JORNADA — LINEAL", subtitle: defaultSubtitle },
+        linear: parsed.linear || { main: "DETALLE DE JORNADA — CRONOLÓGICO", subtitle: defaultSubtitle },
       };
     }
   } catch {
@@ -70,16 +70,32 @@ function buildCycleRows(workerRut, cycle, workdaysByLabor, catalogs) {
   const cosechaContainers = new Set();
   for (const labor of cycle.labors || []) {
     const wdMap = workdaysByLabor[labor.id] || {};
+    // Una fila por (worker, labor, date). Para trato con múltiples tiers el
+    // mismo día, guardamos un breakdown interno (`tratoBreakdown`) con la
+    // info por tier; el total de la fila sigue siendo la suma del día.
     const byDate = new Map();
     for (const k in wdMap) {
       const wd = wdMap[k];
       if (wd.workerRut !== workerRut) continue;
       const d = wd.date;
-      if (!byDate.has(d)) byDate.set(d, []);
-      byDate.get(d).push(wd);
+      if (!byDate.has(d)) byDate.set(d, { date: d, wds: [], tiersByIdx: new Map() });
+      const bucket = byDate.get(d);
+      bucket.wds.push(wd);
+      if (labor.type === "trato" && !wd.pisoOnly) {
+        const parts = String(k).split("__");
+        const tk = parts[2] || "t0";
+        const tIdx = tk.startsWith("t") ? Number(tk.slice(1)) || 0 : 0;
+        const t = getTratoTierTotals(wd);
+        const tr = bucket.tiersByIdx.get(tIdx) || { tierIdx: tIdx, tierKey: tk, qty: 0, amount: 0, unit: null };
+        tr.qty += t.qty;
+        tr.amount += t.amount;
+        bucket.tiersByIdx.set(tIdx, tr);
+      }
     }
     const heRate = Number(labor.overtimeRate) || DEFAULT_OVERTIME_RATE;
-    for (const [d, wds] of [...byDate.entries()].sort(([a], [b]) => (a < b ? -1 : 1))) {
+    const sortedGroups = [...byDate.entries()].sort(([a], [b]) => (a < b ? -1 : 1));
+    for (const [, group] of sortedGroups) {
+      const { date: d, wds, tiersByIdx } = group;
       let kilos = 0;
       let jornadas = 0;
       let tratoQty = 0;
@@ -118,19 +134,29 @@ function buildCycleRows(workerRut, cycle, workdaysByLabor, catalogs) {
         }
       }
       const containerLabels = [...containers].map((y) => containerLabel(catalogs, y)).join("/");
-      // Para trato: la unidad de medida vive en `dayPrices[labor][date].t0.unit`.
-      // Si está configurada queda en `row.tratoUnit` y el display la usa
-      // (sino cae al tipo de trato como antes).
+      // Breakdown por tier del día (trato): cada entry trae la unidad del
+      // tier (Árbol/Metro/...) para que el display la use.
+      let tratoBreakdown = null;
       let tratoUnit = null;
       if (labor.type === "trato") {
         const tiers = getTratoTiers(cycle.dayPrices || {}, labor.id, d);
-        tratoUnit = tiers[0]?.unit ?? null;
+        // Si solo hay un tier con producción, no mantenemos breakdown
+        // (la fila ya tiene toda la info). Multi-tier sí.
+        const entries = [...tiersByIdx.values()].sort((a, b) => a.tierIdx - b.tierIdx);
+        for (const e of entries) {
+          e.unit = tiers[e.tierIdx]?.unit ?? null;
+        }
+        if (entries.length > 1) tratoBreakdown = entries;
+        // tratoUnit a nivel de fila: usamos el primer tier con unidad, sino
+        // tiers[0]. Sirve para el label de la columna cuando solo hay 1 tier.
+        tratoUnit = entries[0]?.unit ?? tiers[0]?.unit ?? null;
       }
       rows.push({
         laborName: labor.name,
         laborType: labor.type,
         tratoType: labor.tratoType ?? 0,
         tratoUnit,
+        tratoBreakdown,
         containerLabels,
         date: d,
         kilos,
@@ -143,7 +169,10 @@ function buildCycleRows(workerRut, cycle, workdaysByLabor, catalogs) {
       });
     }
   }
-  rows.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.laborName.localeCompare(b.laborName)));
+  rows.sort((a, b) => {
+    if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+    return a.laborName.localeCompare(b.laborName);
+  });
   return { rows, cosechaContainers };
 }
 
@@ -303,7 +332,7 @@ export default function WorkerSummaryModal({ open, onClose, worker }) {
             className={`px-3 py-1.5 ${viewMode === "lineal" ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)] font-medium" : "bg-[var(--color-surface-2)] text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)]"}`}
             title="Una sola tabla con los días en orden cronológico (columna Ciclo identifica el origen)"
           >
-            📜 Lineal
+            📜 Cronológico
           </button>
         </div>
         <button
@@ -435,6 +464,7 @@ export default function WorkerSummaryModal({ open, onClose, worker }) {
         titles={titles}
         viewMode={viewMode}
         onUpdateTitles={updateTitles}
+        catalogs={catalogs}
       />
     </Modal>
   );
@@ -497,7 +527,28 @@ export async function loadWorkerSummaryData(workerId, catalogs, options = {}) {
       const labor = (c.labors || []).find((l) => l.id === wd.laborId);
       if (!labor) continue;
       if (!wdMap[wd.laborId]) wdMap[wd.laborId] = {};
-      wdMap[wd.laborId][wd.id || workdayMapKey(wd.workerRut, wd.date, "0_0")] = wd;
+      // Importante: keyeamos por `workdayMapKey(rut, date, ck)` — formato
+      // corto de 3 partes — y NO por `wd.id` (formato largo de 5+ partes
+      // `cycleId__laborId__rut__date__ck`). buildCycleRows parsea `parts[2]`
+      // como tierKey para trato, así que si pasamos `wd.id` se rompe la
+      // separación por tier (parts[2] sería el rut).
+      let ck = "0_0";
+      if (labor.type === "trato") {
+        if (wd.id) {
+          const idParts = String(wd.id).split("__");
+          ck = idParts.length >= 5 ? idParts.slice(4).join("__") : "t0";
+        } else {
+          ck = "t0";
+        }
+      } else if (labor.type === "cosecha") {
+        if (wd.id) {
+          const idParts = String(wd.id).split("__");
+          ck = idParts.length >= 5 ? idParts.slice(4).join("__") : `${Number(wd.qualityX) || 0}_${Number(wd.containerY) || 0}`;
+        } else {
+          ck = `${Number(wd.qualityX) || 0}_${Number(wd.containerY) || 0}`;
+        }
+      }
+      wdMap[wd.laborId][workdayMapKey(wd.workerRut, wd.date, ck)] = wd;
     }
     // Saltamos ciclos cerrados sin workdays dentro del rango para no
     // mostrar secciones vacías.
@@ -567,7 +618,7 @@ export async function loadWorkerSummaryData(workerId, catalogs, options = {}) {
 }
 
 export const PrintableWorkerSummary = forwardRef(function PrintableWorkerSummary(
-  { worker, data, grandTotal, advances = [], advancesSaldo = 0, anticiposSaldo, bonosSaldo, titles, viewMode = "por-ciclo", onUpdateTitles },
+  { worker, data, grandTotal, advances = [], advancesSaldo = 0, anticiposSaldo, bonosSaldo, titles, viewMode = "por-ciclo", onUpdateTitles, catalogs = {} },
   ref,
 ) {
   // Soporte legacy: si solo viene advancesSaldo, lo tratamos como saldo de anticipos.
@@ -597,6 +648,7 @@ export const PrintableWorkerSummary = forwardRef(function PrintableWorkerSummary
       {isLinear && (
         <LinearTable
           data={data}
+          catalogs={catalogs}
           titles={titles?.linear}
           onUpdateLinearTitles={(patch) => onUpdateTitles && onUpdateTitles({ linear: { ...(titles?.linear || {}), ...patch } })}
         />
@@ -664,7 +716,7 @@ export const PrintableWorkerSummary = forwardRef(function PrintableWorkerSummary
                   {cols.he && <th style={{ ...cellH, textAlign: "right" }}>HE</th>}
                   {cols.trato && <th style={{ ...cellH, textAlign: "right" }}>{tratoLabel}</th>}
                   {cols.piso && <th style={{ ...cellH, textAlign: "right" }}>Piso</th>}
-                  <th style={{ ...cellH, textAlign: "right" }}>Precio</th>
+                  <th style={{ ...cellH, textAlign: "right" }}>Total</th>
                 </tr>
               </thead>
               <tbody>
@@ -698,7 +750,45 @@ export const PrintableWorkerSummary = forwardRef(function PrintableWorkerSummary
                       )}
                       {cols.trato && (
                         <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
-                          {r.tratoQty > 0 ? fmtNumber(r.tratoQty) : ""}
+                          {r.tratoQty > 0 ? (
+                            <>
+                              <div>{fmtNumber(r.tratoQty)}</div>
+                              {/* Detalle por tier: si es multi-tier muestra una
+                                  línea por cada uno; si es single-tier, una sola
+                                  línea con el mismo formato para que se vea
+                                  consistente entre días. */}
+                              {(() => {
+                                const u = r.tratoUnit;
+                                const defaultLbl = u != null ? tratoUnitLabel(catalogs, u) : null;
+                                const items = (r.tratoBreakdown && r.tratoBreakdown.length > 0)
+                                  ? r.tratoBreakdown.map((b) => {
+                                      const bu = b.unit;
+                                      const lbl = bu != null ? tratoUnitLabel(catalogs, bu) : defaultLbl;
+                                      const tag = lbl || `T${(b.tierIdx || 0) + 1}`;
+                                      const rate = b.qty > 0 ? Math.round(b.amount / b.qty) : 0;
+                                      return { tag, qty: b.qty, rate, amount: b.amount };
+                                    })
+                                  : (r.amount > 0
+                                      ? [{
+                                          tag: defaultLbl || "trato",
+                                          qty: r.tratoQty,
+                                          rate: Math.round(r.amount / r.tratoQty),
+                                          amount: r.amount,
+                                        }]
+                                      : []);
+                                if (items.length === 0) return null;
+                                return (
+                                  <div style={{ fontSize: 10, color: "#888", fontWeight: 400, lineHeight: 1.35 }}>
+                                    {items.map((it, j) => (
+                                      <div key={j}>
+                                        {it.tag}: {fmtNumber(it.qty)} × {fmtCurrency(it.rate)} = {fmtCurrency(it.amount)}
+                                      </div>
+                                    ))}
+                                  </div>
+                                );
+                              })()}
+                            </>
+                          ) : ""}
                         </td>
                       )}
                       {cols.piso && (
@@ -870,7 +960,7 @@ const cell = { border: "1px solid #999", padding: "5px 8px", fontSize: 12 };
 // menos una fila las tiene. Los labels de unidad caen al primero que se
 // vea — si los ciclos usan unidades distintas, la columna mostraría las
 // dos juntas indistintamente (caso raro y aceptado).
-function LinearTable({ data, titles, onUpdateLinearTitles }) {
+function LinearTable({ data, catalogs, titles, onUpdateLinearTitles }) {
   const toast = useToast();
   const localRef = useRef(null);
   const [busy, setBusy] = useState("");
@@ -952,7 +1042,7 @@ function LinearTable({ data, titles, onUpdateLinearTitles }) {
     try {
       const dataUrl = await toPng(localRef.current, fullCaptureOpts());
       const a = document.createElement("a");
-      a.download = "resumen_lineal.png";
+      a.download = "resumen_cronologico.png";
       a.href = dataUrl;
       a.click();
     } finally { setBusy(""); }
@@ -962,7 +1052,7 @@ function LinearTable({ data, titles, onUpdateLinearTitles }) {
     const html = localRef.current.outerHTML;
     const win = window.open("", "_blank", "width=1100,height=800");
     if (!win) return;
-    win.document.write(`<!DOCTYPE html><html><head><title>Resumen lineal</title>
+    win.document.write(`<!DOCTYPE html><html><head><title>Resumen cronológico</title>
       <style>
         * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; box-sizing: border-box; }
         body { font-family: ui-sans-serif, system-ui, sans-serif; padding: 20px; color: #000; margin: 0; }
@@ -1067,7 +1157,41 @@ function LinearTable({ data, titles, onUpdateLinearTitles }) {
                 )}
                 {cols.trato && (
                   <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
-                    {(r.tratoQty || 0) > 0 ? fmtNumber(r.tratoQty) : ""}
+                    {(r.tratoQty || 0) > 0 ? (
+                      <>
+                        <div>{fmtNumber(r.tratoQty)}</div>
+                        {(() => {
+                          const u = r.tratoUnit;
+                          const defaultLbl = u != null ? tratoUnitLabel(catalogs, u) : null;
+                          const items = (r.tratoBreakdown && r.tratoBreakdown.length > 0)
+                            ? r.tratoBreakdown.map((b) => {
+                                const bu = b.unit;
+                                const lbl = bu != null ? tratoUnitLabel(catalogs, bu) : defaultLbl;
+                                const tag = lbl || `T${(b.tierIdx || 0) + 1}`;
+                                const rate = b.qty > 0 ? Math.round(b.amount / b.qty) : 0;
+                                return { tag, qty: b.qty, rate, amount: b.amount };
+                              })
+                            : ((r.amount || 0) > 0
+                                ? [{
+                                    tag: defaultLbl || "trato",
+                                    qty: r.tratoQty,
+                                    rate: Math.round((r.amount || 0) / r.tratoQty),
+                                    amount: r.amount || 0,
+                                  }]
+                                : []);
+                          if (items.length === 0) return null;
+                          return (
+                            <div style={{ fontSize: 10, color: "#888", fontWeight: 400, lineHeight: 1.35 }}>
+                              {items.map((it, j) => (
+                                <div key={j}>
+                                  {it.tag}: {fmtNumber(it.qty)} × {fmtCurrency(it.rate)} = {fmtCurrency(it.amount)}
+                                </div>
+                              ))}
+                            </div>
+                          );
+                        })()}
+                      </>
+                    ) : ""}
                   </td>
                 )}
                 {cols.piso && (

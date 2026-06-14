@@ -240,6 +240,21 @@ export default function Faenas() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId]);
 
+  // Cuando se abre el detalle de una faena, scrolleamos para que el panel
+  // entre en viewport — si la tarjeta clickeada estaba en la última fila el
+  // panel salía abajo del fold y daba la impresión que no había pasado nada.
+  // Esperamos un tick para que React renderice antes de medir.
+  const selectedDetailRef = useRef(null);
+  useEffect(() => {
+    if (!selectedId) return;
+    const id = window.requestAnimationFrame(() => {
+      const el = selectedDetailRef.current;
+      if (!el) return;
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+    return () => window.cancelAnimationFrame(id);
+  }, [selectedId]);
+
   const onDragStart = (id) => () => setDragId(id);
   const onDragOver = (id) => (e) => {
     e.preventDefault();
@@ -800,8 +815,10 @@ export default function Faenas() {
 
   const renderSelectedDetail = () =>
     selected && (
+      <div ref={selectedDetailRef}>
       <SelectedDetail
         selected={selected}
+        cardColor={colorOf(selected)}
         subs={selectedSubs}
         cycles={selectedCycles}
         onCreateSub={() => setSubForm({ mode: "create", faenaId: selected.id, data: { ...emptySub } })}
@@ -828,6 +845,7 @@ export default function Faenas() {
         showClosedInSub={showClosedInSub}
         onToggleShowClosed={toggleShowClosed}
       />
+      </div>
     );
 
   return (
@@ -922,39 +940,67 @@ export default function Faenas() {
                           onClick={() => setSelectedId(isSelected ? null : f.id)}
                           data-dragging={dragId === f.id}
                           data-drop-over={dropOverId === f.id}
-                          style={cardColor ? { borderLeft: `4px solid ${cardColor}` } : undefined}
-                          className={`dnd-card group relative cursor-pointer rounded-lg border bg-[var(--color-surface)] p-4 shadow-sm hover:border-[var(--color-border-strong)] hover:shadow-md ${
-                            isSelected ? "border-[var(--color-accent)] shadow-md" : "border-[var(--color-border)]"
+                          style={{
+                            backgroundColor: "var(--color-surface)",
+                            backgroundImage: cardColor ? `linear-gradient(135deg, ${cardColor}1A, transparent 60%)` : undefined,
+                            "--card-hover-shadow": cardColor ? `0 4px 14px ${cardColor}33` : "0 4px 14px rgb(0 0 0 / 0.08)",
+                          }}
+                          onMouseEnter={(e) => { e.currentTarget.style.boxShadow = e.currentTarget.style.getPropertyValue("--card-hover-shadow"); }}
+                          onMouseLeave={(e) => { e.currentTarget.style.boxShadow = ""; }}
+                          className={`dnd-card group relative cursor-pointer rounded-lg border pt-5 px-4 pb-4 shadow-sm transition-all hover:border-[var(--color-border-strong)] ${
+                            isSelected
+                              ? "border-[var(--color-accent)] ring-2 ring-[var(--color-accent)] ring-offset-2 ring-offset-[var(--color-surface)]"
+                              : "border-[var(--color-border)]"
                           }`}
                         >
+                          <span
+                            aria-hidden
+                            className="pointer-events-none absolute inset-x-0 top-0 h-1.5 rounded-t-lg"
+                            style={{ backgroundColor: cardColor || "var(--color-border)" }}
+                          />
                           <div className="mb-2 flex items-start justify-between gap-2">
-                            <div className="flex items-start gap-2">
-                              <span className="mt-0.5 select-none text-[var(--color-muted)] opacity-50 group-hover:opacity-100" title="Arrastra para reordenar">⠿</span>
-                              <div>
+                            <div className="flex items-start gap-2 min-w-0">
+                              <span className="mt-1 select-none text-[10px] leading-none text-[var(--color-muted)] opacity-30 group-hover:opacity-90 transition-opacity" title="Arrastra para reordenar">⠿</span>
+                              <div className="min-w-0">
                                 <div className="flex items-center gap-2">
-                                  <span className="font-semibold leading-tight">{f.name}</span>
+                                  <span
+                                    aria-hidden
+                                    className="inline-block h-2 w-2 shrink-0 rounded-full"
+                                    style={{ backgroundColor: cyclesCount > 0 ? "#16a34a" : "var(--color-muted)" }}
+                                    title={cyclesCount > 0 ? "Activa" : "Sin ciclos"}
+                                  />
+                                  <span className="truncate text-[15px] font-semibold leading-tight text-[var(--color-text)]">{f.name}</span>
                                 </div>
-                                {f.location && <div className="mt-0.5 text-xs text-[var(--color-muted)]">{f.location}</div>}
+                                {f.location && <div className="mt-0.5 truncate text-[11px] text-[var(--color-muted)]">{f.location}</div>}
                               </div>
                             </div>
-                            <div onClick={(e) => e.stopPropagation()}>
+                            <div onClick={(e) => e.stopPropagation()} className="shrink-0">
                               <ColorPickerButton
                                 value={layout.faenaColor[f.id] ?? null}
                                 onChange={(c) => setFaenaCardColor(f.id, c)}
                               />
                             </div>
                           </div>
-                          {f.notes && <p className="mb-3 line-clamp-2 text-xs text-[var(--color-muted)]">{f.notes}</p>}
+                          {f.notes && <p className="mb-3 line-clamp-2 text-[11px] leading-snug text-[var(--color-muted)]">{f.notes}</p>}
                           <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--color-border)] pt-3 text-xs">
                             <div className="flex flex-wrap gap-1.5">
-                              <span className="rounded-full bg-[var(--color-surface-2)] px-2 py-0.5 text-[var(--color-muted)]">
+                              <span className="rounded-full bg-[var(--color-surface-2)] px-2 py-0.5 text-[10px] font-medium text-[var(--color-muted)]">
                                 {subsCount != null ? `${subsCount} sub` : "—"}
                               </span>
-                              <span className="rounded-full bg-[var(--color-accent-soft)] px-2 py-0.5 text-[var(--color-accent)]">
+                              <span
+                                className="rounded-full px-2 py-0.5 text-[10px] font-medium"
+                                style={
+                                  cardColor && cyclesCount > 0
+                                    ? { backgroundColor: `${cardColor}22`, color: cardColor }
+                                    : cyclesCount > 0
+                                      ? { backgroundColor: "var(--color-accent-soft)", color: "var(--color-accent)" }
+                                      : { backgroundColor: "var(--color-surface-2)", color: "var(--color-muted)" }
+                                }
+                              >
                                 {cyclesCount != null ? `${cyclesCount} ciclos` : "—"}
                               </span>
                             </div>
-                            <div className="ml-auto flex shrink-0 gap-1" onClick={(e) => e.stopPropagation()}>
+                            <div className="ml-auto flex shrink-0 gap-1 opacity-70 group-hover:opacity-100 transition-opacity" onClick={(e) => e.stopPropagation()}>
                               <button
                                 onClick={() => setFaenaForm({ mode: "edit", data: { ...f } })}
                                 className="rounded-md px-2 py-1 text-[var(--color-muted)] hover:bg-[var(--color-surface-2)] hover:text-[var(--color-text)]"
@@ -1482,6 +1528,7 @@ function CycleRow({ cycle, subName, onEdit, onOpenCloseFlow, onReopen, onDelete 
 
 function SelectedDetail({
   selected,
+  cardColor,
   subs,
   cycles,
   onCreateSub,
@@ -1510,15 +1557,41 @@ function SelectedDetail({
   const allCollapsed = hasSubs && (subs || []).every((s) => collapsedSubs?.has(s.id));
 
   return (
-    <div className="mt-6 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] shadow-sm">
+    <div
+      className="relative mt-6 rounded-lg border border-[var(--color-border)] pt-6 shadow-sm"
+      style={{
+        backgroundColor: "var(--color-surface)",
+        backgroundImage: cardColor
+          ? `linear-gradient(135deg, ${cardColor}14, transparent 55%)`
+          : undefined,
+        boxShadow: cardColor
+          ? `0 6px 24px ${cardColor}22, 0 1px 3px rgb(0 0 0 / 0.06)`
+          : undefined,
+      }}
+    >
+      <span
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 top-0 h-1.5 rounded-t-lg"
+        style={{ backgroundColor: cardColor || "var(--color-border)" }}
+      />
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--color-border)] px-5 py-3">
-        <div>
-          <div className="text-xs uppercase tracking-wider text-[var(--color-muted)]">Detalle</div>
-          <div className="text-base font-semibold">{selected.name}</div>
+        <div className="flex items-center gap-3">
+          {cardColor && (
+            <span
+              aria-hidden
+              className="h-8 w-1 rounded-full"
+              style={{ backgroundColor: cardColor }}
+            />
+          )}
+          <div>
+            <div className="text-xs uppercase tracking-wider text-[var(--color-muted)]">Detalle</div>
+            <div className="text-base font-semibold">{selected.name}</div>
+          </div>
         </div>
         <button
           onClick={onCreateSub}
-          className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-[var(--color-accent-fg)] hover:bg-[var(--color-accent-hover)]"
+          className="rounded-md px-3 py-1.5 text-xs font-medium text-[var(--color-accent-fg)] transition-colors hover:opacity-90"
+          style={{ backgroundColor: cardColor || "var(--color-accent)" }}
         >
           + Subfaena
         </button>
@@ -1736,17 +1809,22 @@ function GroupHeader({ group, count, editable, isUngrouped, collapsed, onToggleC
           <div className="relative">
             <button
               onClick={() => setPickerOpen((v) => !v)}
-              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
+              className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
               title="Color del grupo"
             >
               <span
-                className="inline-block h-3 w-3 rounded-sm align-middle"
-                style={{ backgroundColor: group.color || "transparent", border: group.color ? "none" : "1px dashed var(--color-border-strong)" }}
+                className="inline-block h-3.5 w-3.5 rounded-full ring-1 ring-inset ring-black/10"
+                style={{
+                  background: group.color
+                    ? group.color
+                    : "conic-gradient(from 0deg, #ef4444, #f59e0b, #facc15, #22c55e, #06b6d4, #6366f1, #a855f7, #ec4899, #ef4444)",
+                }}
               />
-              <span className="ml-1 align-middle">color</span>
+              <span>color</span>
             </button>
             {pickerOpen && (
               <ColorPalette
+                selected={group.color}
                 onPick={(c) => { onUpdate({ color: c }); setPickerOpen(false); }}
                 onClose={() => setPickerOpen(false)}
               />
@@ -1776,41 +1854,102 @@ function ColorPickerButton({ value, onChange }) {
       <button
         onClick={() => setOpen((v) => !v)}
         title="Color de la tarjeta"
-        className="h-5 w-5 rounded-full border border-[var(--color-border)] opacity-50 hover:opacity-100"
-        style={{ backgroundColor: value || "transparent" }}
+        className="h-5 w-5 rounded-full ring-1 ring-inset ring-[var(--color-border)] transition hover:ring-[var(--color-accent)] hover:ring-2"
+        style={{
+          background: value
+            ? value
+            : "conic-gradient(from 0deg, #ef4444, #f59e0b, #facc15, #22c55e, #06b6d4, #6366f1, #a855f7, #ec4899, #ef4444)",
+        }}
       />
-      {open && <ColorPalette onPick={(c) => { onChange(c); setOpen(false); }} onClose={() => setOpen(false)} />}
+      {open && (
+        <ColorPalette
+          selected={value}
+          onPick={(c) => { onChange(c); setOpen(false); }}
+          onClose={() => setOpen(false)}
+        />
+      )}
     </div>
   );
 }
 
-function ColorPalette({ onPick, onClose }) {
+function ColorPalette({ onPick, onClose, selected }) {
   const ref = useRef(null);
   useEffect(() => {
     const onClick = (e) => { if (ref.current && !ref.current.contains(e.target)) onClose(); };
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
     setTimeout(() => document.addEventListener("mousedown", onClick), 0);
-    return () => document.removeEventListener("mousedown", onClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onClick);
+      document.removeEventListener("keydown", onKey);
+    };
   }, [onClose]);
+
+  const normalized = (selected || "").toLowerCase();
+
   return (
     <div
       ref={ref}
-      className="absolute right-0 top-full z-30 mt-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-2 shadow-lg"
+      className="absolute right-0 top-full z-30 mt-2 w-[252px] rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-3 shadow-xl ring-1 ring-black/5 backdrop-blur"
     >
-      <div className="grid grid-cols-5 gap-1">
-        {FAENA_PALETTE.map((c) => (
-          <button
-            key={c.label}
-            onClick={() => onPick(c.value)}
-            title={c.label}
-            className="h-6 w-6 rounded-md border border-[var(--color-border)] hover:scale-110 transition-transform"
-            style={{
-              backgroundColor: c.value || "transparent",
-              backgroundImage: c.value
-                ? "none"
-                : "linear-gradient(135deg, transparent 45%, var(--color-danger) 45%, var(--color-danger) 55%, transparent 55%)",
-            }}
-          />
-        ))}
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-[var(--color-muted)]">
+          Color
+        </span>
+        <button
+          type="button"
+          onClick={onClose}
+          className="rounded p-0.5 text-[var(--color-muted)] hover:bg-[var(--color-surface-2)] hover:text-[var(--color-text)]"
+          aria-label="Cerrar"
+        >
+          ✕
+        </button>
+      </div>
+      <div className="grid grid-cols-7 gap-1.5">
+        {FAENA_PALETTE.map((c) => {
+          const isSelected =
+            (c.value === null && !selected) ||
+            (c.value && c.value.toLowerCase() === normalized);
+          const noColor = c.value === null;
+          return (
+            <button
+              key={c.label}
+              onClick={() => onPick(c.value)}
+              title={c.label}
+              className={`relative h-7 w-7 rounded-md transition-transform hover:scale-110 hover:z-10 ${
+                isSelected
+                  ? "ring-2 ring-offset-2 ring-offset-[var(--color-surface)] ring-[var(--color-accent)]"
+                  : "ring-1 ring-inset ring-black/10"
+              }`}
+              style={{
+                backgroundColor: c.value || "var(--color-surface-2)",
+                backgroundImage: noColor
+                  ? "linear-gradient(135deg, transparent 46%, var(--color-danger) 46%, var(--color-danger) 54%, transparent 54%)"
+                  : undefined,
+                boxShadow: c.value && isSelected ? `0 4px 14px ${c.value}55` : undefined,
+              }}
+            >
+              {isSelected && c.value && (
+                <span aria-hidden className="absolute inset-0 flex items-center justify-center text-[12px] font-bold leading-none text-white drop-shadow-[0_1px_0_rgba(0,0,0,0.35)]">
+                  ✓
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+      <div className="mt-3 flex items-center gap-2 border-t border-[var(--color-border)] pt-3">
+        <label className="text-[11px] text-[var(--color-muted)]">Custom</label>
+        <input
+          type="color"
+          value={selected || "#000000"}
+          onChange={(e) => onPick(e.target.value)}
+          className="h-6 w-10 cursor-pointer rounded border border-[var(--color-border)] bg-transparent p-0"
+          title="Elegí un color personalizado"
+        />
+        <span className="ml-auto font-mono text-[10px] text-[var(--color-muted)]">
+          {selected ? selected.toUpperCase() : "—"}
+        </span>
       </div>
     </div>
   );

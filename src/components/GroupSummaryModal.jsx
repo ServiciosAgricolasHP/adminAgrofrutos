@@ -550,6 +550,7 @@ function ResultUI({
                     anticiposSaldo={wd.anticiposSaldo || 0}
                     bonosSaldo={wd.bonosSaldo || 0}
                     titles={{ main: "DETALLE DE JORNADA", subtitle: w.name || "" }}
+                    catalogs={catalogs}
                   />
                 )}
               </div>

@@ -954,7 +954,13 @@ export default function CycleDetail() {
     return out;
   }, [isCosechaLabor, activeLabor, workdaysByLabor, days, workers, dayCombosByDate]);
 
-  // Per-tier metrics for trato labors
+  // Per-tier metrics for trato labors.
+  //
+  // Importante: cada workday se normaliza a `tiers: { "0": ... }` aunque sea
+  // de t1/t2 (ver `normalizeTratoWorkday`), así que iterar `wd.tiers` no
+  // distingue tiers. El tier real vive en la 3ra parte de la clave del map
+  // (`workdayMapKey` = `rut__date__ck`), igual que en buildDailyRows. De ahí
+  // sacamos el `tierIdx` y agrupamos por tier reales.
   const tratoTierMetricsByLabor = useMemo(() => {
     const out = {};
     if (!cycle?.labors) return out;
@@ -964,16 +970,18 @@ export default function CycleDetail() {
       const tiers = {};
       for (const k in m) {
         const wd = m[k];
-        if (!wd?.tiers) continue;
-        for (const [tk, tv] of Object.entries(wd.tiers)) {
-          const idx = Number(tk);
-          if (!tiers[idx]) tiers[idx] = { qty: 0, amount: 0, workerCount: new Set() };
-          tiers[idx].qty += Number(tv?.qty) || 0;
-          tiers[idx].amount += Number(tv?.amount) || 0;
-          tiers[idx].workerCount.add(wd.workerRut);
-        }
+        if (!wd || wd.pisoOnly) continue;
+        const parts = String(k).split("__");
+        const tierKey = parts[2] || "t0";
+        const idx = tierKey.startsWith("t") ? Number(tierKey.slice(1)) || 0 : 0;
+        if (!tiers[idx]) tiers[idx] = { qty: 0, amount: 0, workerCount: new Set() };
+        // El total real del wd lo da getTratoTierTotals (prioriza top-level
+        // qty/amount sobre el espejo tiers — ver doc del helper).
+        const t = getTratoTierTotals(wd);
+        tiers[idx].qty += t.qty;
+        tiers[idx].amount += t.amount;
+        if (wd.workerRut) tiers[idx].workerCount.add(wd.workerRut);
       }
-      // Convert Sets to counts for serialization
       for (const idx of Object.keys(tiers)) tiers[idx].workerCount = tiers[idx].workerCount.size;
       out[l.id] = tiers;
     }
@@ -3247,15 +3255,22 @@ export default function CycleDetail() {
               <div className="mt-2 flex flex-wrap gap-2">
                 {days.map((d) => {
                   const tiers = dayTiersByDate[d] || [];
-                  // Calculate total qty and amount from workday records
-                  let totalQty = 0, totalAmt = 0;
-                  for (const w of workers) {
-                    for (const t of tiers) {
+                  // Métricas por tier en este día: cada tier tiene su propia
+                  // suma de qty/amount para diferenciarlo del agregado del día.
+                  const tierTotals = tiers.map((t) => {
+                    let q = 0, a = 0;
+                    for (const w of workers) {
                       const wd = wdMap[workdayMapKey(w.rut, d, t.key)];
-                      totalQty += Number(wd?.qty) || 0;
-                      totalAmt += Number(wd?.amount) || 0;
+                      q += Number(wd?.qty) || 0;
+                      a += Number(wd?.amount) || 0;
                     }
-                  }
+                    return { qty: q, amount: a };
+                  });
+                  const totalQty = tierTotals.reduce((s, x) => s + x.qty, 0);
+                  const totalAmt = tierTotals.reduce((s, x) => s + x.amount, 0);
+                  // Hay desglose visible cuando existen ≥2 tiers con producción
+                  // — sino la línea final "=$X" alcanza por sí sola.
+                  const tiersWithQty = tierTotals.filter((x) => x.qty > 0).length;
                   return (
                     <div
                       key={d}
@@ -3269,7 +3284,9 @@ export default function CycleDetail() {
                         <span className="font-medium text-[var(--color-text)]">{d}</span>
                         {totalQty > 0 && <span className="text-[var(--color-muted)]">{totalQty.toLocaleString("es-CL")}</span>}
                       </div>
-                      {tiers.map((t, i) => (
+                      {tiers.map((t, i) => {
+                        const tt = tierTotals[i] || { qty: 0, amount: 0 };
+                        return (
                         <div key={t.key} className="flex items-center gap-1 rounded-md bg-[var(--color-surface)] px-2 py-1">
                           <span className="text-[var(--color-muted)] text-[10px] w-12">P{i + 1}</span>
                           <span className="text-[var(--color-muted)]">$</span>
@@ -3336,6 +3353,14 @@ export default function CycleDetail() {
                               /día
                             </button>
                           </div>
+                          {tt.qty > 0 && (
+                            <span
+                              className="ml-1 text-[10px] tabular-nums text-[var(--color-muted)]"
+                              title="Total de este tier en el día (cantidad · monto)"
+                            >
+                              {tt.qty.toLocaleString("es-CL")} · {fmtCurrency(tt.amount)}
+                            </span>
+                          )}
                           {tiers.length > 1 && (
                             <button
                               disabled={readOnly}
@@ -3353,7 +3378,8 @@ export default function CycleDetail() {
                             </button>
                           )}
                         </div>
-                      ))}
+                        );
+                      })}
                       {!readOnly && (
                         <button
                           onClick={() =>
@@ -3372,6 +3398,14 @@ export default function CycleDetail() {
                       )}
                       {totalAmt > 0 && (
                         <div className="text-[var(--color-accent)] font-medium tabular-nums text-[11px]">
+                          {tiersWithQty > 1 && (
+                            <div className="mb-0.5 text-[10px] font-normal text-[var(--color-muted)]">
+                              {tierTotals
+                                .map((tt, i) => (tt.qty > 0 ? `P${i + 1} ${fmtCurrency(tt.amount)}` : null))
+                                .filter(Boolean)
+                                .join(" · ")}
+                            </div>
+                          )}
                           = {fmtCurrency(totalAmt)}
                         </div>
                       )}
