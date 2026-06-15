@@ -2498,8 +2498,10 @@ export default function CycleDetail() {
               cellRenderer: (p) => {
                 const v = Number(p.value) || 0;
                 if (v) {
+                  // Negro hardcoded: el grid es blanco en ambos temas, y
+                  // var(--color-text) en dark deja el monto casi invisible.
                   return (
-                    <span className="font-semibold tabular-nums text-[var(--color-text)]">
+                    <span className="font-bold tabular-nums" style={{ color: "#000" }}>
                       {fmtCurrency(v)}
                     </span>
                   );
@@ -2512,7 +2514,10 @@ export default function CycleDetail() {
                       e.stopPropagation();
                       await upsertTratoHEWorkday(activeLabor.id, d, p.data.rut, { qty: suggested });
                     }}
-                    className="flex h-full w-full items-center justify-end gap-1 text-[10px] italic opacity-50 text-[var(--color-muted)] hover:opacity-100 hover:text-[var(--color-accent)] hover:not-italic"
+                    className="flex h-full w-full items-center justify-end gap-1 text-[10px] italic hover:not-italic"
+                    style={{ color: "#9ca3af" }}
+                    onMouseEnter={(e) => { e.currentTarget.style.color = "#16a34a"; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.color = "#9ca3af"; }}
                     title={`Click: usar base sugerida ${fmtCurrency(suggested)}. Doble click después para modificar.`}
                   >
                     <span className="text-[8px]">+</span>
@@ -2614,8 +2619,11 @@ export default function CycleDetail() {
           }
           const amt = Number(p.value) || 0;
           if (amt) {
+            // Color hardcoded a negro: ag-grid sirve fondo blanco en ambos
+            // temas (claro y oscuro) y `var(--color-text)` en dark es claro,
+            // lo que dejaba el monto casi invisible en el grid.
             return (
-              <span className="font-semibold tabular-nums text-[var(--color-text)]">
+              <span className="font-bold tabular-nums" style={{ color: "#000" }}>
                 {fmtCurrency(amt)}
               </span>
             );
@@ -2627,7 +2635,10 @@ export default function CycleDetail() {
                 e.stopPropagation();
                 await upsertNormalWorkdayAmount(activeLabor.id, d, p.data.rut, suggested);
               }}
-              className="flex h-full w-full items-center justify-end gap-1 text-[10px] italic opacity-50 text-[var(--color-muted)] hover:opacity-100 hover:text-[var(--color-accent)] hover:not-italic"
+              className="flex h-full w-full items-center justify-end gap-1 text-[10px] italic hover:not-italic"
+              style={{ color: "#9ca3af" }}
+              onMouseEnter={(e) => { e.currentTarget.style.color = "#16a34a"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.color = "#9ca3af"; }}
               title={`Click: usar precio sugerido ${fmtCurrency(suggested)}. Doble click después para modificar.`}
             >
               <span className="text-[8px]">+</span>
