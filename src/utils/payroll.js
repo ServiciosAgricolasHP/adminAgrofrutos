@@ -314,11 +314,47 @@ function buildEfectivoSheet(wb, cashItems, cycles) {
 }
 
 // ─────────────────────────── Resumen sheet ───────────────────────────
+// Formatea un rango como "dd/mm → dd/mm" o "dd/mm" si es un solo día. Recibe
+// strings "YYYY-MM-DD" (los que persistimos en cycle.days). Si falta uno
+// devuelve el otro o vacío.
+function fmtPeriod(first, last) {
+  const fmt = (d) => {
+    if (!d || typeof d !== "string") return "";
+    const m = d.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return d;
+    return `${m[3]}/${m[2]}`;
+  };
+  const a = fmt(first);
+  const b = fmt(last);
+  if (a && b && a !== b) return `${a} → ${b}`;
+  return a || b || "—";
+}
+
 function buildResumenSheet(wb, bankItems, cashItems, cycles) {
   const ws = wb.addWorksheet("Resumen");
   const headers = ["Concepto", ...cycles.map((c) => c.label || c.id), "TOTAL"];
   ws.addRow(headers);
   ws.getRow(1).eachCell((c) => (c.style = STYLE_HEADER));
+
+  // Fila Período: primer y último día de cada ciclo. Solo si al menos un
+  // ciclo trae fechas (las nóminas viejas no tienen firstDay/lastDay
+  // persistido y entonces saltamos esta fila para no ensuciar).
+  const hasAnyPeriod = cycles.some((c) => c.firstDay || c.lastDay);
+  if (hasAnyPeriod) {
+    const periodRow = ws.addRow([
+      "Período",
+      ...cycles.map((c) => fmtPeriod(c.firstDay, c.lastDay)),
+      "",
+    ]);
+    periodRow.eachCell({ includeEmpty: true }, (cell) => {
+      cell.style = {
+        font: { italic: true, color: { argb: "FF595959" } },
+        fill: fill("FFF2F2F2"),
+        border: BORDER_ALL,
+        alignment: { horizontal: "center" },
+      };
+    });
+  }
 
   const sumByCycle = (items) =>
     cycles.map((c) => items.reduce((s, it) => s + (it.byCycle?.[c.id] || 0), 0));

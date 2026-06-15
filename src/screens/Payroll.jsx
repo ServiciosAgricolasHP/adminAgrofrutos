@@ -126,6 +126,9 @@ export default function Payroll() {
 
   // Per-cycle aggregates: { [cycleId]: { unpaid, paid, total } }
   const [cycleStats, setCycleStats] = useState({});
+  // Estado independiente del loading inicial: cuando el usuario pide refrescar
+  // mostramos un spinner en el botón sin tapar toda la pantalla con "Cargando…".
+  const [refreshing, setRefreshing] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -180,6 +183,29 @@ export default function Payroll() {
   useEffect(() => {
     load();
   }, []);
+
+  // Forzar lectura desde Firestore ignorando la cache local (mem + localStorage).
+  // Útil cuando otro usuario agregó workers/labores/workdays justo antes de
+  // generar una nómina y la TTL no caducó todavía. Invalida los scopes que
+  // alimentan el armado de la nómina y recarga.
+  const refresh = async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      faenasService.invalidate();
+      subfaenasService.invalidate();
+      cyclesService.invalidate();
+      workersService.invalidate();
+      payrollsService.invalidate();
+      await load();
+      toast.success("Datos actualizados");
+    } catch (err) {
+      console.error(err);
+      toast.error("No se pudo recargar.");
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   // Group active cycles by faena (and subfaena).
   const activeByFaena = useMemo(() => {
@@ -471,6 +497,10 @@ export default function Payroll() {
       const cycleDetails = selectedCycles.map((c) => {
         const f = faenas.find((x) => x.id === c.faenaId);
         const s = subfaenas.find((x) => x.id === c.subfaenaId);
+        // Período del ciclo (primer y último día). Lo tomamos de cycle.days
+        // — son los días que el usuario marcó en el ciclo. Ordenamos por las
+        // dudas (en general ya vienen ordenados pero no es invariante).
+        const days = Array.isArray(c.days) ? [...c.days].sort() : [];
         return {
           id: c.id,
           label: c.label || c.id,
@@ -478,6 +508,8 @@ export default function Payroll() {
           faenaName: f?.name || "",
           subfaenaId: c.subfaenaId || "",
           subfaenaName: s?.name || "",
+          firstDay: days[0] || "",
+          lastDay: days[days.length - 1] || "",
         };
       });
 
@@ -789,14 +821,31 @@ export default function Payroll() {
     // Aplicar overrides persistidos en el doc (lo que el usuario editó vía
     // "📝 Editar encabezados") para que el XLSX use los nombres cortos.
     const overrides = p.cycleLabelOverrides || {};
-    const cyclesForExport = (p.cycleDetails || []).map((c) => ({
-      id: c.id,
-      label: overrides[c.id] || c.label,
-      faenaId: c.faenaId,
-      faenaName: c.faenaName,
-      subfaenaId: c.subfaenaId,
-      subfaenaName: c.subfaenaName,
-    }));
+    const cyclesForExport = (p.cycleDetails || []).map((c) => {
+      // Fallback para nóminas viejas (sin firstDay/lastDay persistido):
+      // miramos el cycle vivo en memoria. Si tampoco está disponible
+      // (cycle borrado), queda vacío y la fila Período no se incluye.
+      let firstDay = c.firstDay || "";
+      let lastDay = c.lastDay || "";
+      if (!firstDay && !lastDay) {
+        const live = cycles.find((x) => x.id === c.id);
+        if (live && Array.isArray(live.days) && live.days.length) {
+          const sorted = [...live.days].sort();
+          firstDay = sorted[0];
+          lastDay = sorted[sorted.length - 1];
+        }
+      }
+      return {
+        id: c.id,
+        label: overrides[c.id] || c.label,
+        faenaId: c.faenaId,
+        faenaName: c.faenaName,
+        subfaenaId: c.subfaenaId,
+        subfaenaName: c.subfaenaName,
+        firstDay,
+        lastDay,
+      };
+    });
     if (cyclesForExport.length === 0 && p.cycleIds) {
       for (const id of p.cycleIds) cyclesForExport.push({ id, label: overrides[id] || id });
     }
@@ -839,23 +888,34 @@ export default function Payroll() {
           <h1 className="text-2xl font-semibold tracking-tight">Nómina</h1>
           <p className="text-sm text-[var(--color-muted)]">Generar nóminas Banco de Chile a partir de ciclos activos</p>
         </div>
-        <div className="flex gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] p-1 text-sm">
+        <div className="flex items-center gap-2">
           <button
-            onClick={() => setTab("create")}
-            className={`rounded px-3 py-1 ${
-              tab === "create" ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]" : "text-[var(--color-muted)]"
-            }`}
+            onClick={refresh}
+            disabled={refreshing || loading}
+            title="Forzar recarga desde el servidor (ignora la cache local). Útil si otro usuario agregó workers, labores o jornadas recién."
+            className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm text-[var(--color-fg)] hover:bg-[var(--color-surface-3)] disabled:opacity-50"
           >
-            Generar
+            <span className={refreshing ? "inline-block animate-spin" : "inline-block"}>↻</span>
+            <span>{refreshing ? "Recargando…" : "Recargar datos"}</span>
           </button>
-          <button
-            onClick={() => setTab("history")}
-            className={`rounded px-3 py-1 ${
-              tab === "history" ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]" : "text-[var(--color-muted)]"
-            }`}
-          >
-            Historial ({payrolls.length})
-          </button>
+          <div className="flex gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] p-1 text-sm">
+            <button
+              onClick={() => setTab("create")}
+              className={`rounded px-3 py-1 ${
+                tab === "create" ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]" : "text-[var(--color-muted)]"
+              }`}
+            >
+              Generar
+            </button>
+            <button
+              onClick={() => setTab("history")}
+              className={`rounded px-3 py-1 ${
+                tab === "history" ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]" : "text-[var(--color-muted)]"
+              }`}
+            >
+              Historial ({payrolls.length})
+            </button>
+          </div>
         </div>
       </div>
 
@@ -2166,6 +2226,32 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
   const overviewTitle = isDetail ? "Detalle de pago" : "Comprobante de pago en efectivo";
   const docTitle = isDetail ? `${payroll.name} — Detalle pago` : `${payroll.name} — Efectivo`;
   const cycleLabel = (cycleId) => titleOverrides[cycleId] || cyclesById[cycleId]?.label || cycleDetails.find((c) => c.id === cycleId)?.label || cycleId;
+  // Período del ciclo en formato dd/mm → dd/mm. Prioridad: cycleDetails
+  // persistido (firstDay/lastDay), luego cyclesById (cycle.days vivo) como
+  // fallback para nóminas viejas que no tienen el período guardado.
+  const fmtDayShort = (d) => {
+    if (!d || typeof d !== "string") return "";
+    const m = d.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    return m ? `${m[3]}/${m[2]}` : d;
+  };
+  const cyclePeriod = (cycleId) => {
+    const cd = cycleDetails.find((c) => c.id === cycleId);
+    let first = cd?.firstDay || "";
+    let last = cd?.lastDay || "";
+    if (!first && !last) {
+      const days = cyclesById[cycleId]?.days;
+      if (Array.isArray(days) && days.length) {
+        const sorted = [...days].sort();
+        first = sorted[0]; last = sorted[sorted.length - 1];
+      }
+    }
+    const a = fmtDayShort(first);
+    const b = fmtDayShort(last);
+    if (a && b && a !== b) return `${a} → ${b}`;
+    return a || b || "";
+  };
+  // El subtítulo solo muestra los nombres de ciclo — el período va en una
+  // columna propia de la tabla, no acá.
   const cyclesLine = cycleDetails.map((c) => cycleLabel(c.id)).join(" · ");
   const fmt = (v) =>
     new Intl.NumberFormat("es-CL", { style: "currency", currency: "CLP", minimumFractionDigits: 0 }).format(
@@ -2212,8 +2298,49 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
         ? `<th style="width:110px;text-align:right">Bono</th>`
         : "";
 
+      // Desglose por subfaena/labor del trabajador. Sumamos lo que ganó por
+      // cada (subfaena, labor) atravesando todos los ciclos del grupo. Se
+      // muestra solo en el comprobante de efectivo (no detail), porque ahí
+      // no hay columnas por ciclo y el operador necesita ver de un vistazo
+      // por qué se le paga ese monto antes de firmar.
+      const workerBreakdown = (it) => {
+        const acc = new Map();
+        const groupSnapshots = workdaysByGroup[g.leader] || {};
+        for (const cid of Object.keys(groupSnapshots)) {
+          const cd = cycleDetails.find((c) => c.id === cid);
+          const subName = cd?.subfaenaName || cd?.label || cycleLabel(cid);
+          const snapshots = groupSnapshots[cid] || [];
+          for (const snap of snapshots) {
+            const row = snap.rows.find((r) => r.rut === it.rut);
+            if (!row || !(row.totalAmount > 0)) continue;
+            const key = `${subName}||${snap.laborName}`;
+            const cur = acc.get(key) || { subfaena: subName, labor: snap.laborName, amount: 0 };
+            cur.amount += row.totalAmount;
+            acc.set(key, cur);
+          }
+        }
+        return [...acc.values()].sort((a, b) => {
+          const s = a.subfaena.localeCompare(b.subfaena, "es");
+          return s !== 0 ? s : a.labor.localeCompare(b.labor, "es");
+        });
+      };
+      const renderDetalle = (it) => {
+        const list = workerBreakdown(it);
+        if (list.length === 0) return "—";
+        return list.map((b) =>
+          `<div style="font-size:10px;line-height:1.35"><span style="color:#666">${b.subfaena} · ${b.labor}:</span> <b>${fmt(b.amount)}</b></div>`
+        ).join("");
+      };
+
       const rows = g.items
-        .map((it, i) => {
+        .map((it, i, arr) => {
+          // Las últimas 3 filas se marcan para que el navegador trate de no
+          // cortar la página entre ellas y la firma. Junto con
+          // `break-after:avoid` en tfoot y `break-inside:avoid` en
+          // .signs-block, si la firma no entra en la página actual, el
+          // navegador empuja también estas filas a la página siguiente —
+          // así la firma nunca queda sola.
+          const keepWithSign = i >= arr.length - 3;
           const cellsByCycle = showCycleCols
             ? cycleCols
                 .map(
@@ -2235,10 +2362,11 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
               }</td>`
             : "";
           return `
-            <tr style="background:${itemFill}">
+            <tr class="${keepWithSign ? "keep-with-sign" : ""}" style="background:${itemFill}">
               <td>${i + 1}</td>
               <td>${it.name}</td>
               <td class="mono">${fmtRut(it.rut)}</td>
+              <td style="vertical-align:top">${renderDetalle(it)}</td>
               ${cellsByCycle}
               ${advanceCell}
               ${bonusCell}
@@ -2435,7 +2563,7 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
             <th style="width:30px">#</th>
             <th>Nombre</th>
             <th style="width:110px">RUT</th>
-            ${isDetail ? '<th style="width:90px">Forma pago</th>' : ""}
+            ${isDetail ? '<th style="width:90px">Forma pago</th>' : '<th style="width:240px">Detalle</th>'}
             ${cycleHeaders}
             ${advanceHeader}
             ${bonusHeader}
@@ -2448,7 +2576,7 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
         </tbody>
         <tfoot>
           <tr style="background:${leaderFill}">
-            <td colspan="${isDetail ? totalColSpan + 1 : totalColSpan}" style="text-align:right"><b>Subtotal ${g.leader}</b></td>
+            <td colspan="${totalColSpan + 1}" style="text-align:right"><b>Subtotal ${g.leader}</b></td>
             ${subtotalCells}
             ${advanceSubtotalCell}
             ${bonusSubtotalCell}
@@ -2458,10 +2586,16 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
         </tfoot>
       </table>
       ${isDetail ? "" : `
-      <div class="signs">
-        <div class="sign sign-right">
-          <div class="line"></div>
-          <div>Firma líder (${g.leader})</div>
+      <div class="signs-block">
+        <div class="signs-recap">
+          Subtotal ${g.leader} · ${g.items.length} persona${g.items.length === 1 ? "" : "s"}:
+          <b>${fmt(g.total)}</b>
+        </div>
+        <div class="signs">
+          <div class="sign sign-right">
+            <div class="line"></div>
+            <div>Firma líder (${g.leader})</div>
+          </div>
         </div>
       </div>`}
     </section>`;
@@ -2491,6 +2625,31 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
   // Con cuenta RUT vs Efectivo + TOTAL. Se rinde solo en mode "detail".
   const subfaenaSummaryHtml = (isDetail && subfaenaSummary && subfaenaSummary.rows.length > 0)
     ? (() => {
+        // Período por subfaena: el span total que cubren los ciclos de esa
+        // subfaena (primer día más temprano → último día más tardío). Si hay
+        // un solo ciclo, queda el rango del ciclo tal cual.
+        const subfaenaPeriod = (cycleIds) => {
+          let minFirst = null;
+          let maxLast = null;
+          for (const cid of cycleIds) {
+            const cd = cycleDetails.find((c) => c.id === cid);
+            let first = cd?.firstDay || "";
+            let last = cd?.lastDay || "";
+            if (!first && !last) {
+              const days = cyclesById[cid]?.days;
+              if (Array.isArray(days) && days.length) {
+                const sorted = [...days].sort();
+                first = sorted[0]; last = sorted[sorted.length - 1];
+              }
+            }
+            if (first && (!minFirst || first < minFirst)) minFirst = first;
+            if (last && (!maxLast || last > maxLast)) maxLast = last;
+          }
+          const a = fmtDayShort(minFirst);
+          const b = fmtDayShort(maxLast);
+          if (a && b && a !== b) return `${a} → ${b}`;
+          return a || b || "—";
+        };
         let prevFaena = null;
         const rowsHtml = subfaenaSummary.rows.map((r) => {
           const showFaena = r.faenaName !== prevFaena;
@@ -2499,6 +2658,7 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
             <tr>
               <td>${showFaena ? r.faenaName : ""}</td>
               <td>${r.subfaenaName}</td>
+              <td style="font-size:11px;color:#444">${subfaenaPeriod(r.cycleIds)}</td>
               <td style="text-align:right">${fmt(r.bank)}</td>
               <td style="text-align:right">${fmt(r.cash)}</td>
               <td style="text-align:right"><b>${fmt(r.total)}</b></td>
@@ -2517,6 +2677,7 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
               <tr>
                 <th>Faena</th>
                 <th>Subfaena</th>
+                <th style="width:130px">Período</th>
                 <th style="text-align:right">Con cuenta RUT</th>
                 <th style="text-align:right">Efectivo</th>
                 <th style="text-align:right">TOTAL</th>
@@ -2525,7 +2686,7 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
             <tbody>${rowsHtml}</tbody>
             <tfoot>
               <tr class="summary-total">
-                <td colspan="2"><b>TOTAL</b></td>
+                <td colspan="3"><b>TOTAL</b></td>
                 <td style="text-align:right"><b>${fmt(subfaenaSummary.totals.bank)}</b></td>
                 <td style="text-align:right"><b>${fmt(subfaenaSummary.totals.cash)}</b></td>
                 <td style="text-align:right"><b>${fmt(subfaenaSummary.totals.total)}</b></td>
@@ -2597,10 +2758,25 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
   th, td { border: 1px solid #999; padding: 5px 7px; }
   th .muted { font-weight: normal; color: #666; font-size: 10px; }
   .mono { font-family: ui-monospace, monospace; }
-  .signs { display: flex; justify-content: flex-end; margin-top: 48px; gap: 60px; font-size: 12px; }
-  .sign { width: 280px; text-align: center; }
+  /* Bloque firma + recap del subtotal. El recap repite el subtotal del grupo
+     justo encima de la firma — si la paginación rompe entre la tabla y la
+     firma, el recap garantiza que la página de la firma no quede vacía de
+     contexto (subtotal grupo X · N personas · $YYY). break-inside: avoid
+     mantiene el recap pegado a la firma como una unidad. Tamaños comprimidos
+     ~75% del original para minimizar casos borde de paginación. */
+  /* Cadena de "avoid break" para que la firma jamás quede sola en una hoja:
+     últimas 3 filas (.keep-with-sign) → tfoot → .signs-block. Si la firma
+     no entra en la página actual, el navegador empuja también las 3 filas
+     marcadas y el tfoot a la página siguiente. Soportado por todos los
+     navegadores modernos en print (Chrome/Edge/Firefox/Safari). */
+  tbody tr.keep-with-sign { break-after: avoid; page-break-after: avoid; }
+  tfoot { break-after: avoid; page-break-after: avoid; }
+  .signs-block { break-inside: avoid; page-break-inside: avoid; margin-top: 18px; }
+  .signs-recap { text-align: right; font-size: 10px; color: #444; padding: 4px 0; border-top: 1px dashed #999; }
+  .signs { display: flex; justify-content: flex-end; margin-top: 18px; gap: 45px; font-size: 11px; }
+  .sign { width: 210px; text-align: center; }
   .sign-right { margin-left: auto; }
-  .line { border-top: 1px solid #444; margin-bottom: 4px; height: 30px; }
+  .line { border-top: 1px solid #444; margin-bottom: 3px; height: 22px; }
   .detail-title { font-size: 14px; margin: 24px 0 8px; padding-bottom: 4px; border-bottom: 1px solid #999; }
   .detail { margin-top: 12px; }
   .detail h3 { font-size: 12px; padding: 4px 8px; margin: 0 0 6px; border: 1px solid #999; }

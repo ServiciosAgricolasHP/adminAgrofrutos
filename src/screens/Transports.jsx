@@ -3580,6 +3580,11 @@ const PrintablePayrollTable = forwardRef(function PrintablePayrollTable(
 ) {
   const tripsCount = items.reduce((s, it) => s + (it.tripIds || []).length, 0);
   const total = items.reduce((s, it) => s + (Number(it.total) || 0), 0);
+  const totalPaid = items.reduce((s, it) => s + (it.status === "paid" ? (Number(it.total) || 0) : 0), 0);
+  const totalPending = total - totalPaid;
+  const paidCount = items.filter((it) => it.status === "paid").length;
+  const pendingCount = items.length - paidCount;
+  const isPaid = payroll.status === "paid";
   const period = (payroll.periodFrom || payroll.periodTo)
     ? `${payroll.periodFrom || "?"} → ${payroll.periodTo || "?"}`
     : "—";
@@ -3590,6 +3595,20 @@ const PrintablePayrollTable = forwardRef(function PrintablePayrollTable(
           DETALLE QUINCENA — {payroll.name}
         </div>
         <div style={{ fontSize: 12, color: "#444" }}>{period}</div>
+      </div>
+      <div style={{ marginBottom: 8, display: "flex", gap: 12, fontSize: 12, color: "#000" }}>
+        <span><strong>Total:</strong> {fmtCurrency(total)}</span>
+        {!isPaid && totalPending > 0 && pendingCount < items.length && (
+          <>
+            <span style={{ color: "#a16207" }}>
+              <strong>Pendiente ({pendingCount}):</strong> {fmtCurrency(totalPending)}
+            </span>
+            <span style={{ color: "#15803d" }}>
+              <strong>Pagado ({paidCount}):</strong> {fmtCurrency(totalPaid)}
+            </span>
+          </>
+        )}
+        {isPaid && <span style={{ color: "#15803d", fontWeight: 700 }}>QUINCENA PAGADA</span>}
       </div>
       <table style={{ borderCollapse: "collapse", width: "100%" }}>
         <thead>
@@ -3606,13 +3625,16 @@ const PrintablePayrollTable = forwardRef(function PrintablePayrollTable(
           {items.map((it, i) => {
             const carrier = carriersById.get(it.carrierId);
             const itemPeriod = (it.periodFrom || it.periodTo) ? `${it.periodFrom || "?"} → ${it.periodTo || "?"}` : "—";
+            const itemPaid = it.status === "paid";
             return (
-              <tr key={it.id}>
+              <tr key={it.id} style={itemPaid ? { background: "#f3f4f6", color: "#6b7280" } : undefined}>
                 <td style={{ ...cell, textAlign: "center" }}>{i + 1}</td>
                 <td style={cell}>{carrier?.alias || it.carrierId}</td>
                 <td style={{ ...cell, textAlign: "center", fontVariantNumeric: "tabular-nums" }}>{(it.tripIds || []).length}</td>
                 <td style={cell}>{itemPeriod}</td>
-                <td style={cell}>{it.status === "paid" ? "Pagado" : "Pendiente"}</td>
+                <td style={{ ...cell, fontWeight: itemPaid ? 700 : 400, color: itemPaid ? "#15803d" : "#a16207" }}>
+                  {itemPaid ? "Pagado" : "Pendiente"}
+                </td>
                 <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(it.total)}</td>
               </tr>
             );
@@ -3623,6 +3645,26 @@ const PrintablePayrollTable = forwardRef(function PrintablePayrollTable(
             <td style={cell} colSpan={2}></td>
             <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(total)}</td>
           </tr>
+          {paidCount > 0 && pendingCount > 0 && !isPaid && (
+            <tr style={{ background: "#f3f4f6" }}>
+              <td style={{ ...cell, fontSize: 11, color: "#6b7280" }} colSpan={2}>Pagado ({paidCount})</td>
+              <td style={cell} colSpan={3}></td>
+              <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums", fontSize: 11, color: "#6b7280" }}>
+                {fmtCurrency(totalPaid)}
+              </td>
+            </tr>
+          )}
+          {pendingCount > 0 && !isPaid && (
+            <tr style={{ background: "#fef3c7" }}>
+              <td style={{ ...cell, fontWeight: 700, color: "#a16207" }} colSpan={2}>
+                PENDIENTE ({pendingCount})
+              </td>
+              <td style={cell} colSpan={3}></td>
+              <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums", color: "#a16207" }}>
+                {fmtCurrency(totalPending)}
+              </td>
+            </tr>
+          )}
         </tbody>
       </table>
     </div>
@@ -3640,6 +3682,15 @@ function PayrollDetailModal({
   const printRef = useRef(null);
   const [busy, setBusy] = useState("");
   const isPaid = payroll.status === "paid";
+  // Totales por estado: la quincena puede tener resúmenes ya pagados
+  // individualmente (con el botón "💰 Pagar" por ítem) aunque la quincena
+  // todavía no se marque como pagada en bloque. Mostramos el pendiente
+  // separado para que se vea cuánto queda por desembolsar.
+  const totalAll = items.reduce((s, it) => s + (Number(it.total) || 0), 0);
+  const totalPaid = items.reduce((s, it) => s + (it.status === "paid" ? (Number(it.total) || 0) : 0), 0);
+  const totalPending = totalAll - totalPaid;
+  const paidCount = items.filter((it) => it.status === "paid").length;
+  const pendingCount = items.length - paidCount;
 
   const onAddConfirm = async () => {
     await onAddSummaries([...adding]);
@@ -3743,9 +3794,22 @@ function PayrollDetailModal({
             {payroll.periodFrom || "?"} → {payroll.periodTo || "?"}
           </span>
         )}
-        <span className="ml-auto">
-          <span className="text-[var(--color-muted)]">Total: </span>
-          <span className="font-semibold tabular-nums">{fmtCurrency(payroll.total)}</span>
+        <span className="ml-auto flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
+          <span>
+            <span className="text-[var(--color-muted)]">Total: </span>
+            <span className="font-semibold tabular-nums">{fmtCurrency(totalAll)}</span>
+          </span>
+          {totalPending > 0 && !isPaid && (
+            <span>
+              <span className="text-[var(--color-muted)]">Pendiente: </span>
+              <span className="font-semibold tabular-nums text-[var(--color-warning)]">{fmtCurrency(totalPending)}</span>
+              {paidCount > 0 && (
+                <span className="ml-1 text-[10px] text-[var(--color-muted)]">
+                  ({paidCount} de {items.length} pagado{paidCount === 1 ? "" : "s"})
+                </span>
+              )}
+            </span>
+          )}
         </span>
       </div>
       {payroll.notes && (
@@ -3917,10 +3981,38 @@ function PayrollDetailModal({
                 <td className="hidden md:table-cell" />
                 <td />
                 <td className="px-2 py-2 text-right font-semibold tabular-nums">
-                  {fmtCurrency(items.reduce((s, it) => s + (Number(it.total) || 0), 0))}
+                  {fmtCurrency(totalAll)}
                 </td>
                 {!isPaid && <td />}
               </tr>
+              {paidCount > 0 && pendingCount > 0 && (
+                <tr className="bg-[var(--color-surface)]">
+                  <td className="px-2 py-1.5 text-xs text-[var(--color-muted)]" colSpan={2}>
+                    Pagado ({paidCount})
+                  </td>
+                  <td />
+                  <td className="hidden md:table-cell" />
+                  <td />
+                  <td className="px-2 py-1.5 text-right text-xs tabular-nums text-[var(--color-muted)]">
+                    {fmtCurrency(totalPaid)}
+                  </td>
+                  {!isPaid && <td />}
+                </tr>
+              )}
+              {pendingCount > 0 && !isPaid && (
+                <tr className="bg-[var(--color-warning-soft)]">
+                  <td className="px-2 py-2 text-sm font-semibold text-[var(--color-warning)]" colSpan={2}>
+                    PENDIENTE ({pendingCount})
+                  </td>
+                  <td />
+                  <td className="hidden md:table-cell" />
+                  <td />
+                  <td className="px-2 py-2 text-right text-sm font-semibold tabular-nums text-[var(--color-warning)]">
+                    {fmtCurrency(totalPending)}
+                  </td>
+                  <td />
+                </tr>
+              )}
             </tbody>
           </table>
         </div>

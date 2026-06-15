@@ -628,6 +628,10 @@ export default function CycleDetail() {
   const isTratoLabor = activeLabor?.type === "trato";
   const isTratoHELabor = activeLabor?.type === "tratoHE";
   const isQtyLabor = isCosechaLabor || isTratoLabor || isTratoHELabor;
+  // Labores que pagan un monto por día por trabajador (main/supervision/extra).
+  // No usan combos ni tiers — un único precio sugerido por día se persiste en
+  // dayPrices y aparece como hint clickeable en la celda del trabajador.
+  const isNormalLabor = !!activeLabor && !isQtyLabor;
   const days = cycle?.days || [];
   const workers = activeLabor?.workers || [];
   const wdMap = (activeLabor && workdaysByLabor[activeLabor.id]) || {};
@@ -1156,6 +1160,35 @@ export default function CycleDetail() {
 
   const effectiveDayPrice = (labor, dayCfg) =>
     Number(dayCfg?.price) || Number(labor?.baseDayDefault) || DEFAULT_BASE_DAY;
+
+  // Para labores tipo main/supervision/extra: persiste el precio sugerido del
+  // día (un solo precio por día, no per-trabajador). No re-calcula los
+  // workdays existentes — cada amount queda como estaba; el cambio solo afecta
+  // al hint que muestran las celdas vacías y futuros clicks en ese sugerido.
+  const persistNormalDayPrice = async (laborId, date, price) => {
+    const dayEntry = normalizeDayPricesEntry(dayPrices[laborId]?.[date]);
+    const current = dayEntry["0_0"] || { price: 0, mode: "normal" };
+    const merged = { ...current, price: Number(price) || 0 };
+    const nextDay = { ...dayEntry, "0_0": merged };
+    const next = { ...dayPrices, [laborId]: { ...(dayPrices[laborId] || {}), [date]: nextDay } };
+    setDayPrices(next);
+    await cyclesService.update(id, { dayPrices: next });
+  };
+
+  // Para labores tipo main/supervision/extra: llena rápido el monto del día
+  // del trabajador con el precio sugerido (un click sobre la celda vacía).
+  // El doble click siguiente sigue funcionando para editar a otro valor.
+  const upsertNormalWorkdayAmount = async (laborId, date, workerRut, amount) => {
+    if (!amount) return;
+    const docId = workdayDocId(id, laborId, workerRut, date, SINGLE_COMBO);
+    const mapKey = workdayMapKey(workerRut, date, SINGLE_COMBO);
+    await workdaysService.upsert(docId, { cycleId: id, laborId, workerRut, date, amount });
+    setWorkdaysByLabor((prev) => {
+      const lab = { ...(prev[laborId] || {}) };
+      lab[mapKey] = { ...lab[mapKey], cycleId: id, laborId, workerRut, date, amount };
+      return { ...prev, [laborId]: lab };
+    });
+  };
 
   const computeTratoHEAmount = (labor, dayCfg, wd) =>
     calcTratoHEAmount({
@@ -2464,7 +2497,13 @@ export default function CycleDetail() {
               cellStyle: { textAlign: "right" },
               cellRenderer: (p) => {
                 const v = Number(p.value) || 0;
-                if (v) return fmtCurrency(v);
+                if (v) {
+                  return (
+                    <span className="font-semibold tabular-nums text-[var(--color-text)]">
+                      {fmtCurrency(v)}
+                    </span>
+                  );
+                }
                 if (readOnly || photoMode || cfg.mode === "overtimeOnly") return "";
                 const suggested = effectiveDayPrice(labor, cfg);
                 return (
@@ -2473,10 +2512,11 @@ export default function CycleDetail() {
                       e.stopPropagation();
                       await upsertTratoHEWorkday(activeLabor.id, d, p.data.rut, { qty: suggested });
                     }}
-                    className="h-full w-full text-right text-xs text-[var(--color-muted)] hover:text-[var(--color-accent)]"
-                    title={`Usar base sugerida: ${fmtCurrency(suggested)}`}
+                    className="flex h-full w-full items-center justify-end gap-1 text-[10px] italic opacity-50 text-[var(--color-muted)] hover:opacity-100 hover:text-[var(--color-accent)] hover:not-italic"
+                    title={`Click: usar base sugerida ${fmtCurrency(suggested)}. Doble click después para modificar.`}
                   >
-                    {fmtCurrency(suggested)}
+                    <span className="text-[8px]">+</span>
+                    <span className="tabular-nums">{fmtCurrency(suggested)}</span>
                   </button>
                 );
               },
@@ -2530,48 +2570,76 @@ export default function CycleDetail() {
       return [...baseLeft, ...dayGroups, totalCol, ...actionsCol];
     }
 
-    const dayCols = days.map((d) => ({
-      headerName: d, field: d,
-      ...dayCellHdr(d),
-      // Monthly workers don't edit a number per day — they only mark presence
-      // via a click. Block the editor for those rows.
-      editable: (p) => !readOnly && !photoMode && !p.data?._monthly,
-      width: 110,
-      type: "numericColumn",
-      valueParser: (p) => parseAmount(p.newValue),
-      valueFormatter: (p) => fmtCurrency(p.value),
-      cellRenderer: (p) => {
-        if (p.data?._monthly) {
-          const present = !!p.data?.[`${d}__present`];
-          if (readOnly || photoMode) {
+    const dayCols = days.map((d) => {
+      const dayCfg = getDaySingle(dayPrices, activeLabor.id, d, "normal");
+      const suggested = effectiveDayPrice(activeLabor, dayCfg);
+      return {
+        headerName: d, field: d,
+        ...dayCellHdr(d),
+        // Monthly workers don't edit a number per day — they only mark presence
+        // via a click. Block the editor for those rows.
+        // Las celdas vacías quedan no-editables así el click llega al botón
+        // "usar sugerido"; una vez con valor, vuelven a ser editables (doble
+        // click) para sobrescribir con otro precio.
+        editable: (p) => !readOnly && !photoMode && !p.data?._monthly && Number(p.data?.[d] || 0) > 0,
+        width: 110,
+        type: "numericColumn",
+        valueParser: (p) => parseAmount(p.newValue),
+        valueFormatter: (p) => fmtCurrency(p.value),
+        headerTooltip: `${d} · Sugerido: ${fmtCurrency(suggested)}. Click en celda vacía para usarlo, doble click para editar.`,
+        cellRenderer: (p) => {
+          if (p.data?._monthly) {
+            const present = !!p.data?.[`${d}__present`];
+            if (readOnly || photoMode) {
+              return (
+                <span className={present ? "font-semibold text-emerald-600 dark:text-emerald-400" : "text-[var(--color-muted)]"}>
+                  {present ? "✓" : ""}
+                </span>
+              );
+            }
             return (
-              <span className={present ? "font-semibold text-emerald-600 dark:text-emerald-400" : "text-[var(--color-muted)]"}>
-                {present ? "✓" : ""}
+              <div
+                role="button"
+                onClick={(e) => { e.stopPropagation(); toggleAttendance(p.data.rut, d, present); }}
+                className={`flex h-full w-full cursor-pointer items-center justify-center text-base font-bold transition-colors ${
+                  present
+                    ? "bg-emerald-500/15 text-emerald-700 hover:bg-emerald-500/25 dark:text-emerald-300"
+                    : "text-transparent hover:bg-[var(--color-accent-soft)] hover:text-[var(--color-accent)]"
+                }`}
+                title={present ? "Asistencia registrada (sin pago). Click para borrar." : "Marcar asistencia sin pago."}
+              >
+                {present ? "✓" : "+"}
+              </div>
+            );
+          }
+          const amt = Number(p.value) || 0;
+          if (amt) {
+            return (
+              <span className="font-semibold tabular-nums text-[var(--color-text)]">
+                {fmtCurrency(amt)}
               </span>
             );
           }
+          if (readOnly || photoMode || !suggested) return "";
           return (
-            <div
-              role="button"
-              onClick={(e) => { e.stopPropagation(); toggleAttendance(p.data.rut, d, present); }}
-              className={`flex h-full w-full cursor-pointer items-center justify-center text-base font-bold transition-colors ${
-                present
-                  ? "bg-emerald-500/15 text-emerald-700 hover:bg-emerald-500/25 dark:text-emerald-300"
-                  : "text-transparent hover:bg-[var(--color-accent-soft)] hover:text-[var(--color-accent)]"
-              }`}
-              title={present ? "Asistencia registrada (sin pago). Click para borrar." : "Marcar asistencia sin pago."}
+            <button
+              onClick={async (e) => {
+                e.stopPropagation();
+                await upsertNormalWorkdayAmount(activeLabor.id, d, p.data.rut, suggested);
+              }}
+              className="flex h-full w-full items-center justify-end gap-1 text-[10px] italic opacity-50 text-[var(--color-muted)] hover:opacity-100 hover:text-[var(--color-accent)] hover:not-italic"
+              title={`Click: usar precio sugerido ${fmtCurrency(suggested)}. Doble click después para modificar.`}
             >
-              {present ? "✓" : "+"}
-            </div>
+              <span className="text-[8px]">+</span>
+              <span className="tabular-nums">{fmtCurrency(suggested)}</span>
+            </button>
           );
-        }
-        const amt = Number(p.value) || 0;
-        return amt ? fmtCurrency(amt) : "";
-      },
-      cellStyle: (p) => p.data?._monthly
-        ? { textAlign: "center", padding: 0 }
-        : { textAlign: "right" },
-    }));
+        },
+        cellStyle: (p) => p.data?._monthly
+          ? { textAlign: "center", padding: 0 }
+          : { textAlign: "right" },
+      };
+    });
     return [...baseLeft, ...dayCols, totalCol, ...actionsCol];
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [days, readOnly, photoMode, isCosechaLabor, isTratoLabor, isTratoHELabor, dayCombosByDate, dayTiersByDate, catalogs, dayPrices, activeLabor, tratoHEView, cosechaView, tratoView, dayNotes, daysWithPiso]);
@@ -3420,6 +3488,79 @@ export default function CycleDetail() {
                   );
                 })}
               </div>
+              )}
+            </div>
+          )}
+
+          {/* Normal labor price bar (main/supervision/extra) — un precio
+              sugerido por día que se usa como hint clickeable en las celdas
+              vacías del grid. Se persiste en dayPrices del ciclo. */}
+          {isNormalLabor && days.length > 0 && (
+            <div className={`mb-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] ${pricesCollapsed ? "px-3 py-1.5" : "p-3"}`}>
+              <button
+                type="button"
+                onClick={() => setPricesCollapsed((v) => !v)}
+                className="flex w-full items-center gap-2 text-left text-xs font-medium text-[var(--color-muted)] uppercase tracking-wider hover:text-[var(--color-accent)]"
+                title={pricesCollapsed ? "Mostrar precios" : "Ocultar precios"}
+              >
+                <span>{pricesCollapsed ? "▶" : "▼"}</span>
+                <span>💵</span>
+                <span>Precios por día</span>
+                <span className="ml-1 normal-case text-[10px] tracking-normal text-[var(--color-muted)]">
+                  (un click en la celda del trabajador lo aplica al día)
+                </span>
+                {readOnly && <span className="text-[var(--color-warning)]">solo lectura</span>}
+              </button>
+              {!pricesCollapsed && (
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {days.map((d) => {
+                    const dayCfg = getDaySingle(dayPrices, activeLabor.id, d, "normal");
+                    const fallback = activeLabor.baseDayDefault ?? DEFAULT_BASE_DAY;
+                    const k = inputKey(activeLabor.id, d, "0_0");
+                    const localVal = localPriceInputs[k];
+                    const displayVal = localVal !== undefined
+                      ? localVal
+                      : (dayCfg.price ? dayCfg.price : "");
+                    const hasCustom = Number(dayCfg.price) > 0;
+                    return (
+                      <div
+                        key={d}
+                        className={`flex flex-col gap-1 rounded-lg border px-3 py-2 text-xs min-w-[180px] ${
+                          hasCustom
+                            ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)]"
+                            : "border-[var(--color-border)] bg-[var(--color-surface-2)]"
+                        }`}
+                      >
+                        <div className="font-medium text-[var(--color-text)]">{d}</div>
+                        <div className="flex items-center gap-1">
+                          <span className="text-[var(--color-muted)]">$</span>
+                          <input
+                            type="number" min="0" disabled={readOnly}
+                            value={displayVal}
+                            onChange={(e) =>
+                              setLocalPriceInputs((prev) => ({ ...prev, [k]: e.target.value }))
+                            }
+                            onBlur={async () => {
+                              if (localVal === undefined) return;
+                              const price = parseAmount(String(localVal)) || 0;
+                              setLocalPriceInputs((prev) => { const n = { ...prev }; delete n[k]; return n; });
+                              if (price !== Number(dayCfg.price || 0)) {
+                                await persistNormalDayPrice(activeLabor.id, d, price);
+                              }
+                            }}
+                            placeholder={`sugerido ${fallback.toLocaleString("es-CL")}`}
+                            className="w-full rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-0.5 text-right tabular-nums outline-none focus:border-[var(--color-accent)] disabled:opacity-50"
+                          />
+                        </div>
+                        {!hasCustom && (
+                          <div className="text-[10px] text-[var(--color-muted)]">
+                            usa base del ciclo · {fmtCurrency(fallback)}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
               )}
             </div>
           )}
