@@ -41,6 +41,7 @@ import {
 import ConfirmDialog from "../components/ConfirmDialog";
 import Modal from "../components/Modal";
 import ResizableArea from "../components/ResizableArea";
+import WorkerSummaryModal from "../components/WorkerSummaryModal";
 import { useIsMobile } from "../hooks/useIsMobile";
 
 const fmtCurrency = (v) =>
@@ -90,7 +91,7 @@ function downloadSnapshotJson(payrollName, snapshot) {
 
 export default function Payroll() {
   const toast = useToast();
-  const [tab, setTab] = useState("create"); // create | history
+  const [tab, setTab] = useState("create"); // create | history | workers
   const [loading, setLoading] = useState(true);
   const [faenas, setFaenas] = useState([]);
   const [subfaenas, setSubfaenas] = useState([]);
@@ -913,7 +914,15 @@ export default function Payroll() {
                 tab === "history" ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]" : "text-[var(--color-muted)]"
               }`}
             >
-              Historial ({payrolls.length})
+              Historial Nómina ({payrolls.length})
+            </button>
+            <button
+              onClick={() => setTab("workers")}
+              className={`rounded px-3 py-1 ${
+                tab === "workers" ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]" : "text-[var(--color-muted)]"
+              }`}
+            >
+              💰 Pagos anteriores
             </button>
           </div>
         </div>
@@ -955,7 +964,7 @@ export default function Payroll() {
             busy={busy}
           />
         )
-      ) : (
+      ) : tab === "history" ? (
         <HistoryList
           payrolls={payrolls}
           onMarkPaid={onAskMarkPaid}
@@ -966,6 +975,11 @@ export default function Payroll() {
           onDownloadSnapshot={onDownloadSnapshot}
           onChangeClassification={onChangeClassification}
           onOpen={setDetailPayroll}
+        />
+      ) : (
+        <WorkersHistory
+          faenas={faenas}
+          onOpenPayroll={setDetailPayroll}
         />
       )}
 
@@ -2913,6 +2927,82 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
   const cashGroups = groupCashByLeader(cash);
   const allGroups = groupCashByLeader(items); // groups everyone (bank + cash) by leader
 
+  // Filtros y estado de UI para el HUD mejorado.
+  const [search, setSearch] = useState("");
+  const [paymentMethod, setPaymentMethod] = useState("all"); // all | bank | cash
+  const [leaderFilter, setLeaderFilter] = useState(() => new Set());
+  const [cycleFilter, setCycleFilter] = useState(() => new Set());
+  const [expandedRut, setExpandedRut] = useState(null);
+  const [collapsedSections, setCollapsedSections] = useState(() => new Set());
+  const [printingGroupLeader, setPrintingGroupLeader] = useState(null);
+  const [workerSummaryFor, setWorkerSummaryFor] = useState(null);
+
+  const toggleSection = (key) => setCollapsedSections((prev) => {
+    const next = new Set(prev);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    return next;
+  });
+  const isCollapsed = (key) => collapsedSections.has(key);
+  const toggleSetItem = (setter, value) => setter((prev) => {
+    const next = new Set(prev);
+    if (next.has(value)) next.delete(value);
+    else next.add(value);
+    return next;
+  });
+
+  // Líderes únicos en la nómina (para el filtro de grupo).
+  const allLeaders = useMemo(() => {
+    const set = new Map(); // label → count
+    for (const it of items) {
+      const l = normalizeLeader(it.groupLeader || "") || "SIN GRUPO";
+      set.set(l, (set.get(l) || 0) + 1);
+    }
+    return [...set.entries()]
+      .map(([leader, count]) => ({ leader, count }))
+      .sort((a, b) => a.leader.localeCompare(b.leader, "es"));
+  }, [items]);
+
+  // Filtrado de items aplicando todos los criterios juntos.
+  const filteredItems = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return items.filter((it) => {
+      if (q) {
+        const hay = `${it.rut || ""} ${it.name || ""} ${it.groupLeader || ""}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      const isCash = isCashBank(it.bankCode);
+      if (paymentMethod === "bank" && isCash) return false;
+      if (paymentMethod === "cash" && !isCash) return false;
+      if (leaderFilter.size > 0) {
+        const l = normalizeLeader(it.groupLeader || "") || "SIN GRUPO";
+        if (!leaderFilter.has(l)) return false;
+      }
+      if (cycleFilter.size > 0) {
+        const hasAny = [...cycleFilter].some((cid) => (Number(it.byCycle?.[cid]) || 0) > 0);
+        if (!hasAny) return false;
+      }
+      return true;
+    });
+  }, [items, search, paymentMethod, leaderFilter, cycleFilter]);
+
+  const filteredSplit = useMemo(() => splitBankAndCash(filteredItems), [filteredItems]);
+  const filteredBank = filteredSplit.bank;
+  const filteredCash = filteredSplit.cash;
+  const filteredCashGroups = useMemo(() => groupCashByLeader(filteredCash), [filteredCash]);
+  // Banco también agrupado por líder, para poder imprimir el detalle por grupo
+  // (ej. solo CHILENOS) igual que en efectivo. groupCashByLeader sirve para
+  // cualquier conjunto de items, no solo cash.
+  const filteredBankGroups = useMemo(() => groupCashByLeader(filteredBank), [filteredBank]);
+
+  const hasActiveFilter = !!(search || paymentMethod !== "all" || leaderFilter.size > 0 || cycleFilter.size > 0);
+  const clearFilters = () => {
+    setSearch("");
+    setPaymentMethod("all");
+    setLeaderFilter(new Set());
+    setCycleFilter(new Set());
+  };
+
   // Two leader-total summary tables shown at the top of "Detalle pago":
   //   1) "Con cuenta RUT": CHILENOS + EXTRANJEROSCONCUENTARUT (each row separate).
   //   2) "Otros grupos": every other leader (each row separate).
@@ -3122,6 +3212,23 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
     }
   };
 
+  // Imprime el detalle por grupo (un solo líder) usando el mismo flujo que el
+  // detalle de pago completo, pero con un solo grupo. Útil para entregar la
+  // hoja del líder X sin imprimir todo lo demás. `key` se usa para distinguir
+  // banco vs efectivo del mismo líder en el estado de loading (ej. CHILENOS
+  // puede tener gente en ambos lados).
+  const handlePrintGroupDetail = async (group, key) => {
+    const loadingKey = key || group.leader;
+    setPrintingGroupLeader(loadingKey);
+    try {
+      await printPaymentDetails(payroll, [group], cycleTitleOverrides, [], catalogs, null);
+    } catch (err) {
+      toast.error(err?.message || "Error al imprimir grupo");
+    } finally {
+      setPrintingGroupLeader(null);
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4 py-6" onClick={onClose}>
       <div
@@ -3213,6 +3320,100 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
             </section>
           )}
 
+          {/* Barra de filtros: búsqueda + forma de pago + grupo + ciclo.
+              Edge-to-edge sticky (negativos -mx/-mt anulan el padding del padre
+              para que el fondo opaco cubra todo el ancho cuando se scrollea —
+              sino quedan gaps transparentes a los costados). */}
+          <section className="sticky top-0 z-20 -mx-5 -mt-4 mb-1 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-5 pb-2 pt-3 shadow-sm">
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="🔍 Buscar por RUT, nombre o líder…"
+                className="min-w-[200px] flex-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2.5 py-1.5 text-sm outline-none focus:border-[var(--color-accent)]"
+              />
+              <div className="inline-flex overflow-hidden rounded-md border border-[var(--color-border)] text-xs">
+                {[
+                  { v: "all", l: "Todos" },
+                  { v: "bank", l: "🏦 Banco" },
+                  { v: "cash", l: "💵 Efectivo" },
+                ].map((o) => (
+                  <button
+                    key={o.v}
+                    onClick={() => setPaymentMethod(o.v)}
+                    className={`border-l border-[var(--color-border)] px-2 py-1 first:border-l-0 ${
+                      paymentMethod === o.v ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]" : "bg-[var(--color-surface-2)] hover:bg-[var(--color-accent-soft)]"
+                    }`}
+                  >
+                    {o.l}
+                  </button>
+                ))}
+              </div>
+              {hasActiveFilter && (
+                <button
+                  onClick={clearFilters}
+                  className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs text-[var(--color-muted)] hover:text-[var(--color-danger)]"
+                >
+                  ✕ Limpiar
+                </button>
+              )}
+              <span className="ml-auto text-[10px] text-[var(--color-muted)] tabular-nums">
+                {hasActiveFilter ? `${filteredItems.length}/${items.length}` : items.length} trabajador{items.length === 1 ? "" : "es"}
+                {hasActiveFilter && ` · ${fmtCurrency(filteredItems.reduce((s, x) => s + (Number(x.amount) || 0), 0))}`}
+              </span>
+            </div>
+            {allLeaders.length > 1 && (
+              <div className="mt-1.5 flex flex-wrap items-center gap-1 text-[11px]">
+                <span className="text-[var(--color-muted)] mr-1">Grupo:</span>
+                {allLeaders.map((g) => {
+                  const active = leaderFilter.has(g.leader);
+                  return (
+                    <button
+                      key={g.leader}
+                      onClick={() => toggleSetItem(setLeaderFilter, g.leader)}
+                      className={`rounded-full px-2 py-0.5 ${
+                        active
+                          ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
+                          : "bg-[var(--color-surface-2)] border border-[var(--color-border)] hover:bg-[var(--color-accent-soft)]"
+                      }`}
+                    >
+                      {g.leader} <span className="opacity-60">({g.count})</span>
+                    </button>
+                  );
+                })}
+                {leaderFilter.size > 0 && (
+                  <button onClick={() => setLeaderFilter(new Set())} className="text-[var(--color-muted)] hover:text-[var(--color-danger)]">✕</button>
+                )}
+              </div>
+            )}
+            {cycleDetails.length > 1 && (
+              <div className="mt-1.5 flex flex-wrap items-center gap-1 text-[11px]">
+                <span className="text-[var(--color-muted)] mr-1">Ciclo:</span>
+                {cycleDetails.map((c) => {
+                  const active = cycleFilter.has(c.id);
+                  return (
+                    <button
+                      key={c.id}
+                      onClick={() => toggleSetItem(setCycleFilter, c.id)}
+                      className={`rounded-full px-2 py-0.5 ${
+                        active
+                          ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
+                          : "bg-[var(--color-surface-2)] border border-[var(--color-border)] hover:bg-[var(--color-accent-soft)]"
+                      }`}
+                      title={c.faenaName ? `${c.faenaName}${c.subfaenaName ? " / " + c.subfaenaName : ""}` : c.label}
+                    >
+                      {displayCycleLabel(c)}
+                    </button>
+                  );
+                })}
+                {cycleFilter.size > 0 && (
+                  <button onClick={() => setCycleFilter(new Set())} className="text-[var(--color-muted)] hover:text-[var(--color-danger)]">✕</button>
+                )}
+              </div>
+            )}
+          </section>
+
           {/* Resumen — desglose general */}
           <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)] p-4">
             <h3 className="mb-3 text-sm font-semibold">Resumen</h3>
@@ -3282,129 +3483,192 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
 
           {cycleDetails.length > 0 && (
             <section>
-              <h3 className="mb-2 text-sm font-semibold">Ciclos / Faenas pagadas</h3>
-              <ul className="space-y-1 text-sm">
-                {cycleDetails.map((c) => (
-                  <li key={c.id} className="flex items-center justify-between gap-2 rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5">
-                    <div className="min-w-0">
-                      <span className="font-medium">{c.label}</span>
-                      {c.faenaName && (
-                        <span className="ml-2 text-xs text-[var(--color-muted)]">
-                          {c.faenaName}{c.subfaenaName ? ` / ${c.subfaenaName}` : ""}
-                        </span>
-                      )}
-                    </div>
-                    {editMode && cycleDetails.length > 1 && (
-                      <button
-                        type="button"
-                        disabled={editBusy}
-                        onClick={() => handleRemoveCycle(c)}
-                        className="shrink-0 rounded border border-[var(--color-danger)] bg-[var(--color-danger-soft)] px-2 py-0.5 text-[10px] text-[var(--color-danger)] hover:opacity-80 disabled:opacity-50"
-                        title="Sacar este ciclo entero de la nómina"
-                      >
-                        ✕ Quitar ciclo
-                      </button>
-                    )}
-                  </li>
-                ))}
-              </ul>
-              {editMode && cycleDetails.length === 1 && (
-                <p className="mt-1 text-[10px] text-[var(--color-muted)]">
-                  Para sacar el único ciclo, eliminá la nómina entera.
-                </p>
+              <button
+                type="button"
+                onClick={() => toggleSection("cycles")}
+                className="mb-2 flex w-full items-center gap-2 text-left text-sm font-semibold hover:text-[var(--color-accent)]"
+              >
+                <span>{isCollapsed("cycles") ? "▸" : "▾"}</span>
+                <span>Ciclos / Faenas pagadas ({cycleDetails.length})</span>
+              </button>
+              {!isCollapsed("cycles") && (
+                <>
+                  <ul className="space-y-1 text-sm">
+                    {cycleDetails.map((c) => (
+                      <li key={c.id} className="flex items-center justify-between gap-2 rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5">
+                        <div className="min-w-0">
+                          <span className="font-medium">{c.label}</span>
+                          {c.faenaName && (
+                            <span className="ml-2 text-xs text-[var(--color-muted)]">
+                              {c.faenaName}{c.subfaenaName ? ` / ${c.subfaenaName}` : ""}
+                            </span>
+                          )}
+                          {(c.firstDay || c.lastDay) && (
+                            <span className="ml-2 text-[10px] text-[var(--color-muted)] tabular-nums">
+                              📅 {c.firstDay || "?"}{c.lastDay && c.firstDay !== c.lastDay ? ` → ${c.lastDay}` : ""}
+                            </span>
+                          )}
+                        </div>
+                        {editMode && cycleDetails.length > 1 && (
+                          <button
+                            type="button"
+                            disabled={editBusy}
+                            onClick={() => handleRemoveCycle(c)}
+                            className="shrink-0 rounded border border-[var(--color-danger)] bg-[var(--color-danger-soft)] px-2 py-0.5 text-[10px] text-[var(--color-danger)] hover:opacity-80 disabled:opacity-50"
+                            title="Sacar este ciclo entero de la nómina"
+                          >
+                            ✕ Quitar ciclo
+                          </button>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                  {editMode && cycleDetails.length === 1 && (
+                    <p className="mt-1 text-[10px] text-[var(--color-muted)]">
+                      Para sacar el único ciclo, eliminá la nómina entera.
+                    </p>
+                  )}
+                </>
               )}
             </section>
           )}
 
-          {bank.length > 0 && (
+          {filteredBankGroups.length > 0 && (
             <section>
-              <h3 className="mb-2 text-sm font-semibold">🏦 Banco ({bank.length})</h3>
-              <table className="w-full text-sm">
-                <thead className="bg-[var(--color-surface-2)] text-left text-[var(--color-muted)]">
-                  <tr>
-                    <th className="px-2 py-1">RUT</th>
-                    <th className="px-2 py-1">Nombre</th>
-                    <th className="px-2 py-1">Banco</th>
-                    <th className="px-2 py-1">Cuenta</th>
-                    <th className="px-2 py-1">Tipo</th>
-                    <th className="px-2 py-1 text-right">Monto</th>
-                    {editMode && <th className="px-2 py-1"></th>}
-                  </tr>
-                </thead>
-                <tbody>
-                  {bank.map((it) => (
-                    <tr key={it.rut} className="border-t border-[var(--color-border)]">
-                      <td className="px-2 py-1 font-mono text-xs">{formatRutForDisplay(it.rut)}</td>
-                      <td className="px-2 py-1">{it.name}</td>
-                      <td className="px-2 py-1 text-xs">{bankName(it.bankCode)}</td>
-                      <td className="px-2 py-1 font-mono text-xs">{it.accountNumber}</td>
-                      <td className="px-2 py-1 text-xs">{accountTypeShort(it.accountType)}</td>
-                      <td className="px-2 py-1 text-right tabular-nums">{fmtCurrency(it.amount)}</td>
-                      {editMode && (
-                        <td className="px-2 py-1 text-right">
-                          <button
-                            type="button"
-                            disabled={editBusy}
-                            onClick={() => handleRemoveWorker(it)}
-                            className="rounded border border-[var(--color-danger)] bg-[var(--color-danger-soft)] px-1.5 py-0.5 text-[10px] text-[var(--color-danger)] hover:opacity-80 disabled:opacity-50"
-                            title="Sacar trabajador de la nómina"
-                          >
-                            ✕
-                          </button>
-                        </td>
+              <div className="mb-2 flex items-center justify-between">
+                <h3 className="text-sm font-semibold">🏦 Banco agrupado por líder ({filteredBank.length}{filteredBank.length !== bank.length ? `/${bank.length}` : ""})</h3>
+                <span className="text-xs font-normal tabular-nums text-[var(--color-muted)]">
+                  {fmtCurrency(filteredBank.reduce((s, x) => s + (Number(x.amount) || 0), 0))}
+                </span>
+              </div>
+              <div className="space-y-2">
+                {filteredBankGroups.map((g) => {
+                  const sectionKey = `bank_${g.leader}`;
+                  const collapsed = isCollapsed(sectionKey);
+                  const groupKey = `bank:${g.leader}`;
+                  return (
+                    <div key={g.leader} className="rounded border border-[var(--color-border)]">
+                      <div className="flex items-center gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm">
+                        <button
+                          type="button"
+                          onClick={() => toggleSection(sectionKey)}
+                          className="flex flex-1 items-center gap-2 text-left hover:text-[var(--color-accent)]"
+                        >
+                          <span>{collapsed ? "▸" : "▾"}</span>
+                          <span className="font-medium">{g.leader}</span>
+                          <span className="text-[10px] text-[var(--color-muted)]">· {g.items.length} pers.</span>
+                        </button>
+                        <span className="font-semibold tabular-nums">{fmtCurrency(g.total)}</span>
+                        <button
+                          type="button"
+                          disabled={printingGroupLeader === groupKey}
+                          onClick={() => handlePrintGroupDetail(g, groupKey)}
+                          title="Imprimir el detalle de pago solo para este grupo de transferencias"
+                          className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-0.5 text-[10px] hover:bg-[var(--color-accent-soft)] disabled:opacity-50"
+                        >
+                          {printingGroupLeader === groupKey ? "..." : "🖨 Imprimir"}
+                        </button>
+                      </div>
+                      {!collapsed && (
+                        <table className="w-full text-sm">
+                          <thead className="bg-[var(--color-surface-2)] text-left text-[var(--color-muted)]">
+                            <tr>
+                              <th className="px-2 py-1 w-4"></th>
+                              <th className="px-2 py-1">RUT</th>
+                              <th className="px-2 py-1">Nombre</th>
+                              <th className="px-2 py-1">Banco</th>
+                              <th className="px-2 py-1">Cuenta</th>
+                              <th className="px-2 py-1">Tipo</th>
+                              <th className="px-2 py-1 text-right">Monto</th>
+                              {editMode && <th className="px-2 py-1"></th>}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {g.items.map((it) => (
+                              <WorkerDetailRow
+                                key={it.rut}
+                                item={it}
+                                expanded={expandedRut === it.rut}
+                                onToggle={() => setExpandedRut((cur) => cur === it.rut ? null : it.rut)}
+                                onShowSummary={() => setWorkerSummaryFor(it)}
+                                cycleDetails={cycleDetails}
+                                displayCycleLabel={displayCycleLabel}
+                                editMode={editMode}
+                                editBusy={editBusy}
+                                onRemoveWorker={handleRemoveWorker}
+                                cols="bank"
+                              />
+                            ))}
+                          </tbody>
+                        </table>
                       )}
-                    </tr>
-                  ))}
-                </tbody>
-                <tfoot>
-                  <tr className="border-t-2 border-[var(--color-border)] font-semibold">
-                    <td colSpan={5} className="px-2 py-2 text-right">Subtotal banco</td>
-                    <td className="px-2 py-2 text-right tabular-nums">{fmtCurrency(bank.reduce((s, x) => s + x.amount, 0))}</td>
-                    {editMode && <td></td>}
-                  </tr>
-                </tfoot>
-              </table>
+                    </div>
+                  );
+                })}
+              </div>
             </section>
           )}
 
-          {cashGroups.length > 0 && (
+          {filteredCashGroups.length > 0 && (
             <section>
               <div className="mb-2 flex items-center justify-between">
-                <h3 className="text-sm font-semibold">💵 Efectivo agrupado por líder ({cash.length})</h3>
+                <h3 className="text-sm font-semibold">💵 Efectivo agrupado por líder ({filteredCash.length}{filteredCash.length !== cash.length ? `/${cash.length}` : ""})</h3>
+                <span className="text-xs font-normal tabular-nums text-[var(--color-muted)]">
+                  {fmtCurrency(filteredCash.reduce((s, x) => s + (Number(x.amount) || 0), 0))}
+                </span>
               </div>
-              <div className="space-y-3">
-                {cashGroups.map((g) => (
-                  <div key={g.leader} className="rounded border border-[var(--color-border)]">
-                    <div className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm">
-                      <span className="font-medium">{g.leader}</span>
-                      <span className="font-semibold">{fmtCurrency(g.total)}</span>
+              <div className="space-y-2">
+                {filteredCashGroups.map((g) => {
+                  const sectionKey = `cash_${g.leader}`;
+                  const collapsed = isCollapsed(sectionKey);
+                  const groupKey = `cash:${g.leader}`;
+                  return (
+                    <div key={g.leader} className="rounded border border-[var(--color-border)]">
+                      <div className="flex items-center gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm">
+                        <button
+                          type="button"
+                          onClick={() => toggleSection(sectionKey)}
+                          className="flex flex-1 items-center gap-2 text-left hover:text-[var(--color-accent)]"
+                        >
+                          <span>{collapsed ? "▸" : "▾"}</span>
+                          <span className="font-medium">{g.leader}</span>
+                          <span className="text-[10px] text-[var(--color-muted)]">· {g.items.length} pers.</span>
+                        </button>
+                        <span className="font-semibold tabular-nums">{fmtCurrency(g.total)}</span>
+                        <button
+                          type="button"
+                          disabled={printingGroupLeader === groupKey}
+                          onClick={() => handlePrintGroupDetail(g, groupKey)}
+                          title="Imprimir el detalle de pago solo para este grupo (mismo formato que el comprobante en efectivo)"
+                          className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-0.5 text-[10px] hover:bg-[var(--color-accent-soft)] disabled:opacity-50"
+                        >
+                          {printingGroupLeader === groupKey ? "..." : "🖨 Imprimir"}
+                        </button>
+                      </div>
+                      {!collapsed && (
+                        <table className="w-full text-sm">
+                          <tbody>
+                            {g.items.map((it) => (
+                              <WorkerDetailRow
+                                key={it.rut}
+                                item={it}
+                                expanded={expandedRut === it.rut}
+                                onToggle={() => setExpandedRut((cur) => cur === it.rut ? null : it.rut)}
+                                onShowSummary={() => setWorkerSummaryFor(it)}
+                                cycleDetails={cycleDetails}
+                                displayCycleLabel={displayCycleLabel}
+                                editMode={editMode}
+                                editBusy={editBusy}
+                                onRemoveWorker={handleRemoveWorker}
+                                cols="cash"
+                              />
+                            ))}
+                          </tbody>
+                        </table>
+                      )}
                     </div>
-                    <table className="w-full text-sm">
-                      <tbody>
-                        {g.items.map((it) => (
-                          <tr key={it.rut} className="border-t border-[var(--color-border)]">
-                            <td className="px-2 py-1 font-mono text-xs">{formatRutForDisplay(it.rut)}</td>
-                            <td className="px-2 py-1">{it.name}</td>
-                            <td className="px-2 py-1 text-right tabular-nums">{fmtCurrency(it.amount)}</td>
-                            {editMode && (
-                              <td className="px-2 py-1 text-right">
-                                <button
-                                  type="button"
-                                  disabled={editBusy}
-                                  onClick={() => handleRemoveWorker(it)}
-                                  className="rounded border border-[var(--color-danger)] bg-[var(--color-danger-soft)] px-1.5 py-0.5 text-[10px] text-[var(--color-danger)] hover:opacity-80 disabled:opacity-50"
-                                  title="Sacar trabajador de la nómina"
-                                >
-                                  ✕
-                                </button>
-                              </td>
-                            )}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </section>
           )}
@@ -3455,6 +3719,786 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
             📥 XLSX completo
           </button>
         </div>
+      </div>
+      <WorkerSummaryModal
+        open={!!workerSummaryFor}
+        worker={workerSummaryFor ? { id: workerSummaryFor.rut, name: workerSummaryFor.name } : null}
+        onClose={() => setWorkerSummaryFor(null)}
+      />
+    </div>
+  );
+}
+
+// Fila expandible para banco/efectivo. Click → muestra el desglose interno
+// de la nómina (byCycle + anticipos aplicados + bonos aplicados + bruto/
+// descuentos/neto). Botón "📅 Ver días" abre el WorkerSummaryModal completo.
+function WorkerDetailRow({
+  item, expanded, onToggle, onShowSummary, cycleDetails, displayCycleLabel,
+  editMode, editBusy, onRemoveWorker, cols,
+}) {
+  const isBank = cols === "bank";
+  const colSpan = isBank ? (editMode ? 8 : 7) : (editMode ? 4 : 3);
+  const byCycleEntries = Object.entries(item.byCycle || {})
+    .filter(([, v]) => Number(v) > 0)
+    .map(([cid, amt]) => {
+      const c = cycleDetails.find((x) => x.id === cid);
+      return { id: cid, label: c ? displayCycleLabel(c) : cid, faena: c?.faenaName, subfaena: c?.subfaenaName, amount: Number(amt) };
+    });
+  return (
+    <>
+      <tr
+        className="cursor-pointer border-t border-[var(--color-border)] hover:bg-[var(--color-accent-soft)]"
+        onClick={onToggle}
+      >
+        {isBank ? (
+          <>
+            <td className="px-2 py-1 text-center text-[var(--color-muted)]">{expanded ? "▾" : "▸"}</td>
+            <td className="px-2 py-1 font-mono text-xs">{formatRutForDisplay(item.rut)}</td>
+            <td className="px-2 py-1">{item.name}</td>
+            <td className="px-2 py-1 text-xs">{bankName(item.bankCode)}</td>
+            <td className="px-2 py-1 font-mono text-xs">{item.accountNumber}</td>
+            <td className="px-2 py-1 text-xs">{accountTypeShort(item.accountType)}</td>
+            <td className="px-2 py-1 text-right tabular-nums">{fmtCurrency(item.amount)}</td>
+          </>
+        ) : (
+          <>
+            <td className="px-2 py-1 text-center text-[var(--color-muted)]">{expanded ? "▾" : "▸"}</td>
+            <td className="px-2 py-1 font-mono text-xs">{formatRutForDisplay(item.rut)}</td>
+            <td className="px-2 py-1">{item.name}</td>
+            <td className="px-2 py-1 text-right tabular-nums">{fmtCurrency(item.amount)}</td>
+          </>
+        )}
+        {editMode && (
+          <td className="px-2 py-1 text-right" onClick={(e) => e.stopPropagation()}>
+            <button
+              type="button"
+              disabled={editBusy}
+              onClick={() => onRemoveWorker(item)}
+              className="rounded border border-[var(--color-danger)] bg-[var(--color-danger-soft)] px-1.5 py-0.5 text-[10px] text-[var(--color-danger)] hover:opacity-80 disabled:opacity-50"
+              title="Sacar trabajador de la nómina"
+            >
+              ✕
+            </button>
+          </td>
+        )}
+      </tr>
+      {expanded && (
+        <tr className="border-t border-[var(--color-border)] bg-[var(--color-surface-2)]/60">
+          <td colSpan={colSpan} className="px-3 py-2.5">
+            <div className="flex flex-col gap-2 text-xs">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-semibold text-[var(--color-text)]">Detalle del pago en esta nómina</span>
+                <button
+                  type="button"
+                  onClick={onShowSummary}
+                  className="rounded-md border border-[var(--color-accent)] bg-[var(--color-accent-soft)] px-2 py-0.5 text-[10px] font-medium text-[var(--color-accent)] hover:bg-[var(--color-accent)] hover:text-[var(--color-accent-fg)]"
+                >
+                  📅 Ver días completos
+                </button>
+                {item.groupLeader && (
+                  <span className="rounded bg-[var(--color-surface)] px-1.5 py-0.5 text-[10px]">
+                    👥 Líder: <b>{item.groupLeader}</b>
+                  </span>
+                )}
+                {item.email && (
+                  <span className="text-[10px] text-[var(--color-muted)]">✉ {item.email}</span>
+                )}
+              </div>
+
+              {byCycleEntries.length > 0 && (
+                <div>
+                  <div className="mb-0.5 text-[10px] uppercase tracking-wide text-[var(--color-muted)]">Por ciclo</div>
+                  <div className="grid gap-1 sm:grid-cols-2">
+                    {byCycleEntries.map((e) => (
+                      <div key={e.id} className="flex items-center justify-between gap-2 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1">
+                        <div className="min-w-0">
+                          <div className="truncate font-medium">{e.label}</div>
+                          {(e.faena || e.subfaena) && (
+                            <div className="truncate text-[10px] text-[var(--color-muted)]">
+                              {e.faena}{e.subfaena ? ` / ${e.subfaena}` : ""}
+                            </div>
+                          )}
+                        </div>
+                        <span className="shrink-0 font-semibold tabular-nums">{fmtCurrency(e.amount)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+                <div className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] p-1.5">
+                  <div className="text-[9px] uppercase text-[var(--color-muted)]">Bruto</div>
+                  <div className="font-bold tabular-nums">{fmtCurrency(item.grossAmount || item.amount || 0)}</div>
+                </div>
+                <div className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] p-1.5">
+                  <div className="text-[9px] uppercase text-[var(--color-muted)]">Anticipos</div>
+                  <div className="font-bold tabular-nums text-amber-600 dark:text-amber-400">
+                    {Number(item.advance) > 0 ? `−${fmtCurrency(item.advance)}` : "—"}
+                  </div>
+                  {(item.anticipoApplications || []).length > 0 && (
+                    <div className="mt-0.5 text-[9px] text-[var(--color-muted)]">
+                      {(item.anticipoApplications || []).length} aplicación{(item.anticipoApplications || []).length === 1 ? "" : "es"}
+                    </div>
+                  )}
+                </div>
+                <div className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] p-1.5">
+                  <div className="text-[9px] uppercase text-[var(--color-muted)]">Bonos</div>
+                  <div className="font-bold tabular-nums text-emerald-600 dark:text-emerald-400">
+                    {Number(item.bonus) > 0 ? `+${fmtCurrency(item.bonus)}` : "—"}
+                  </div>
+                  {(item.bonoApplications || []).length > 0 && (
+                    <div className="mt-0.5 text-[9px] text-[var(--color-muted)]">
+                      {(item.bonoApplications || []).length} aplicación{(item.bonoApplications || []).length === 1 ? "" : "es"}
+                    </div>
+                  )}
+                </div>
+                <div className="rounded border border-[var(--color-accent)] bg-[var(--color-accent-soft)] p-1.5">
+                  <div className="text-[9px] uppercase text-[var(--color-muted)]">Neto</div>
+                  <div className="font-bold tabular-nums text-[var(--color-accent)]">{fmtCurrency(item.amount || 0)}</div>
+                </div>
+              </div>
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+// ─────────────────────────── Workers History ───────────────────────────
+// Buscador retroactivo de pagos por trabajador. Carga todas las nóminas
+// (sin tope) y filtra cliente-side por rango de fechas, tipo y faena.
+// Default: últimos 6 meses, todas las clasificaciones.
+
+const sixMonthsAgoISO = () => {
+  const d = new Date();
+  d.setMonth(d.getMonth() - 6);
+  return d.toISOString().slice(0, 10);
+};
+const todayISO = () => new Date().toISOString().slice(0, 10);
+
+const payrollDate = (p) => {
+  if (p?.createdAt?.toDate) return p.createdAt.toDate();
+  if (p?.createdAt?.seconds) return new Date(p.createdAt.seconds * 1000);
+  return new Date(0);
+};
+const payrollDateISO = (p) => {
+  const d = payrollDate(p);
+  return isNaN(d.getTime()) ? "" : d.toISOString().slice(0, 10);
+};
+
+const normRut = (r) => String(r || "").replace(/[^a-z0-9]/gi, "").toLowerCase();
+
+function WorkersHistory({ faenas, onOpenPayroll }) {
+  const toast = useToast();
+  const [loading, setLoading] = useState(true);
+  const [allPayrolls, setAllPayrolls] = useState([]);
+  const [search, setSearch] = useState("");
+  const [dateFrom, setDateFrom] = useState(sixMonthsAgoISO());
+  const [dateTo, setDateTo] = useState(todayISO());
+  const [classification, setClassification] = useState("all"); // all|nomina|diferencia
+  const [faenaFilter, setFaenaFilter] = useState(() => new Set());
+  const [selectedRut, setSelectedRut] = useState(null);
+  const [exporting, setExporting] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const list = await payrollsService.list({ order: ["createdAt", "desc"] });
+        if (!cancelled) setAllPayrolls(list);
+      } catch (err) {
+        toast.error("No se pudieron cargar las nóminas: " + (err?.message || err));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const faenaById = useMemo(() => new Map(faenas.map((f) => [f.id, f])), [faenas]);
+
+  // 1) Filtramos payrolls por rango de fechas + clasificación.
+  const filteredPayrolls = useMemo(() => {
+    return allPayrolls.filter((p) => {
+      const iso = payrollDateISO(p);
+      if (dateFrom && iso && iso < dateFrom) return false;
+      if (dateTo && iso && iso > dateTo) return false;
+      if (classification !== "all" && (p.classification || "nomina") !== classification) return false;
+      return true;
+    });
+  }, [allPayrolls, dateFrom, dateTo, classification]);
+
+  // 2) Index workers: por RUT, lista de pagos enriquecidos.
+  const workersIndex = useMemo(() => {
+    const map = new Map();
+    for (const p of filteredPayrolls) {
+      for (const it of (p.items || [])) {
+        if (!it.rut) continue;
+        if (!map.has(it.rut)) {
+          map.set(it.rut, {
+            rut: it.rut,
+            name: it.name || "",
+            totalAmount: 0,
+            totalGross: 0,
+            totalAdvance: 0,
+            totalBonus: 0,
+            payments: [],
+          });
+        }
+        const w = map.get(it.rut);
+        if (it.name && (!w.name || w.name === it.rut)) w.name = it.name;
+        const amount = Number(it.amount) || 0;
+        const gross = Number(it.grossAmount) || amount;
+        const advance = Number(it.advance) || Number(it.anticiposTotal) || 0;
+        const bonus = Number(it.bonus) || Number(it.bonosTotal) || 0;
+        // Faenas que cubre este pago según byCycle + cycleDetails.
+        const payFaenaIds = new Set();
+        const payFaenaNames = new Set();
+        const cds = p.cycleDetails || [];
+        for (const cid of Object.keys(it.byCycle || {})) {
+          if ((it.byCycle[cid] || 0) > 0) {
+            const cd = cds.find((c) => c.id === cid);
+            if (cd?.faenaId) payFaenaIds.add(cd.faenaId);
+            if (cd?.faenaName) payFaenaNames.add(cd.faenaName);
+          }
+        }
+        w.totalAmount += amount;
+        w.totalGross += gross;
+        w.totalAdvance += advance;
+        w.totalBonus += bonus;
+        w.payments.push({
+          payrollId: p.id,
+          payrollName: p.name || "(sin nombre)",
+          payrollDate: payrollDate(p),
+          payrollDateISO: payrollDateISO(p),
+          classification: p.classification || "nomina",
+          status: p.status || "pending",
+          amount, gross, advance, bonus,
+          // Líder de grupo congelado al momento de la nómina (item.groupLeader
+          // se persiste cuando se genera). Útil para auditoría: a quién
+          // estaba asignado el trabajador entonces, no quien lo lidera hoy.
+          groupLeader: it.groupLeader || "",
+          faenaIds: payFaenaIds,
+          faenaNames: [...payFaenaNames],
+          payroll: p,
+        });
+      }
+    }
+    for (const w of map.values()) {
+      w.payments.sort((a, b) => b.payrollDate - a.payrollDate);
+    }
+    return map;
+  }, [filteredPayrolls]);
+
+  // 3) Filtro por faena (a nivel pago — al menos un pago del worker tiene faena en el set).
+  const workersAfterFaena = useMemo(() => {
+    if (faenaFilter.size === 0) return [...workersIndex.values()];
+    const out = [];
+    for (const w of workersIndex.values()) {
+      const filtered = w.payments.filter((pay) =>
+        [...pay.faenaIds].some((fid) => faenaFilter.has(fid)),
+      );
+      if (filtered.length === 0) continue;
+      // Recalcular totales solo con los pagos filtrados por faena.
+      const totals = filtered.reduce(
+        (acc, pay) => ({
+          totalAmount: acc.totalAmount + pay.amount,
+          totalGross: acc.totalGross + pay.gross,
+          totalAdvance: acc.totalAdvance + pay.advance,
+          totalBonus: acc.totalBonus + pay.bonus,
+        }),
+        { totalAmount: 0, totalGross: 0, totalAdvance: 0, totalBonus: 0 },
+      );
+      out.push({ ...w, ...totals, payments: filtered });
+    }
+    return out;
+  }, [workersIndex, faenaFilter]);
+
+  // 4) Filtro por búsqueda (rut o nombre) y orden por total desc.
+  const filteredWorkers = useMemo(() => {
+    const list = [...workersAfterFaena].sort((a, b) => b.totalAmount - a.totalAmount);
+    const q = search.trim();
+    if (!q) return list;
+    const qNorm = normRut(q);
+    const qLow = q.toLowerCase();
+    return list.filter((w) =>
+      normRut(w.rut).includes(qNorm) ||
+      String(w.name || "").toLowerCase().includes(qLow),
+    );
+  }, [workersAfterFaena, search]);
+
+  const selectedWorker = selectedRut ? filteredWorkers.find((w) => w.rut === selectedRut) || workersAfterFaena.find((w) => w.rut === selectedRut) : null;
+
+  // Faenas disponibles para el chip-toggle: las que aparecen en filteredPayrolls.
+  const faenasInPayrolls = useMemo(() => {
+    const ids = new Set();
+    for (const p of filteredPayrolls) {
+      for (const cd of p.cycleDetails || []) {
+        if (cd.faenaId) ids.add(cd.faenaId);
+      }
+    }
+    return faenas.filter((f) => ids.has(f.id));
+  }, [filteredPayrolls, faenas]);
+
+  const resetFilters = () => {
+    setSearch("");
+    setDateFrom(sixMonthsAgoISO());
+    setDateTo(todayISO());
+    setClassification("all");
+    setFaenaFilter(new Set());
+  };
+
+  const setRange = (months) => {
+    const today = new Date();
+    const from = new Date(today);
+    from.setMonth(from.getMonth() - months);
+    setDateFrom(from.toISOString().slice(0, 10));
+    setDateTo(today.toISOString().slice(0, 10));
+  };
+
+  const handleExport = async () => {
+    if (!selectedWorker) return;
+    setExporting(true);
+    try {
+      const ExcelJS = (await import("exceljs")).default;
+      const wb = new ExcelJS.Workbook();
+      const ws = wb.addWorksheet("Pagos");
+      ws.addRow(["", ""]); // fila 1 vacía
+      ws.getColumn(1).width = 4;
+      ws.addRow(["", `Historial de pagos — ${selectedWorker.name} (${selectedWorker.rut})`]);
+      ws.getRow(2).font = { bold: true, size: 13 };
+      ws.addRow(["", `Rango: ${dateFrom} → ${dateTo} · ${classification === "all" ? "Nóminas + Diferencias" : classification === "nomina" ? "Solo nóminas" : "Solo diferencias"}`]);
+      ws.addRow([]);
+      const header = ["", "Fecha", "Nómina", "Tipo", "Líder", "Faenas", "Bruto", "Anticipos", "Bonos", "Neto"];
+      const hdrRow = ws.addRow(header);
+      hdrRow.eachCell((cell, col) => {
+        if (col === 1) return;
+        cell.font = { bold: true };
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFB7DEE8" } };
+        cell.border = { top: { style: "thin" }, left: { style: "thin" }, bottom: { style: "thin" }, right: { style: "thin" } };
+      });
+      for (const pay of selectedWorker.payments) {
+        const r = ws.addRow([
+          "",
+          pay.payrollDateISO,
+          pay.payrollName,
+          pay.classification === "diferencia" ? "Diferencia" : "Nómina",
+          pay.groupLeader || "—",
+          pay.faenaNames.join(" / ") || "—",
+          Math.round(pay.gross),
+          Math.round(pay.advance),
+          Math.round(pay.bonus),
+          Math.round(pay.amount),
+        ]);
+        for (let c = 7; c <= 10; c++) r.getCell(c).numFmt = '"$"#,##0';
+      }
+      const totalRow = ws.addRow([
+        "", "", "TOTAL", "", "", "",
+        Math.round(selectedWorker.totalGross),
+        Math.round(selectedWorker.totalAdvance),
+        Math.round(selectedWorker.totalBonus),
+        Math.round(selectedWorker.totalAmount),
+      ]);
+      totalRow.font = { bold: true };
+      totalRow.eachCell((cell, col) => {
+        if (col === 1) return;
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFC6EFCE" } };
+        if (col >= 7) cell.numFmt = '"$"#,##0';
+      });
+      ws.getColumn(2).width = 12;
+      ws.getColumn(3).width = 30;
+      ws.getColumn(4).width = 12;
+      ws.getColumn(5).width = 18;
+      ws.getColumn(6).width = 28;
+      for (let c = 7; c <= 10; c++) ws.getColumn(c).width = 14;
+      const buf = await wb.xlsx.writeBuffer();
+      const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      const safeName = (selectedWorker.name || selectedWorker.rut).replace(/[^a-z0-9_-]+/gi, "_");
+      a.href = url;
+      a.download = `historial_${safeName}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    } catch (err) {
+      toast.error("No se pudo exportar: " + (err?.message || err));
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  if (loading) {
+    return <div className="flex flex-1 items-center justify-center text-[var(--color-muted)]">Cargando nóminas…</div>;
+  }
+
+  return (
+    <div className="flex flex-1 flex-col gap-3 min-h-0">
+      {/* Filtros */}
+      <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] p-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="🔍 Buscar por RUT o nombre…"
+            className="min-w-[220px] flex-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-sm outline-none focus:border-[var(--color-accent)]"
+          />
+          <div className="flex items-center gap-1 text-xs">
+            <span className="text-[var(--color-muted)]">Desde</span>
+            <input
+              type="date"
+              value={dateFrom}
+              onChange={(e) => setDateFrom(e.target.value)}
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 py-1 text-xs outline-none focus:border-[var(--color-accent)]"
+            />
+            <span className="text-[var(--color-muted)]">→</span>
+            <input
+              type="date"
+              value={dateTo}
+              onChange={(e) => setDateTo(e.target.value)}
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 py-1 text-xs outline-none focus:border-[var(--color-accent)]"
+            />
+          </div>
+          <div className="inline-flex overflow-hidden rounded-md border border-[var(--color-border)] text-xs">
+            {[
+              { v: 3, l: "3m" }, { v: 6, l: "6m" }, { v: 12, l: "1a" }, { v: 24, l: "2a" },
+            ].map((r) => (
+              <button
+                key={r.v}
+                onClick={() => setRange(r.v)}
+                className="border-l border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 first:border-l-0 hover:bg-[var(--color-accent-soft)]"
+                title={`Últimos ${r.l}`}
+              >
+                {r.l}
+              </button>
+            ))}
+          </div>
+          <div className="inline-flex overflow-hidden rounded-md border border-[var(--color-border)] text-xs">
+            {[
+              { v: "all", l: "Todos" },
+              { v: "nomina", l: "📋 Nóminas" },
+              { v: "diferencia", l: "🏷️ Diferencias" },
+            ].map((c) => (
+              <button
+                key={c.v}
+                onClick={() => setClassification(c.v)}
+                className={`border-l border-[var(--color-border)] px-2 py-1 first:border-l-0 ${
+                  classification === c.v ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]" : "bg-[var(--color-surface)] hover:bg-[var(--color-accent-soft)]"
+                }`}
+              >
+                {c.l}
+              </button>
+            ))}
+          </div>
+          <button
+            onClick={resetFilters}
+            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-xs text-[var(--color-muted)] hover:text-[var(--color-danger)]"
+            title="Volver a defaults (6 meses, todas las clasif., sin faena)"
+          >
+            ⟲ Reset
+          </button>
+        </div>
+        {faenasInPayrolls.length > 0 && (
+          <div className="mt-2 flex flex-wrap items-center gap-1 text-xs">
+            <span className="text-[var(--color-muted)] mr-1">Faena:</span>
+            {faenasInPayrolls.map((f) => {
+              const active = faenaFilter.has(f.id);
+              return (
+                <button
+                  key={f.id}
+                  onClick={() => {
+                    setFaenaFilter((prev) => {
+                      const next = new Set(prev);
+                      if (next.has(f.id)) next.delete(f.id);
+                      else next.add(f.id);
+                      return next;
+                    });
+                  }}
+                  className={`rounded-full px-2 py-0.5 ${
+                    active
+                      ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
+                      : "bg-[var(--color-surface)] border border-[var(--color-border)] hover:bg-[var(--color-accent-soft)]"
+                  }`}
+                >
+                  {f.name}
+                </button>
+              );
+            })}
+            {faenaFilter.size > 0 && (
+              <button
+                onClick={() => setFaenaFilter(new Set())}
+                className="ml-1 text-[var(--color-muted)] hover:text-[var(--color-danger)]"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Contenido principal */}
+      <div className="flex-1 min-h-0 overflow-y-auto">
+        {!selectedWorker ? (
+          <WorkersList
+            workers={filteredWorkers}
+            search={search}
+            onSelect={(rut) => setSelectedRut(rut)}
+          />
+        ) : (
+          <WorkerDetail
+            worker={selectedWorker}
+            onBack={() => setSelectedRut(null)}
+            onExport={handleExport}
+            exporting={exporting}
+            onOpenPayroll={onOpenPayroll}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function WorkersList({ workers, search, onSelect }) {
+  if (workers.length === 0) {
+    return (
+      <div className="rounded-md border border-dashed border-[var(--color-border)] py-8 text-center text-sm text-[var(--color-muted)]">
+        {search.trim()
+          ? `Ningún trabajador coincide con "${search}" en el rango seleccionado.`
+          : "No hay trabajadores con pagos en este rango/filtros."}
+      </div>
+    );
+  }
+  return (
+    <div className="grid gap-2 md:grid-cols-2 lg:grid-cols-3">
+      {workers.map((w) => (
+        <button
+          key={w.rut}
+          onClick={() => onSelect(w.rut)}
+          className="flex items-center justify-between gap-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2.5 text-left text-sm transition-colors hover:border-[var(--color-accent)] hover:bg-[var(--color-accent-soft)]"
+        >
+          <div className="min-w-0">
+            <div className="truncate font-semibold">{w.name}</div>
+            <div className="font-mono text-[11px] text-[var(--color-muted)]">{formatRutForDisplay(w.rut)}</div>
+            <div className="mt-0.5 text-[11px] text-[var(--color-muted)]">
+              {w.payments.length} pago{w.payments.length === 1 ? "" : "s"}
+            </div>
+          </div>
+          <div className="text-right">
+            <div className="font-bold tabular-nums text-[var(--color-accent)]">
+              {fmtCurrency(w.totalAmount)}
+            </div>
+            {(w.totalAdvance > 0 || w.totalBonus > 0) && (
+              <div className="text-[10px] text-[var(--color-muted)] tabular-nums">
+                {w.totalAdvance > 0 && <span className="text-amber-600 dark:text-amber-400">−{fmtCurrency(w.totalAdvance)} </span>}
+                {w.totalBonus > 0 && <span className="text-emerald-600 dark:text-emerald-400">+{fmtCurrency(w.totalBonus)}</span>}
+              </div>
+            )}
+          </div>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function WorkerDetail({ worker, onBack, onExport, exporting, onOpenPayroll }) {
+  // Chart: bar por pago, X = orden cronológico, Y = monto neto.
+  const chartData = useMemo(() => {
+    const sorted = [...worker.payments].sort((a, b) => a.payrollDate - b.payrollDate);
+    const maxAmt = Math.max(1, ...sorted.map((p) => p.amount));
+    return { sorted, maxAmt };
+  }, [worker.payments]);
+
+  // Modal de resumen integral del trabajador — reusa el mismo componente
+  // que se usa desde la tab Trabajadores del CRM. Trae todos los workdays
+  // (incluso los que aún no se pagaron / no entraron a una nómina) ordenados
+  // por ciclo + fecha.
+  const [summaryOpen, setSummaryOpen] = useState(false);
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-start justify-between gap-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
+        <div>
+          <button
+            onClick={onBack}
+            className="mb-1 text-xs text-[var(--color-muted)] hover:text-[var(--color-accent)]"
+          >
+            ← Volver al listado
+          </button>
+          <div className="text-xl font-semibold">{worker.name}</div>
+          <div className="font-mono text-sm text-[var(--color-muted)]">{formatRutForDisplay(worker.rut)}</div>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button
+            onClick={() => setSummaryOpen(true)}
+            title="Ver todos sus días registrados (incluyendo los que aún no entraron a ninguna nómina)"
+            className="rounded-md border border-[var(--color-accent)] bg-[var(--color-accent-soft)] px-3 py-1.5 text-sm font-medium text-[var(--color-accent)] hover:bg-[var(--color-accent)] hover:text-[var(--color-accent-fg)]"
+          >
+            📅 Ver días sin pagar
+          </button>
+          <button
+            onClick={onExport}
+            disabled={exporting}
+            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)] disabled:opacity-60"
+          >
+            {exporting ? "Exportando…" : "📥 Descargar XLSX"}
+          </button>
+        </div>
+      </div>
+
+      <WorkerSummaryModal
+        open={summaryOpen}
+        worker={{ id: worker.rut, name: worker.name }}
+        onClose={() => setSummaryOpen(false)}
+      />
+
+      {/* Métricas */}
+      <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+        <MetricCard label="Total neto pagado" value={fmtCurrency(worker.totalAmount)} accent />
+        <MetricCard label="Pagos" value={String(worker.payments.length)} />
+        <MetricCard label="Bruto acumulado" value={fmtCurrency(worker.totalGross)} />
+        <MetricCard
+          label="Anticipos / Bonos"
+          value={
+            <span>
+              <span className="text-amber-600 dark:text-amber-400">−{fmtCurrency(worker.totalAdvance)}</span>
+              {" / "}
+              <span className="text-emerald-600 dark:text-emerald-400">+{fmtCurrency(worker.totalBonus)}</span>
+            </span>
+          }
+        />
+      </div>
+
+      {/* Chart simple: barras por pago en orden cronológico */}
+      {chartData.sorted.length > 0 && (
+        <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
+          <div className="mb-2 text-xs font-medium text-[var(--color-muted)]">
+            Pagos en el tiempo · {chartData.sorted.length} eventos
+          </div>
+          <PaymentsBarChart data={chartData.sorted} maxAmt={chartData.maxAmt} />
+        </div>
+      )}
+
+      {/* Listado de pagos */}
+      <div className="rounded-lg border border-[var(--color-border)]">
+        <div className="border-b border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-sm font-medium">
+          Detalle de pagos ({worker.payments.length})
+        </div>
+        <div className="divide-y divide-[var(--color-border)]">
+          {worker.payments.map((pay, i) => (
+            <button
+              key={`${pay.payrollId}_${i}`}
+              onClick={() => onOpenPayroll?.(pay.payroll)}
+              className="flex w-full items-start justify-between gap-3 px-3 py-2.5 text-left text-sm hover:bg-[var(--color-accent-soft)]"
+            >
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <span className="font-medium">{pay.payrollName}</span>
+                  <span className={`rounded-full px-1.5 py-0.5 text-[9px] font-medium ${
+                    pay.classification === "diferencia"
+                      ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300"
+                      : "bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+                  }`}>
+                    {pay.classification === "diferencia" ? "diferencia" : "nómina"}
+                  </span>
+                  <span className={`text-[10px] ${
+                    pay.status === "paid" ? "text-[var(--color-success)]" : "text-[var(--color-warning)]"
+                  }`}>
+                    {pay.status === "paid" ? "pagado" : "pendiente"}
+                  </span>
+                </div>
+                <div className="mt-0.5 text-xs text-[var(--color-muted)]">
+                  📅 {pay.payrollDateISO || "—"}
+                  {pay.groupLeader && (
+                    <> · 👥 Líder: <span className="text-[var(--color-text)] font-medium">{pay.groupLeader}</span></>
+                  )}
+                  {pay.faenaNames.length > 0 && (
+                    <> · 🏞 {pay.faenaNames.join(" / ")}</>
+                  )}
+                </div>
+                {(pay.advance > 0 || pay.bonus > 0) && (
+                  <div className="mt-0.5 text-[11px] tabular-nums">
+                    Bruto {fmtCurrency(pay.gross)}
+                    {pay.advance > 0 && <span className="text-amber-600 dark:text-amber-400"> · −{fmtCurrency(pay.advance)}</span>}
+                    {pay.bonus > 0 && <span className="text-emerald-600 dark:text-emerald-400"> · +{fmtCurrency(pay.bonus)}</span>}
+                  </div>
+                )}
+              </div>
+              <div className="text-right">
+                <div className="font-bold tabular-nums">{fmtCurrency(pay.amount)}</div>
+                <div className="text-[10px] text-[var(--color-muted)] opacity-0 transition-opacity group-hover:opacity-100">→</div>
+              </div>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MetricCard({ label, value, accent = false }) {
+  return (
+    <div className={`rounded-lg border p-3 ${accent ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)]" : "border-[var(--color-border)] bg-[var(--color-surface)]"}`}>
+      <div className="text-[10px] uppercase tracking-wide text-[var(--color-muted)]">{label}</div>
+      <div className={`mt-1 text-base font-bold tabular-nums ${accent ? "text-[var(--color-accent)]" : ""}`}>{value}</div>
+    </div>
+  );
+}
+
+function PaymentsBarChart({ data, maxAmt }) {
+  // SVG inline simple. Width 100% (viewport responsive), height fija.
+  const H = 140;
+  const padTop = 8, padBottom = 24, padLeft = 4, padRight = 4;
+  const innerH = H - padTop - padBottom;
+  const n = data.length;
+  // Cada barra ocupa una franja proporcional + 4px de gap entre barras.
+  const VW = Math.max(280, n * 36);
+  const innerW = VW - padLeft - padRight;
+  const barW = Math.max(8, Math.min(40, innerW / Math.max(1, n) - 4));
+  return (
+    <div className="overflow-x-auto">
+      <svg viewBox={`0 0 ${VW} ${H}`} width="100%" height={H} style={{ display: "block", minWidth: 280 }}>
+        {data.map((p, i) => {
+          const h = (p.amount / maxAmt) * innerH;
+          const x = padLeft + (i + 0.5) * (innerW / n) - barW / 2;
+          const y = padTop + (innerH - h);
+          const isDif = p.classification === "diferencia";
+          return (
+            <g key={`${p.payrollId}_${i}`}>
+              <title>{`${p.payrollDateISO} — ${p.payrollName}\n${fmtCurrency(p.amount)}${p.advance > 0 ? `  (anticipo −${fmtCurrency(p.advance)})` : ""}${p.bonus > 0 ? `  (bono +${fmtCurrency(p.bonus)})` : ""}`}</title>
+              <rect
+                x={x}
+                y={y}
+                width={barW}
+                height={h}
+                fill={isDif ? "#f59e0b" : "#16a34a"}
+                opacity={p.status === "paid" ? 1 : 0.5}
+                rx={2}
+              />
+              {n <= 24 && (
+                <text
+                  x={x + barW / 2}
+                  y={H - 8}
+                  textAnchor="middle"
+                  fontSize="9"
+                  fill="currentColor"
+                  opacity="0.6"
+                >
+                  {p.payrollDateISO?.slice(5) /* MM-DD */}
+                </text>
+              )}
+            </g>
+          );
+        })}
+      </svg>
+      <div className="mt-1 flex items-center gap-3 text-[10px] text-[var(--color-muted)]">
+        <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-sm" style={{ background: "#16a34a" }} /> Nómina</span>
+        <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-sm" style={{ background: "#f59e0b" }} /> Diferencia</span>
+        <span className="flex items-center gap-1 opacity-50"><span className="inline-block h-2 w-2 rounded-sm" style={{ background: "#16a34a" }} /> pendiente</span>
       </div>
     </div>
   );

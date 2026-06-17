@@ -81,8 +81,89 @@ function CarriersTab() {
   const [edit, setEdit] = useState(null); // null | "new" | carrier
   const [viewingTrips, setViewingTrips] = useState(null); // carrier cuyas vueltas se están viendo
   const [showInactive, setShowInactive] = useState(false);
+  // Filtro por tipo (all/own/contracted) y orden de la grilla.
+  const [typeFilter, setTypeFilter] = useState("all");
+  const [sortBy, setSortBy] = useState("owed_desc");
 
-  const visible = showInactive ? carriers : carriers.filter((c) => c.active !== false);
+  // Métricas por transportista: cantidad de resúmenes pendientes, total
+  // adeudado (suma de resúmenes pendientes + vueltas sueltas pendientes) y
+  // total de vueltas pendientes (sueltas, sin resumen asignado).
+  const [pendingPayments, setPendingPayments] = useState([]);
+  const [pendingTrips, setPendingTrips] = useState([]);
+  const [metricsLoading, setMetricsLoading] = useState(true);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setMetricsLoading(true);
+      try {
+        const [payments, trips] = await Promise.all([
+          paymentsService.listAll(),
+          tripsService.listPendingUnlinked(),
+        ]);
+        if (cancelled) return;
+        setPendingPayments(payments.filter((p) => p.status === "pending"));
+        setPendingTrips(trips);
+      } finally {
+        if (!cancelled) setMetricsLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const metricsByCarrier = useMemo(() => {
+    const map = new Map();
+    const ensure = (cid) => {
+      if (!map.has(cid)) {
+        map.set(cid, { pendingPaymentCount: 0, pendingPaymentTotal: 0, pendingTripCount: 0, pendingTripTotal: 0 });
+      }
+      return map.get(cid);
+    };
+    for (const p of pendingPayments) {
+      const e = ensure(p.carrierId);
+      e.pendingPaymentCount += 1;
+      e.pendingPaymentTotal += Number(p.total) || 0;
+    }
+    for (const t of pendingTrips) {
+      const e = ensure(t.carrierId);
+      e.pendingTripCount += 1;
+      e.pendingTripTotal += Number(t.amount) || 0;
+    }
+    return map;
+  }, [pendingPayments, pendingTrips]);
+
+  const totalsAll = useMemo(() => {
+    let owed = 0, resumenes = 0, vueltas = 0;
+    for (const [, m] of metricsByCarrier) {
+      owed += m.pendingPaymentTotal + m.pendingTripTotal;
+      resumenes += m.pendingPaymentCount;
+      vueltas += m.pendingTripCount;
+    }
+    return { owed, resumenes, vueltas };
+  }, [metricsByCarrier]);
+
+  const visible = useMemo(() => {
+    let list = showInactive ? carriers : carriers.filter((c) => c.active !== false);
+    if (typeFilter !== "all") list = list.filter((c) => (c.type || "contracted") === typeFilter);
+    const owedOf = (c) => {
+      const m = metricsByCarrier.get(c.id);
+      return m ? (m.pendingPaymentTotal + m.pendingTripTotal) : 0;
+    };
+    const arr = [...list];
+    arr.sort((a, b) => {
+      switch (sortBy) {
+        case "owed_desc":
+          return owedOf(b) - owedOf(a);
+        case "alpha":
+          return String(a.alias || "").localeCompare(String(b.alias || ""), "es");
+        case "type":
+          return String(a.type || "contracted").localeCompare(String(b.type || "contracted")) ||
+            String(a.alias || "").localeCompare(String(b.alias || ""), "es");
+        default:
+          return 0;
+      }
+    });
+    return arr;
+  }, [carriers, showInactive, typeFilter, sortBy, metricsByCarrier]);
 
   const handleSave = async (data) => {
     if (edit && edit !== "new") {
@@ -95,11 +176,61 @@ function CarriersTab() {
 
   return (
     <div>
-      <div className="mb-3 flex items-center justify-between gap-2">
-        <label className="flex items-center gap-2 text-sm text-[var(--color-muted)]">
-          <input type="checkbox" checked={showInactive} onChange={(e) => setShowInactive(e.target.checked)} />
-          Mostrar inactivos
-        </label>
+      {/* Tira de totales generales: resumenes pendientes y adeudado global */}
+      {!metricsLoading && totalsAll.owed > 0 && (
+        <div className="mb-3 grid grid-cols-3 gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)] p-2.5 text-xs">
+          <div>
+            <div className="text-[var(--color-muted)]">Adeudado total</div>
+            <div className="mt-0.5 font-semibold text-base tabular-nums text-[var(--color-accent)]">{fmtCurrency(totalsAll.owed)}</div>
+          </div>
+          <div>
+            <div className="text-[var(--color-muted)]">Resúmenes pendientes</div>
+            <div className="mt-0.5 font-semibold text-base tabular-nums">{totalsAll.resumenes}</div>
+          </div>
+          <div>
+            <div className="text-[var(--color-muted)]">Vueltas sueltas</div>
+            <div className="mt-0.5 font-semibold text-base tabular-nums">{totalsAll.vueltas}</div>
+          </div>
+        </div>
+      )}
+
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="inline-flex overflow-hidden rounded-md border border-[var(--color-border)] text-xs">
+            <button
+              onClick={() => setTypeFilter("all")}
+              className={`px-2.5 py-1 ${typeFilter === "all" ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]" : "bg-[var(--color-surface)] hover:bg-[var(--color-accent-soft)]"}`}
+            >
+              Todos ({carriers.length})
+            </button>
+            <button
+              onClick={() => setTypeFilter("own")}
+              className={`px-2.5 py-1 border-l border-[var(--color-border)] ${typeFilter === "own" ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]" : "bg-[var(--color-surface)] hover:bg-[var(--color-accent-soft)]"}`}
+            >
+              🏠 Propios ({carriers.filter((c) => c.type === "own").length})
+            </button>
+            <button
+              onClick={() => setTypeFilter("contracted")}
+              className={`px-2.5 py-1 border-l border-[var(--color-border)] ${typeFilter === "contracted" ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]" : "bg-[var(--color-surface)] hover:bg-[var(--color-accent-soft)]"}`}
+            >
+              🚚 Contratados ({carriers.filter((c) => (c.type || "contracted") === "contracted").length})
+            </button>
+          </div>
+          <select
+            value={sortBy}
+            onChange={(e) => setSortBy(e.target.value)}
+            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-xs outline-none focus:border-[var(--color-accent)]"
+            title="Ordenar por"
+          >
+            <option value="owed_desc">Mayor adeudado</option>
+            <option value="alpha">Alfabético</option>
+            <option value="type">Por tipo</option>
+          </select>
+          <label className="flex items-center gap-1 text-xs text-[var(--color-muted)]">
+            <input type="checkbox" checked={showInactive} onChange={(e) => setShowInactive(e.target.checked)} />
+            Mostrar inactivos
+          </label>
+        </div>
         <button
           onClick={() => setEdit("new")}
           className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-[var(--color-accent-fg)] hover:bg-[var(--color-accent-hover)]"
@@ -114,87 +245,126 @@ function CarriersTab() {
         </div>
       ) : (
         <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
-          {visible.map((c) => (
-            <div
-              key={c.id}
-              role="button"
-              tabIndex={0}
-              onClick={() => setViewingTrips(c)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  setViewingTrips(c);
-                }
-              }}
-              className={`group cursor-pointer rounded-lg border bg-[var(--color-surface)] p-3 shadow-sm transition-colors hover:border-[var(--color-accent)] hover:bg-[var(--color-accent-soft)] ${
-                c.active === false ? "border-[var(--color-border)] opacity-60" : "border-[var(--color-border)]"
-              }`}
-              title="Ver vueltas del transportista"
-            >
-              <div className="flex items-start justify-between">
-                <div>
-                  <div className="font-semibold">{c.alias}</div>
-                  <div className="text-sm text-[var(--color-muted)]">{c.name}</div>
-                </div>
-                <span
-                  className={`rounded-full px-1.5 py-0.5 text-[10px] ${
-                    c.type === "own"
-                      ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
-                      : "bg-[var(--color-warning-soft)] text-[var(--color-warning)]"
-                  }`}
-                >
-                  {c.type === "own" ? "propio" : "contratado"}
-                </span>
-              </div>
-              {c.type !== "own" && c.defaultRate > 0 && (
-                <div className="mt-1 text-xs text-[var(--color-muted)]">
-                  Tarifa default: {fmtCurrency(c.defaultRate)}
-                </div>
-              )}
-              <div className="mt-2 flex flex-wrap gap-1 text-[11px]">
-                {(c.vehicles || []).map((v) => (
-                  <span key={v.alias} className="rounded bg-[var(--color-surface-2)] px-1.5 py-0.5">
-                    {v.alias}
-                    {v.plate && <span className="ml-1 text-[var(--color-muted)]">({v.plate})</span>}
-                  </span>
-                ))}
-                {(c.vehicles || []).length === 0 && (
-                  <span className="text-[var(--color-muted)]">Sin vehículos</span>
-                )}
-              </div>
+          {visible.map((c) => {
+            const m = metricsByCarrier.get(c.id) || { pendingPaymentCount: 0, pendingPaymentTotal: 0, pendingTripCount: 0, pendingTripTotal: 0 };
+            const owed = m.pendingPaymentTotal + m.pendingTripTotal;
+            const hasDebt = owed > 0;
+            const isOwn = c.type === "own";
+            const isInactive = c.active === false;
+            // Banda superior con color según tipo (propio = verde acento,
+            // contratado = ámbar). Se atenúa para inactivos.
+            const bandColor = isOwn ? "var(--color-accent)" : "#d97706";
+            const bandSoft = isOwn ? "var(--color-accent-soft)" : "#fef3c7";
+            return (
               <div
-                className="mt-3 flex items-center justify-between gap-1"
-                onClick={(e) => e.stopPropagation()}
+                key={c.id}
+                role="button"
+                tabIndex={0}
+                onClick={() => setViewingTrips(c)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    setViewingTrips(c);
+                  }
+                }}
+                className={`group relative cursor-pointer overflow-hidden rounded-lg border bg-[var(--color-surface)] shadow-sm transition-all hover:shadow-md ${
+                  isInactive ? "border-[var(--color-border)] opacity-60" : "border-[var(--color-border)] hover:border-[var(--color-accent)]"
+                }`}
+                title="Ver vueltas del transportista"
+                style={{ borderTop: `3px solid ${isInactive ? "var(--color-border)" : bandColor}` }}
               >
-                <span className="text-[10px] text-[var(--color-muted)] opacity-0 transition-opacity group-hover:opacity-100">
-                  Click para ver vueltas →
-                </span>
-                <div className="flex gap-1">
-                  <button
-                    onClick={() => setEdit(c)}
-                    className="rounded px-2 py-1 text-xs text-[var(--color-accent)] hover:bg-[var(--color-accent-soft)]"
-                  >
-                    Editar
-                  </button>
-                  {c.active !== false ? (
-                    <button
-                      onClick={() => softDeleteCarrier(c.id)}
-                      className="rounded px-2 py-1 text-xs text-[var(--color-danger)] hover:bg-[var(--color-danger-soft)]"
+                <div className="p-3">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-sm">{isOwn ? "🏠" : "🚚"}</span>
+                        <div className="truncate font-semibold">{c.alias}</div>
+                      </div>
+                      <div className="truncate text-xs text-[var(--color-muted)]">{c.name}</div>
+                    </div>
+                    <span
+                      className="shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium"
+                      style={{ background: bandSoft, color: bandColor }}
                     >
-                      Desactivar
-                    </button>
-                  ) : (
-                    <button
-                      onClick={() => restoreCarrier(c.id)}
-                      className="rounded px-2 py-1 text-xs text-[var(--color-success)] hover:bg-[var(--color-accent-soft)]"
-                    >
-                      Restaurar
-                    </button>
+                      {isOwn ? "propio" : "contratado"}
+                    </span>
+                  </div>
+
+                  {/* Grilla de métricas: adeudado destacado, resumenes y vueltas */}
+                  <div className="mt-2.5 grid grid-cols-3 gap-1.5">
+                    <div className={`rounded-md p-1.5 ${hasDebt ? "bg-[var(--color-warning-soft)]" : "bg-[var(--color-surface-2)]"}`}>
+                      <div className="text-[9px] uppercase tracking-wide text-[var(--color-muted)]">Adeudado</div>
+                      <div className={`mt-0.5 text-xs font-bold tabular-nums ${hasDebt ? "text-[var(--color-warning)]" : "text-[var(--color-muted)]"}`}>
+                        {hasDebt ? fmtCurrency(owed) : "—"}
+                      </div>
+                    </div>
+                    <div className="rounded-md bg-[var(--color-surface-2)] p-1.5">
+                      <div className="text-[9px] uppercase tracking-wide text-[var(--color-muted)]">Resúmenes</div>
+                      <div className="mt-0.5 text-xs font-bold tabular-nums">
+                        {m.pendingPaymentCount > 0 ? m.pendingPaymentCount : "—"}
+                      </div>
+                    </div>
+                    <div className="rounded-md bg-[var(--color-surface-2)] p-1.5">
+                      <div className="text-[9px] uppercase tracking-wide text-[var(--color-muted)]">Vueltas</div>
+                      <div className="mt-0.5 text-xs font-bold tabular-nums">
+                        {m.pendingTripCount > 0 ? m.pendingTripCount : "—"}
+                      </div>
+                    </div>
+                  </div>
+
+                  {!isOwn && c.defaultRate > 0 && (
+                    <div className="mt-2 text-[10px] text-[var(--color-muted)]">
+                      Tarifa default · <span className="tabular-nums">{fmtCurrency(c.defaultRate)}</span>
+                    </div>
                   )}
+
+                  <div className="mt-2 flex flex-wrap gap-1 text-[10px]">
+                    {(c.vehicles || []).map((v) => (
+                      <span key={v.alias} className="inline-flex items-center gap-0.5 rounded bg-[var(--color-surface-2)] px-1.5 py-0.5">
+                        🚐 {v.alias}
+                        {v.plate && <span className="text-[var(--color-muted)]">({v.plate})</span>}
+                      </span>
+                    ))}
+                    {(c.vehicles || []).length === 0 && (
+                      <span className="text-[var(--color-muted)] italic">sin vehículos</span>
+                    )}
+                  </div>
+                </div>
+
+                <div
+                  className="flex items-center justify-between border-t border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <span className="text-[10px] text-[var(--color-muted)] opacity-0 transition-opacity group-hover:opacity-100">
+                    Click para ver vueltas →
+                  </span>
+                  <div className="flex gap-1">
+                    <button
+                      onClick={() => setEdit(c)}
+                      className="rounded px-1.5 py-0.5 text-[11px] text-[var(--color-accent)] hover:bg-[var(--color-accent-soft)]"
+                    >
+                      Editar
+                    </button>
+                    {!isInactive ? (
+                      <button
+                        onClick={() => softDeleteCarrier(c.id)}
+                        className="rounded px-1.5 py-0.5 text-[11px] text-[var(--color-danger)] hover:bg-[var(--color-danger-soft)]"
+                      >
+                        Desactivar
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => restoreCarrier(c.id)}
+                        className="rounded px-1.5 py-0.5 text-[11px] text-[var(--color-success)] hover:bg-[var(--color-accent-soft)]"
+                      >
+                        Restaurar
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
@@ -220,17 +390,32 @@ function CarrierTripsModal({ open, onClose, carrier }) {
   const [subfaenas, setSubfaenas] = useState([]);
   const [loading, setLoading] = useState(false);
   const [statusFilter, setStatusFilter] = useState("");
+  // Default: rango últimos 3 meses (today - 90 días) → today. Reduce el
+  // ruido de vueltas antiguas y la carga inicial. El usuario puede ampliar
+  // o limpiar el rango cuando quiera ver todo.
+  const defaultRange = () => {
+    const today = new Date();
+    const from = new Date(today);
+    from.setMonth(from.getMonth() - 3);
+    const iso = (d) => d.toISOString().slice(0, 10);
+    return { from: iso(from), to: iso(today) };
+  };
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
+  // Toggle para incluir vueltas ya pagadas. Por default solo pending — las
+  // pagadas son las más numerosas y casi nunca se necesitan al abrir la
+  // vista. Cuando se activa, hacemos un re-fetch que las trae todas.
+  const [includePaid, setIncludePaid] = useState(false);
   const [editing, setEditing] = useState(null); // trip object o null
   const [confirmDel, setConfirmDel] = useState(null);
 
-  const reload = async () => {
+  const reload = async (opts = {}) => {
     if (!carrier?.id) return;
+    const wantPaid = opts.includePaid ?? includePaid;
     setLoading(true);
     try {
       const [tripList, cyc, fa, sub] = await Promise.all([
-        tripsService.listByCarrier(carrier.id),
+        tripsService.listByCarrier(carrier.id, { onlyPending: !wantPaid }),
         cyclesService.list({ cache: true, persist: true, ttl: 5 * 60 * 1000 }),
         faenasService.list({ cache: true, persist: true, ttl: 10 * 60 * 1000 }),
         subfaenasService.list({ cache: true, persist: true, ttl: 10 * 60 * 1000 }),
@@ -246,16 +431,36 @@ function CarrierTripsModal({ open, onClose, carrier }) {
   };
 
   useEffect(() => {
-    if (open) reload();
-    else {
+    if (open) {
+      // Al abrir el modal: rango default últimos 3 meses, sin pagadas.
+      const r = defaultRange();
+      setDateFrom(r.from);
+      setDateTo(r.to);
+      setStatusFilter("");
+      setIncludePaid(false);
+      reload({ includePaid: false });
+    } else {
       setEditing(null);
       setConfirmDel(null);
       setStatusFilter("");
       setDateFrom("");
       setDateTo("");
+      setIncludePaid(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, carrier?.id]);
+
+  // Cuando el usuario alterna "incluir pagadas" re-fetcheamos: la decisión
+  // está acoplada al query del server (onlyPending), no es solo un filtro
+  // cliente. El primer load ya se dispara en el useEffect de arriba; este
+  // hook responde solo a cambios posteriores.
+  const isFirstToggle = useRef(true);
+  useEffect(() => {
+    if (!open) return;
+    if (isFirstToggle.current) { isFirstToggle.current = false; return; }
+    reload({ includePaid });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [includePaid]);
 
   const cycleById = useMemo(() => new Map(cycles.map((c) => [c.id, c])), [cycles]);
   const faenaById = useMemo(() => new Map(faenas.map((f) => [f.id, f])), [faenas]);
@@ -313,26 +518,40 @@ function CarrierTripsModal({ open, onClose, carrier }) {
       >
         <div className="mb-3 flex flex-wrap items-end justify-between gap-2 text-xs">
           <div className="flex flex-wrap items-center gap-2">
-            <div className="flex gap-1">
-              {[
-                { v: "", l: "Todas" },
-                { v: "pending", l: "⏳ Pendientes" },
-                { v: "paid", l: "✓ Pagadas" },
-              ].map((o) => (
-                <button
-                  key={o.v}
-                  type="button"
-                  onClick={() => setStatusFilter(o.v)}
-                  className={`rounded-md border px-2 py-1 ${
-                    statusFilter === o.v
-                      ? "border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
-                      : "border-[var(--color-border)] bg-[var(--color-surface-2)] hover:bg-[var(--color-accent-soft)]"
-                  }`}
-                >
-                  {o.l}
-                </button>
-              ))}
-            </div>
+            <label className={`flex items-center gap-1 rounded-md border px-2 py-1 ${
+              includePaid
+                ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+                : "border-[var(--color-border)] bg-[var(--color-surface-2)]"
+            }`}>
+              <input
+                type="checkbox"
+                checked={includePaid}
+                onChange={(e) => setIncludePaid(e.target.checked)}
+              />
+              <span>{includePaid ? "✓ Pagadas incluidas" : "Incluir pagadas"}</span>
+            </label>
+            {includePaid && (
+              <div className="flex gap-1">
+                {[
+                  { v: "", l: "Todas" },
+                  { v: "pending", l: "⏳ Pendientes" },
+                  { v: "paid", l: "✓ Pagadas" },
+                ].map((o) => (
+                  <button
+                    key={o.v}
+                    type="button"
+                    onClick={() => setStatusFilter(o.v)}
+                    className={`rounded-md border px-2 py-1 ${
+                      statusFilter === o.v
+                        ? "border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
+                        : "border-[var(--color-border)] bg-[var(--color-surface-2)] hover:bg-[var(--color-accent-soft)]"
+                    }`}
+                  >
+                    {o.l}
+                  </button>
+                ))}
+              </div>
+            )}
             <label className="flex items-center gap-1">
               <span className="text-[var(--color-muted)]">Desde</span>
               <input
@@ -351,6 +570,26 @@ function CarrierTripsModal({ open, onClose, carrier }) {
                 className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1"
               />
             </label>
+            <button
+              type="button"
+              onClick={() => {
+                const r = defaultRange();
+                setDateFrom(r.from);
+                setDateTo(r.to);
+              }}
+              className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 hover:bg-[var(--color-accent-soft)]"
+              title="Volver al rango default (últimos 3 meses)"
+            >
+              ⟲ 3 meses
+            </button>
+            <button
+              type="button"
+              onClick={() => { setDateFrom(""); setDateTo(""); }}
+              className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 hover:bg-[var(--color-accent-soft)]"
+              title="Ver todas las vueltas sin filtro de fecha"
+            >
+              ∞ Sin rango
+            </button>
             {(statusFilter || dateFrom || dateTo) && (
               <button
                 type="button"
@@ -361,14 +600,14 @@ function CarrierTripsModal({ open, onClose, carrier }) {
                 }}
                 className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 hover:bg-[var(--color-accent-soft)]"
               >
-                Limpiar
+                ✕ Limpiar
               </button>
             )}
           </div>
           <div className="text-sm">
             <span className="text-[var(--color-muted)]">
               {filtered.length} vuelta{filtered.length === 1 ? "" : "s"} (
-              {pendingCount} pend · {paidCount} pag) ·{" "}
+              {pendingCount} pend{includePaid ? ` · ${paidCount} pag` : ""}) ·{" "}
             </span>
             <span className="font-semibold tabular-nums">{fmtCurrency(totalAmount)}</span>
           </div>
@@ -378,7 +617,11 @@ function CarrierTripsModal({ open, onClose, carrier }) {
           <div className="py-8 text-center text-sm text-[var(--color-muted)]">Cargando...</div>
         ) : filtered.length === 0 ? (
           <div className="rounded-md border border-dashed border-[var(--color-border)] py-8 text-center text-sm text-[var(--color-muted)]">
-            {trips.length === 0 ? "Este transportista no tiene vueltas" : "Sin vueltas para los filtros aplicados"}
+            {trips.length === 0
+              ? (includePaid
+                  ? "Este transportista no tiene vueltas en el rango seleccionado"
+                  : "Sin vueltas pendientes en el rango. Activá \"Incluir pagadas\" o ampliá el rango para ver más.")
+              : "Sin vueltas para los filtros aplicados"}
           </div>
         ) : (
           <div className="max-h-[55vh] overflow-auto rounded-md border border-[var(--color-border)]">
@@ -900,6 +1143,9 @@ function PaymentsTab() {
   const [faenas, setFaenas] = useState([]);
   const [subfaenas, setSubfaenas] = useState([]);
   const [cycles, setCycles] = useState([]);
+  // Quincenas (transportPayrolls): para mostrar a qué quincena pertenece
+  // cada resumen y eventualmente filtrar por "sin quincena".
+  const [transportPayrolls, setTransportPayrolls] = useState([]);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [printingMany, setPrintingMany] = useState(false);
@@ -910,17 +1156,31 @@ function PaymentsTab() {
   // (marcar pagado, revertir, eliminar resumen, generar uno nuevo).
   const [balanceVersion, setBalanceVersion] = useState(0);
 
+  // Filtros y ordenamiento de la lista de resúmenes. Persistidos en
+  // localStorage para que no se pierdan al navegar entre tabs.
+  const [search, setSearch] = useState("");
+  const [filterFrom, setFilterFrom] = useState("");
+  const [filterTo, setFilterTo] = useState("");
+  const [sortBy, setSortBy] = useState(() => {
+    try { return localStorage.getItem("transports_payments_sort") || "period_desc"; }
+    catch { return "period_desc"; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("transports_payments_sort", sortBy); } catch { /* noop */ }
+  }, [sortBy]);
+
   const reload = async () => {
     setLoading(true);
     try {
       const paymentsPromise = showHistoricPaid
         ? paymentsService.listAll()
         : paymentsService.listSince(isoDateNDaysAgo(DEFAULT_HISTORY_DAYS));
-      const [list, fa, sub, cyc] = await Promise.all([
+      const [list, fa, sub, cyc, tp] = await Promise.all([
         paymentsPromise,
         faenasService.list({ cache: true, persist: true, ttl: 10 * 60 * 1000 }),
         subfaenasService.list({ cache: true, persist: true, ttl: 10 * 60 * 1000 }),
         cyclesService.list({ cache: true, persist: true, ttl: 5 * 60 * 1000 }),
+        transportPayrollsService.listAll(),
       ]);
       list.sort((a, b) => {
         const aT = a.createdAt?.seconds || 0;
@@ -931,6 +1191,7 @@ function PaymentsTab() {
       setFaenas(fa);
       setSubfaenas(sub);
       setCycles(cyc);
+      setTransportPayrolls(tp);
     } finally {
       setLoading(false);
     }
@@ -945,8 +1206,68 @@ function PaymentsTab() {
   const faenaById = useMemo(() => new Map(faenas.map((f) => [f.id, f])), [faenas]);
   const subfaenaById = useMemo(() => new Map(subfaenas.map((s) => [s.id, s])), [subfaenas]);
   const cycleById = useMemo(() => new Map(cycles.map((c) => [c.id, c])), [cycles]);
-  const pending = payments.filter((p) => p.status === "pending");
-  const paid = payments.filter((p) => p.status === "paid");
+  const transportPayrollById = useMemo(
+    () => new Map(transportPayrolls.map((tp) => [tp.id, tp])),
+    [transportPayrolls],
+  );
+
+  // Filtro extra por quincena: "all" (default), "none" (sin quincena), o
+  // un id concreto de quincena.
+  const [payrollFilter, setPayrollFilter] = useState("all");
+
+  // Aplica búsqueda (alias/nombre del transportista) + rango de fechas
+  // (overlap con el período del resumen) + sort. El filtro se aplica antes
+  // del split por estado, así pending/paid quedan consistentes.
+  const filteredSorted = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const filtered = payments.filter((p) => {
+      if (q) {
+        const c = carrierById.get(p.carrierId);
+        const haystack = `${c?.alias || ""} ${c?.name || ""}`.toLowerCase();
+        if (!haystack.includes(q)) return false;
+      }
+      if (filterFrom || filterTo) {
+        const pFrom = p.periodFrom || p.periodTo || "";
+        const pTo = p.periodTo || p.periodFrom || "";
+        if (!pFrom && !pTo) return false; // sin período no entra en filtro por fechas
+        if (filterFrom && pTo && pTo < filterFrom) return false;
+        if (filterTo && pFrom && pFrom > filterTo) return false;
+      }
+      if (payrollFilter === "none" && p.payrollId) return false;
+      if (payrollFilter !== "all" && payrollFilter !== "none" && p.payrollId !== payrollFilter) return false;
+      return true;
+    });
+    const cmpStr = (a, b) => String(a || "").localeCompare(String(b || ""), "es");
+    const periodKey = (p) => p.periodFrom || p.periodTo || "";
+    const lastPeriodKey = (p) => p.periodTo || p.periodFrom || "";
+    const createdKey = (p) => p.createdAt?.seconds || 0;
+    const carrierKey = (p) => carrierById.get(p.carrierId)?.alias || p.carrierId || "";
+    filtered.sort((a, b) => {
+      switch (sortBy) {
+        case "period_asc":
+          return cmpStr(periodKey(a), periodKey(b)) || createdKey(b) - createdKey(a);
+        case "period_desc":
+          return cmpStr(lastPeriodKey(b), lastPeriodKey(a)) || createdKey(b) - createdKey(a);
+        case "amount_desc":
+          return (Number(b.total) || 0) - (Number(a.total) || 0);
+        case "amount_asc":
+          return (Number(a.total) || 0) - (Number(b.total) || 0);
+        case "carrier":
+          return cmpStr(carrierKey(a), carrierKey(b)) || createdKey(b) - createdKey(a);
+        case "created_desc":
+        default:
+          return createdKey(b) - createdKey(a);
+      }
+    });
+    return filtered;
+  }, [payments, carrierById, search, filterFrom, filterTo, sortBy, payrollFilter]);
+
+  const pending = filteredSorted.filter((p) => p.status === "pending");
+  const paid = filteredSorted.filter((p) => p.status === "paid");
+  const totalCount = filteredSorted.length;
+  const totalAll = payments.length;
+  const hasActiveFilter = !!(search || filterFrom || filterTo || payrollFilter !== "all");
+  const clearFilters = () => { setSearch(""); setFilterFrom(""); setFilterTo(""); setPayrollFilter("all"); };
 
   return (
     <div>
@@ -981,6 +1302,76 @@ function PaymentsTab() {
 
       <BalanceSummary carriers={carriers} reloadVersion={balanceVersion} />
 
+      <div className="mb-4 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] p-2.5">
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="🔍 Buscar transportista…"
+            className="min-w-[160px] flex-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1.5 text-sm outline-none focus:border-[var(--color-accent)]"
+          />
+          <div className="flex items-center gap-1 text-xs">
+            <span className="text-[var(--color-muted)]">Período</span>
+            <input
+              type="date"
+              value={filterFrom}
+              onChange={(e) => setFilterFrom(e.target.value)}
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 py-1 text-xs outline-none focus:border-[var(--color-accent)]"
+            />
+            <span className="text-[var(--color-muted)]">→</span>
+            <input
+              type="date"
+              value={filterTo}
+              onChange={(e) => setFilterTo(e.target.value)}
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 py-1 text-xs outline-none focus:border-[var(--color-accent)]"
+            />
+          </div>
+          <select
+            value={payrollFilter}
+            onChange={(e) => setPayrollFilter(e.target.value)}
+            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1.5 text-xs outline-none focus:border-[var(--color-accent)]"
+            title="Filtrar por quincena"
+          >
+            <option value="all">Todas las quincenas</option>
+            <option value="none">⚠️ Sin quincena</option>
+            {transportPayrolls
+              .slice()
+              .sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0))
+              .map((tp) => (
+                <option key={tp.id} value={tp.id}>
+                  🧾 {tp.name}{tp.status === "paid" ? " ✓" : ""}
+                </option>
+              ))}
+          </select>
+          <select
+            value={sortBy}
+            onChange={(e) => setSortBy(e.target.value)}
+            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1.5 text-xs outline-none focus:border-[var(--color-accent)]"
+            title="Ordenar por"
+          >
+            <option value="period_desc">Período más reciente</option>
+            <option value="period_asc">Período más antiguo</option>
+            <option value="amount_desc">Monto mayor</option>
+            <option value="amount_asc">Monto menor</option>
+            <option value="carrier">Transportista (A→Z)</option>
+            <option value="created_desc">Creación más reciente</option>
+          </select>
+          {hasActiveFilter && (
+            <button
+              onClick={clearFilters}
+              className="rounded-md border border-[var(--color-border)] px-2 py-1 text-xs text-[var(--color-muted)] hover:text-[var(--color-danger)]"
+              title="Limpiar filtros"
+            >
+              ✕ Limpiar
+            </button>
+          )}
+          <span className="ml-auto text-[11px] text-[var(--color-muted)] tabular-nums">
+            {hasActiveFilter ? `${totalCount}/${totalAll}` : `${totalAll}`} resumen{totalAll === 1 ? "" : "es"}
+          </span>
+        </div>
+      </div>
+
       {loading ? (
         <div className="py-8 text-center text-sm text-[var(--color-muted)]">Cargando...</div>
       ) : (
@@ -989,16 +1380,18 @@ function PaymentsTab() {
             title="Pendientes"
             payments={pending}
             carrierById={carrierById}
+            transportPayrollById={transportPayrollById}
             onView={setViewing}
-            empty="Sin resúmenes pendientes"
+            empty={hasActiveFilter ? "Ningún pendiente coincide con el filtro" : "Sin resúmenes pendientes"}
           />
           <div className="mt-6">
             <PaymentSection
               title="Pagados"
               payments={paid}
               carrierById={carrierById}
+              transportPayrollById={transportPayrollById}
               onView={setViewing}
-              empty="Sin pagos registrados"
+              empty={hasActiveFilter ? "Ningún pago coincide con el filtro" : "Sin pagos registrados"}
               dim
             />
           </div>
@@ -1036,6 +1429,7 @@ function PaymentsTab() {
         onClose={() => setViewing(null)}
         payment={viewing}
         carrier={viewing ? carrierById.get(viewing.carrierId) : null}
+        carriers={carriers}
         faenaById={faenaById}
         subfaenaById={subfaenaById}
         cycleById={cycleById}
@@ -1914,7 +2308,7 @@ function BalanceSummary({ carriers, reloadVersion }) {
   );
 }
 
-function PaymentSection({ title, payments, carrierById, onView, empty, dim = false }) {
+function PaymentSection({ title, payments, carrierById, transportPayrollById, onView, empty, dim = false }) {
   return (
     <div>
       <h3 className="mb-2 text-sm font-medium text-[var(--color-muted)]">{title}</h3>
@@ -1926,18 +2320,66 @@ function PaymentSection({ title, payments, carrierById, onView, empty, dim = fal
         <div className={`grid gap-2 ${dim ? "opacity-90" : ""}`}>
           {payments.map((p) => {
             const c = carrierById.get(p.carrierId);
+            const fmtDate = (d) => {
+              if (!d || typeof d !== "string") return "";
+              const m = d.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+              return m ? `${m[3]}/${m[2]}/${m[1].slice(2)}` : d;
+            };
+            const from = fmtDate(p.periodFrom);
+            const to = fmtDate(p.periodTo);
+            const period = from && to && from !== to
+              ? `${from} → ${to}`
+              : (from || to || "");
             return (
               <button
                 key={p.id}
                 onClick={() => onView(p)}
-                className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-left text-sm hover:border-[var(--color-accent)]"
+                className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-left text-sm hover:border-[var(--color-accent)]"
               >
-                <div>
+                <div className="min-w-0 flex-1">
                   <div className="font-medium">{c?.alias || p.carrierId} <span className="text-[var(--color-muted)]">— {c?.name}</span></div>
-                  <div className="text-xs text-[var(--color-muted)]">
-                    {(p.tripIds || []).length} vueltas
-                    {p.periodFrom && p.periodTo && ` · ${p.periodFrom} → ${p.periodTo}`}
-                    {p.groupBy && ` · agrupado por ${p.groupBy === "day" ? "día" : "faena"}`}
+                  <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
+                    {period ? (
+                      <span className="inline-flex items-center gap-1 rounded bg-[var(--color-accent-soft)] px-1.5 py-0.5 font-medium tabular-nums text-[var(--color-accent)]">
+                        📅 {period}
+                      </span>
+                    ) : (
+                      <span className="text-[var(--color-muted)] italic">sin período</span>
+                    )}
+                    {(() => {
+                      const tp = p.payrollId && transportPayrollById?.get(p.payrollId);
+                      if (tp) {
+                        const isPaid = tp.status === "paid";
+                        return (
+                          <span
+                            className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-medium ${
+                              isPaid
+                                ? "bg-[var(--color-success-soft)] text-[var(--color-success)]"
+                                : "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300"
+                            }`}
+                            title={`Quincena: ${tp.name}${isPaid ? " (pagada)" : " (pendiente)"}`}
+                          >
+                            🧾 {tp.name}{isPaid && " ✓"}
+                          </span>
+                        );
+                      }
+                      if (p.payrollId) {
+                        return (
+                          <span className="inline-flex items-center gap-1 rounded bg-[var(--color-surface-2)] px-1.5 py-0.5 text-[var(--color-muted)]" title="Quincena no cargada">
+                            🧾 quincena #{String(p.payrollId).slice(-4)}
+                          </span>
+                        );
+                      }
+                      return (
+                        <span className="inline-flex items-center gap-1 rounded border border-dashed border-[var(--color-border)] px-1.5 py-0.5 text-[var(--color-muted)]" title="Este resumen no está asignado a ninguna quincena">
+                          🧾 sin quincena
+                        </span>
+                      );
+                    })()}
+                    <span className="text-[var(--color-muted)]">· {(p.tripIds || []).length} vuelta{(p.tripIds || []).length === 1 ? "" : "s"}</span>
+                    {p.groupBy && (
+                      <span className="text-[var(--color-muted)]">· agrupado por {p.groupBy === "day" ? "día" : "faena"}</span>
+                    )}
                   </div>
                 </div>
                 <div className="text-right">
@@ -2120,7 +2562,7 @@ function GenerateSummaryModal({ open, onClose, carriers, faenaById, subfaenaById
   );
 }
 
-function PaymentDetailModal({ open, onClose, payment, carrier, faenaById, subfaenaById, cycleById, onPay, onRevert, onDelete, onChanged }) {
+function PaymentDetailModal({ open, onClose, payment, carrier, carriers = [], faenaById, subfaenaById, cycleById, onPay, onRevert, onDelete, onChanged }) {
   const toast = useToast();
   const [trips, setTrips] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -2128,6 +2570,11 @@ function PaymentDetailModal({ open, onClose, payment, carrier, faenaById, subfae
   const [busy, setBusy] = useState("");
   const [editMode, setEditMode] = useState(false);
   const [savingTripId, setSavingTripId] = useState(null);
+  // Edición avanzada de una vuelta (mismo modal que TripsTab) + confirmación
+  // para sacar una vuelta del resumen sin borrarla del sistema (vuelve a
+  // estar "suelta" para futuras nóminas).
+  const [editingTrip, setEditingTrip] = useState(null);
+  const [confirmRemoveTrip, setConfirmRemoveTrip] = useState(null);
 
   useEffect(() => {
     if (!open || !payment) return;
@@ -2213,6 +2660,68 @@ function PaymentDetailModal({ open, onClose, payment, carrier, faenaById, subfae
     }
   };
 
+  // Refresca trips desde Firestore para reflejar cambios en el ítem
+  // actual del modal después de editar/quitar.
+  const refreshTrips = async () => {
+    try {
+      const all = await tripsService.listByCarrier(payment.carrierId);
+      // Necesitamos releer el payment para tener tripIds actualizado (el
+      // remove edita la lista). Caemos al payment del padre como fallback.
+      let currentTripIds = payment.tripIds || [];
+      try {
+        const updated = await paymentsService.getById(payment.id);
+        if (updated) currentTripIds = updated.tripIds || currentTripIds;
+      } catch { /* noop */ }
+      const filtered = all
+        .filter((t) => currentTripIds.includes(t.id))
+        .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+      setTrips(filtered);
+    } catch (err) {
+      toast.error("No se pudieron recargar las vueltas: " + (err.message || err));
+    }
+  };
+
+  const handleSaveTrip = async (form) => {
+    if (!editingTrip) return;
+    try {
+      // Preservar metadata de origen (ciclo/faena/subfaena) como hace
+      // TripsTab — el resumen no decide eso.
+      const payload = {
+        ...form,
+        cycleId: editingTrip.cycleId || null,
+        faenaId: editingTrip.faenaId || null,
+        subfaenaId: editingTrip.subfaenaId || null,
+      };
+      await tripsService.update(editingTrip.id, payload);
+      setEditingTrip(null);
+      await refreshTrips();
+      // El total del resumen depende del amount: recalcular y persistir.
+      const newTotal = (await tripsService.listByCarrier(payment.carrierId))
+        .filter((t) => (payment.tripIds || []).includes(t.id))
+        .reduce((s, t) => s + (Number(t.amount) || 0), 0);
+      await paymentsService.updateTotal(payment.id, newTotal);
+      if (onChanged) await onChanged();
+      toast.success("Vuelta actualizada");
+    } catch (err) {
+      toast.error("Error al guardar: " + (err.message || err));
+    }
+  };
+
+  const handleRemoveTripFromPayment = async () => {
+    if (!confirmRemoveTrip) return;
+    try {
+      await paymentsService.editSummaryTrips(payment.id, {
+        removeTripIds: [confirmRemoveTrip.id],
+      });
+      setConfirmRemoveTrip(null);
+      await refreshTrips();
+      if (onChanged) await onChanged();
+      toast.success("Vuelta quitada del resumen");
+    } catch (err) {
+      toast.error("Error al quitar: " + (err.message || err));
+    }
+  };
+
   const handlePrint = () => {
     if (!printRef.current) return;
     const html = printRef.current.outerHTML;
@@ -2275,14 +2784,17 @@ function PaymentDetailModal({ open, onClose, payment, carrier, faenaById, subfae
             <button
               onClick={() => setEditMode((v) => !v)}
               className={`rounded-md border px-3 py-1.5 text-sm ${editMode ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)] text-[var(--color-accent)]" : "border-[var(--color-border)] hover:bg-[var(--color-accent-soft)]"}`}
-              title="Editar valores de cada vuelta del resumen"
+              title="Editar valores inline + acceder a los botones de editar detalles completos / quitar vuelta por fila"
             >
-              {editMode ? "✓ Listo" : "✏️ Editar precios"}
+              {editMode ? "✓ Listo" : "✏️ Editar resumen"}
             </button>
           )}
           {/* Marcar pagado / Revertir movieron a la pestaña "Quincenas".
-              Desde acá solo se crea, edita o elimina el resumen suelto. */}
-          {!isPaid && (
+              Desde acá solo se crea, edita o elimina el resumen suelto.
+              Cuando el modal se abre desde la quincena, `onDelete` viene
+              null — escondemos el botón porque eliminar el resumen
+              requiere primero sacarlo de la quincena. */}
+          {!isPaid && onDelete && (
             <button
               onClick={onDelete}
               className="rounded-md border border-[var(--color-danger)] px-3 py-1.5 text-sm text-[var(--color-danger)]"
@@ -2314,6 +2826,8 @@ function PaymentDetailModal({ open, onClose, payment, carrier, faenaById, subfae
           trips={trips}
           editable={editMode && !isPaid}
           onAmountChange={handleAmountChange}
+          onEditTrip={editMode && !isPaid ? (t) => setEditingTrip(t) : null}
+          onRemoveTrip={editMode && !isPaid ? (t) => setConfirmRemoveTrip(t) : null}
           periodLabel={periodLabel}
           faenaById={faenaById}
           subfaenaById={subfaenaById}
@@ -2327,6 +2841,29 @@ function PaymentDetailModal({ open, onClose, payment, carrier, faenaById, subfae
           {payment.notes}
         </div>
       )}
+
+      <TripEditModal
+        open={!!editingTrip}
+        onClose={() => setEditingTrip(null)}
+        trip={editingTrip}
+        carriers={carriers}
+        days={[]}
+        onSave={handleSaveTrip}
+      />
+
+      <ConfirmDialog
+        open={!!confirmRemoveTrip}
+        title="Quitar vuelta del resumen"
+        message={
+          confirmRemoveTrip
+            ? `¿Sacar la vuelta del ${confirmRemoveTrip.date} (${fmtCurrency(confirmRemoveTrip.amount)}) de este resumen? La vuelta no se borra — vuelve a estar suelta para futuros resúmenes.`
+            : ""
+        }
+        confirmLabel="Quitar"
+        danger
+        onCancel={() => setConfirmRemoveTrip(null)}
+        onConfirm={handleRemoveTripFromPayment}
+      />
     </Modal>
   );
 }
@@ -2349,9 +2886,14 @@ function monthOfTrips(trips) {
 }
 
 const PrintableSummary = forwardRef(function PrintableSummary(
-  { payment, carrier, trips, periodLabel, faenaById, subfaenaById, cycleById, editable = false, onAmountChange },
+  { payment, carrier, trips, periodLabel, faenaById, subfaenaById, cycleById, editable = false, onAmountChange, onEditTrip, onRemoveTrip },
   ref,
 ) {
+  // Si el modal en edición pasó callbacks por trip, mostramos una columna
+  // "Acciones" extra. Cuando se imprime, el usuario debería desactivar el
+  // modo edición antes (sino los botones aparecen en el print, pero son
+  // visualmente discretos y no afectan el contenido).
+  const showActions = editable && (onEditTrip || onRemoveTrip);
   const month = monthOfTrips(trips);
   const total = trips.reduce((s, t) => s + (Number(t.amount) || 0), 0);
   const inputStyle = {
@@ -2391,6 +2933,7 @@ const PrintableSummary = forwardRef(function PrintableSummary(
             <th style={cellH}>Labor</th>
             <th style={{ ...cellH, textAlign: "right" }}>Valor</th>
             <th style={cellH}>Observación</th>
+            {showActions && <th style={{ ...cellH, textAlign: "center", width: 80 }}>Acciones</th>}
           </tr>
         </thead>
         <tbody>
@@ -2427,6 +2970,48 @@ const PrintableSummary = forwardRef(function PrintableSummary(
                   {t.kind === "approach" ? (t.personCount != null ? " · " : "") + "acercamiento" : ""}
                   {t.notes ? (t.personCount != null || t.kind === "approach" ? " · " : "") + t.notes : ""}
                 </td>
+                {showActions && (
+                  <td style={{ ...cell, textAlign: "center", padding: 4 }}>
+                    <div style={{ display: "flex", justifyContent: "center", gap: 4 }}>
+                      {onEditTrip && (
+                        <button
+                          type="button"
+                          onClick={() => onEditTrip(t)}
+                          title="Editar todos los detalles de esta vuelta"
+                          style={{
+                            background: "#dbeafe",
+                            color: "#1d4ed8",
+                            border: "1px solid #93c5fd",
+                            borderRadius: 4,
+                            padding: "2px 6px",
+                            fontSize: 11,
+                            cursor: "pointer",
+                          }}
+                        >
+                          ✏️
+                        </button>
+                      )}
+                      {onRemoveTrip && (
+                        <button
+                          type="button"
+                          onClick={() => onRemoveTrip(t)}
+                          title="Quitar esta vuelta del resumen (no la borra)"
+                          style={{
+                            background: "#fee2e2",
+                            color: "#b91c1c",
+                            border: "1px solid #fca5a5",
+                            borderRadius: 4,
+                            padding: "2px 6px",
+                            fontSize: 11,
+                            cursor: "pointer",
+                          }}
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </div>
+                  </td>
+                )}
               </tr>
             );
           })}
@@ -2434,6 +3019,7 @@ const PrintableSummary = forwardRef(function PrintableSummary(
             <td style={cell} colSpan={6}></td>
             <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(total)}</td>
             <td style={cell}></td>
+            {showActions && <td style={cell}></td>}
           </tr>
         </tbody>
       </table>
@@ -2846,8 +3432,12 @@ function PayrollsTab() {
   const [payments, setPayments] = useState([]);
   // Para el flujo "Nueva quincena auto" necesitamos faenas activas (para los
   // chips de filtrado) y vueltas pending sin paymentId (las "sueltas" desde
-  // las que se arman los resúmenes).
+  // las que se arman los resúmenes). Subfaenas y ciclos se cargan para que
+  // el "Imprimir quincena + resúmenes" pueda mostrar la columna Labor en
+  // cada resumen (faena/subfaena/ciclo).
   const [faenas, setFaenas] = useState([]);
+  const [subfaenas, setSubfaenas] = useState([]);
+  const [cycles, setCycles] = useState([]);
   const [pendingTrips, setPendingTrips] = useState([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
@@ -2859,10 +3449,12 @@ function PayrollsTab() {
   const load = async () => {
     setLoading(true);
     try {
-      const [pr, py, fa, pt] = await Promise.all([
+      const [pr, py, fa, sub, cyc, pt] = await Promise.all([
         transportPayrollsService.listAll(),
         paymentsService.listAll(),
         faenasService.list({ cache: true, ttl: 60_000 }),
+        subfaenasService.list({ cache: true, persist: true, ttl: 10 * 60 * 1000 }),
+        cyclesService.list({ cache: true, persist: true, ttl: 5 * 60 * 1000 }),
         tripsService.listPendingUnlinked(),
       ]);
       const sortDesc = (a, b) => {
@@ -2873,6 +3465,8 @@ function PayrollsTab() {
       setPayrolls(pr.sort(sortDesc));
       setPayments(py);
       setFaenas(fa.filter((f) => !f.deleted));
+      setSubfaenas(sub);
+      setCycles(cyc);
       // Solo las vueltas no asignadas a ningún resumen — son las elegibles
       // para entrar a una quincena nueva.
       setPendingTrips(pt.filter((t) => !t.paymentId));
@@ -2884,6 +3478,9 @@ function PayrollsTab() {
   useEffect(() => { load(); }, []);
 
   const paymentsById = useMemo(() => new Map(payments.map((p) => [p.id, p])), [payments]);
+  const faenaById = useMemo(() => new Map(faenas.map((f) => [f.id, f])), [faenas]);
+  const subfaenaById = useMemo(() => new Map(subfaenas.map((s) => [s.id, s])), [subfaenas]);
+  const cycleById = useMemo(() => new Map(cycles.map((c) => [c.id, c])), [cycles]);
 
   const looseSummaries = useMemo(
     () => payments.filter((p) => p.status !== "paid" && !p.payrollId),
@@ -3041,7 +3638,11 @@ function PayrollsTab() {
         <PayrollDetailModal
           payroll={detail}
           items={(detail.paymentIds || []).map((pid) => paymentsById.get(pid)).filter(Boolean)}
+          carriers={carriers}
           carriersById={carriersById}
+          faenaById={faenaById}
+          subfaenaById={subfaenaById}
+          cycleById={cycleById}
           looseSummaries={looseSummaries}
           onClose={() => setDetailId(null)}
           onEditMeta={() => setEditingId(detail.id)}
@@ -3052,6 +3653,7 @@ function PayrollsTab() {
           onRevertPayroll={() => askRevertPayroll(detail)}
           onMarkItemPaid={askMarkItemPaid}
           onRevertItem={askRevertItem}
+          onItemChanged={async () => { await load(); }}
         />
       )}
 
@@ -3672,15 +4274,24 @@ const PrintablePayrollTable = forwardRef(function PrintablePayrollTable(
 });
 
 function PayrollDetailModal({
-  payroll, items, carriersById, looseSummaries,
+  payroll, items, carriers = [], carriersById, faenaById, subfaenaById, cycleById, looseSummaries,
   onClose, onEditMeta, onDeletePayroll, onAddSummaries, onRemoveSummary,
-  onMarkPayrollPaid, onRevertPayroll, onMarkItemPaid, onRevertItem,
+  onMarkPayrollPaid, onRevertPayroll, onMarkItemPaid, onRevertItem, onItemChanged,
 }) {
   const toast = useToast();
   const [addingOpen, setAddingOpen] = useState(false);
   const [adding, setAdding] = useState(new Set());
   const printRef = useRef(null);
+  // Refs y datos para "Imprimir quincena + resúmenes". Renderizamos
+  // offscreen un PrintablePayrollTable + N PrintableSummary, capturamos
+  // outerHTML, y abrimos una ventana de impresión.
+  const summaryRefs = useRef([]);
+  const [printItems, setPrintItems] = useState(null);
   const [busy, setBusy] = useState("");
+  // Resumen actualmente abierto en vista detalle. Permite navegar de la
+  // tabla de la quincena a ver/editar las vueltas de un resumen sin salir
+  // del modal de la quincena.
+  const [viewingPayment, setViewingPayment] = useState(null);
   const isPaid = payroll.status === "paid";
   // Totales por estado: la quincena puede tener resúmenes ya pagados
   // individualmente (con el botón "💰 Pagar" por ítem) aunque la quincena
@@ -3747,6 +4358,74 @@ function PayrollDetailModal({
     win.document.close();
     win.focus();
     setTimeout(() => { win.print(); }, 250);
+  };
+
+  // Imprime la quincena (resumen) + 1 hoja por cada resumen interno con su
+  // detalle de vueltas. Trips se cargan al click via tripsService.listAll
+  // y se filtran por payment.tripIds.
+  const handlePrintAll = async () => {
+    if (items.length === 0) {
+      toast.warning("La quincena no tiene resúmenes para imprimir.");
+      return;
+    }
+    setBusy("printAll");
+    try {
+      const allTrips = await tripsService.listAll();
+      const tripById = new Map(allTrips.map((t) => [t.id, t]));
+      const built = items.map((it) => {
+        const carrier = carriersById.get(it.carrierId) || null;
+        const myTrips = (it.tripIds || [])
+          .map((id) => tripById.get(id))
+          .filter(Boolean)
+          .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+        const dates = myTrips.map((t) => t.date).filter(Boolean).sort();
+        const periodLabel =
+          it.periodFrom && it.periodTo
+            ? `${it.periodFrom} → ${it.periodTo}`
+            : dates.length
+              ? `${dates[0]} → ${dates[dates.length - 1]}`
+              : "—";
+        return { payment: it, carrier, trips: myTrips, periodLabel };
+      });
+      summaryRefs.current = new Array(built.length).fill(null);
+      setPrintItems(built);
+      // Esperar un tick para que React renderice los nodos offscreen.
+      await new Promise((r) => setTimeout(r, 100));
+      const headerHtml = printRef.current?.outerHTML || "";
+      const summariesHtml = summaryRefs.current
+        .filter(Boolean)
+        .map((n) => `<div class="page">${n.outerHTML}</div>`)
+        .join("");
+      const win = window.open("", "_blank", "width=1000,height=800");
+      if (!win) {
+        toast.warning("Permite las ventanas emergentes para imprimir.");
+        return;
+      }
+      win.document.write(`<!DOCTYPE html><html><head><title>Quincena ${payroll.name} — completa</title>
+        <style>
+          * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; color-adjust: exact !important; box-sizing: border-box; }
+          body { font-family: ui-sans-serif, system-ui, sans-serif; color: #000; margin: 0; padding: 0; }
+          .page { padding: 20px; page-break-after: always; }
+          .page:last-child { page-break-after: auto; }
+          table { border-collapse: collapse; width: 100%; }
+          th, td { border: 1px solid #999; padding: 6px 8px; font-size: 12px; }
+          thead th { background: #92d050 !important; text-align: left; }
+          .month-tag { background: #e6c0e0 !important; padding: 2px 8px; font-weight: 600; display: inline-block; }
+          tr.tot-row td, .tot-row td { background: #c6efce !important; font-weight: 700; }
+          @media print { @page { size: landscape; margin: 12mm; } }
+        </style>
+      </head><body>
+        <div class="page">${headerHtml}</div>
+        ${summariesHtml}
+        <script>window.onload = () => { window.focus(); window.print(); };</script>
+      </body></html>`);
+      win.document.close();
+    } catch (err) {
+      toast.error("Error al imprimir: " + (err?.message || err));
+    } finally {
+      setPrintItems(null);
+      setBusy("");
+    }
   };
 
   return (
@@ -3819,9 +4498,24 @@ function PayrollDetailModal({
       )}
 
       {/* Renderizado off-screen del printable — capturado por html-to-image
-          y `outerHTML` para imprimir. No visible para el usuario. */}
+          y `outerHTML` para imprimir. No visible para el usuario.
+          Cuando se dispara "Imprimir quincena + resúmenes" agregamos también
+          un PrintableSummary por cada item (refs en summaryRefs). */}
       <div style={{ position: "absolute", left: -99999, top: 0, pointerEvents: "none" }} aria-hidden>
         <PrintablePayrollTable ref={printRef} payroll={payroll} items={items} carriersById={carriersById} />
+        {printItems && printItems.map((it, i) => (
+          <PrintableSummary
+            key={it.payment.id}
+            ref={(el) => { summaryRefs.current[i] = el; }}
+            payment={it.payment}
+            carrier={it.carrier}
+            trips={it.trips}
+            periodLabel={it.periodLabel}
+            faenaById={faenaById}
+            subfaenaById={subfaenaById}
+            cycleById={cycleById}
+          />
+        ))}
       </div>
 
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
@@ -3848,9 +4542,17 @@ function PayrollDetailModal({
               <button
                 onClick={handlePrint}
                 className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
-                title="Imprimir tabla"
+                title="Imprimir solo la tabla resumen de la quincena"
               >
                 🖨 Imprimir
+              </button>
+              <button
+                onClick={handlePrintAll}
+                disabled={busy === "printAll"}
+                className="rounded-md border border-[var(--color-accent)] bg-[var(--color-accent-soft)] px-2 py-1 text-xs font-medium text-[var(--color-accent)] hover:bg-[var(--color-accent)] hover:text-[var(--color-accent-fg)] disabled:opacity-60"
+                title="Imprimir el resumen de la quincena seguido del detalle de cada resumen (1 hoja por resumen)"
+              >
+                {busy === "printAll" ? "Cargando vueltas..." : "🖨 Imprimir quincena + resúmenes"}
               </button>
             </>
           )}
@@ -3926,7 +4628,12 @@ function PayrollDetailModal({
                 const itemPaid = it.status === "paid";
                 const itemPeriod = (it.periodFrom || it.periodTo) ? `${it.periodFrom || "?"} → ${it.periodTo || "?"}` : "—";
                 return (
-                  <tr key={it.id} className="border-t border-[var(--color-border)] hover:bg-[var(--color-surface-2)]">
+                  <tr
+                    key={it.id}
+                    className="cursor-pointer border-t border-[var(--color-border)] hover:bg-[var(--color-accent-soft)]"
+                    onClick={() => setViewingPayment(it)}
+                    title="Click para ver el detalle del resumen (vueltas)"
+                  >
                     <td className="px-2 py-2 text-[var(--color-muted)] tabular-nums">{i + 1}</td>
                     <td className="px-2 py-2 font-medium">{carrier?.alias || it.carrierId}</td>
                     <td className="px-2 py-2 text-center tabular-nums">{(it.tripIds || []).length}</td>
@@ -3940,8 +4647,15 @@ function PayrollDetailModal({
                     </td>
                     <td className="px-2 py-2 text-right font-semibold tabular-nums">{fmtCurrency(it.total)}</td>
                     {!isPaid && (
-                      <td className="px-2 py-2 text-right">
+                      <td className="px-2 py-2 text-right" onClick={(e) => e.stopPropagation()}>
                         <div className="flex justify-end gap-1">
+                          <button
+                            onClick={() => setViewingPayment(it)}
+                            title="Ver detalle del resumen"
+                            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-[10px] hover:bg-[var(--color-accent-soft)]"
+                          >
+                            👁
+                          </button>
                           {!itemPaid && (
                             <>
                               <button
@@ -4017,6 +4731,35 @@ function PayrollDetailModal({
           </table>
         </div>
       )}
+
+      {/* Detalle del resumen seleccionado. Reusa el PaymentDetailModal
+          completo (con editar/quitar vueltas) — desactivamos solo onPay /
+          onRevert / onDelete porque esos flujos se manejan a nivel quincena. */}
+      <PaymentDetailModal
+        open={!!viewingPayment}
+        onClose={() => setViewingPayment(null)}
+        payment={viewingPayment}
+        carrier={viewingPayment ? carriersById.get(viewingPayment.carrierId) : null}
+        carriers={carriers}
+        faenaById={faenaById}
+        subfaenaById={subfaenaById}
+        cycleById={cycleById}
+        onPay={null}
+        onRevert={null}
+        onDelete={null}
+        onChanged={async () => {
+          if (onItemChanged) await onItemChanged();
+          // Releemos el viewingPayment del set fresco para que el modal hijo
+          // reaccione (su prop `payment` es el objeto, no el id, sino el
+          // contenido stale persistiría).
+          if (viewingPayment) {
+            try {
+              const updated = await paymentsService.getById(viewingPayment.id);
+              if (updated) setViewingPayment(updated);
+            } catch { /* noop */ }
+          }
+        }}
+      />
     </Modal>
   );
 }
