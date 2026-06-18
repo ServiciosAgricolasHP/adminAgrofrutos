@@ -48,6 +48,7 @@ import TextField from "../components/TextField";
 import Select from "../components/Select";
 import ConfirmDialog from "../components/ConfirmDialog";
 import { useResizableHeight, ResizeHandle } from "../components/ResizableArea";
+import { useIsMobile } from "../hooks/useIsMobile";
 import WorkerPickerModal from "../components/WorkerPickerModal";
 import WorkerEditModal from "../components/WorkerEditModal";
 import TransportsModal from "../components/TransportsModal";
@@ -454,6 +455,10 @@ export default function CycleDetail() {
 
   const gridRef = useRef(null);
   const photoRef = useRef(null);
+  // Modo mobile (<768px): se esconde la columna RUT y se reducen anchos para
+  // que entre la mayor cantidad posible de días en pantalla sin scroll
+  // horizontal infinito. La edición sigue funcionando igual (touch).
+  const isMobile = useIsMobile();
   // Undo stack: each entry is a batch (array) of { rut, field, oldValue }.
   // Ctrl+Z pops one batch and replays the old values. Single edits push a
   // 1-item batch; fillDown/paste push N-item batches so they undo in one step.
@@ -887,6 +892,28 @@ export default function CycleDetail() {
       let sum = 0;
       for (const k in m) sum += getTratoTierTotals(m[k]).qty;
       out[l.id] = sum;
+    }
+    return out;
+  }, [cycle?.labors, workdaysByLabor]);
+
+  // Cantidad de RUTs únicos con producción real (qty > 0) por labor de trato.
+  // Usado para mostrar "N personas · prom X/persona" en la tarjeta de
+  // métricas. workdayMapKey es "rut__date__ck" → splitamos para extraer rut
+  // sin depender de que el doc traiga workerRut adentro (caso legacy).
+  const tratoPeopleCountByLabor = useMemo(() => {
+    const out = {};
+    if (!cycle?.labors) return out;
+    for (const l of cycle.labors) {
+      if (l.type !== "trato") continue;
+      const m = workdaysByLabor[l.id] || {};
+      const ruts = new Set();
+      for (const k in m) {
+        const wd = m[k];
+        if (getTratoTierTotals(wd).qty <= 0) continue;
+        const rut = wd?.workerRut || k.split("__")[0];
+        if (rut) ruts.add(rut);
+      }
+      out[l.id] = ruts.size;
     }
     return out;
   }, [cycle?.labors, workdaysByLabor]);
@@ -2129,6 +2156,9 @@ export default function CycleDetail() {
     const baseLeft = [
       {
         headerName: "RUT", field: "rut", editable: false, width: 140, pinned: "left",
+        // Mobile <768px: RUT se esconde para que quepan más días en pantalla.
+        // El RUT sigue accesible doble-clickeando la celda de Nombre.
+        hide: isMobile,
         checkboxSelection: !photoMode, headerCheckboxSelection: !photoMode,
         onCellDoubleClicked: (p) => {
           if (p.data?._isHeader || p.data?._isTemp) return;
@@ -2163,7 +2193,7 @@ export default function CycleDetail() {
         },
       },
       {
-        headerName: "Nombre", field: "name", editable: false, width: 220, pinned: "left",
+        headerName: "Nombre", field: "name", editable: false, width: isMobile ? 130 : 220, pinned: "left",
         cellRenderer: (p) => {
           if (p.data?._isHeader) return p.value;
           const badges = [];
@@ -2212,14 +2242,20 @@ export default function CycleDetail() {
     ];
     const totalCol = {
       headerName: isQtyLabor ? "TOTAL ($)" : "TOTAL",
-      field: "total", editable: false, width: 150, pinned: "right",
+      field: "total", editable: false, width: isMobile ? 100 : 150, pinned: "right",
       valueFormatter: (p) => fmtCurrency(p.value),
       cellStyle: { fontWeight: 600, color: "var(--color-accent)" },
     };
     const isNormalLaborForCol = !isCosechaLabor && !isTratoLabor && !isTratoHELabor;
     const actionsCol = photoMode ? [] : [{
       headerName: "", field: "_actions", editable: false,
-      width: useGrouped ? 240 : (isNormalLaborForCol ? 130 : 90), pinned: "right",
+      // En mobile usamos los mismos anchos que desktop default (no el inflado
+      // de useGrouped a 240px que come demasiado viewport). Los botones igual
+      // se pueden tocar; lo que se evita es el espacio muerto.
+      width: isMobile
+        ? (useGrouped ? 130 : 90)
+        : (useGrouped ? 240 : (isNormalLaborForCol ? 130 : 90)),
+      pinned: "right",
       cellRenderer: (p) => {
         const rut = p.data?.rut;
         if (!rut || p.data?._isHeader) return null;
@@ -2300,7 +2336,7 @@ export default function CycleDetail() {
           headerName: d,
           field: `${d}__total`,
           editable: false,
-          width: 110,
+          width: isMobile ? 70 : 110,
           ...dayCellHdr(d),
           valueFormatter: (p) => (p.value ? fmtCurrency(p.value) : ""),
           cellRenderer: (p) => {
@@ -2318,7 +2354,7 @@ export default function CycleDetail() {
           headerName: comboLabel(catalogs, c.x, c.y),
           field: `${d}__${c.key}`,
           editable: !readOnly && !photoMode,
-          width: 120,
+          width: isMobile ? 78 : 120,
           type: "numericColumn",
           valueParser: (p) => parseAmount(p.newValue),
           cellRenderer: (p) => {
@@ -2357,7 +2393,7 @@ export default function CycleDetail() {
           headerName: d,
           field: `${d}__total`,
           editable: false,
-          width: 110,
+          width: isMobile ? 70 : 110,
           ...dayCellHdr(d),
           valueFormatter: (p) => (p.value ? fmtCurrency(p.value) : ""),
           cellRenderer: (p) => {
@@ -2375,7 +2411,7 @@ export default function CycleDetail() {
           headerName: `${fmtCurrency(t.price)} ${t.mode === "flat" ? "/día" : "/unid"}`,
           field: `${d}__${t.key}`,
           editable: !readOnly && !photoMode,
-          width: 120,
+          width: isMobile ? 78 : 120,
           type: "numericColumn",
           valueParser: (p) => parseAmount(p.newValue),
           cellRenderer: (p) => {
@@ -2447,7 +2483,7 @@ export default function CycleDetail() {
             headerName: headerLabel,
             field: `${d}__amt`,
             editable: false,
-            width: 110,
+            width: isMobile ? 70 : 110,
             ...dayCellHdr(d),
             headerClass: red ? "ag-header-red-day" : undefined,
             valueFormatter: (p) => p.value ? fmtCurrency(p.value) : "",
@@ -2489,7 +2525,7 @@ export default function CycleDetail() {
               // "use suggested price" button rendered below; once they have
               // a value, normal editing kicks back in.
               editable: (p) => !readOnly && !photoMode && Number(p.data?.[`${d}__qty`] || 0) > 0,
-              width: 110,
+              width: isMobile ? 70 : 110,
               type: "numericColumn",
               valueParser: (p) => parseAmount(p.newValue),
               valueFormatter: (p) => (p.value ? fmtCurrency(p.value) : ""),
@@ -2540,7 +2576,7 @@ export default function CycleDetail() {
               headerName: "$",
               field: `${d}__b`,
               editable: false,
-              width: 130,
+              width: isMobile ? 85 : 130,
               headerTooltip: "Bonos (M/S/+) y total del día",
               cellRenderer: (p) => {
                 const m = p.data?.[`${d}__m`];
@@ -2587,7 +2623,7 @@ export default function CycleDetail() {
         // "usar sugerido"; una vez con valor, vuelven a ser editables (doble
         // click) para sobrescribir con otro precio.
         editable: (p) => !readOnly && !photoMode && !p.data?._monthly && Number(p.data?.[d] || 0) > 0,
-        width: 110,
+        width: isMobile ? 70 : 110,
         type: "numericColumn",
         valueParser: (p) => parseAmount(p.newValue),
         valueFormatter: (p) => fmtCurrency(p.value),
@@ -2653,7 +2689,7 @@ export default function CycleDetail() {
     });
     return [...baseLeft, ...dayCols, totalCol, ...actionsCol];
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [days, readOnly, photoMode, isCosechaLabor, isTratoLabor, isTratoHELabor, dayCombosByDate, dayTiersByDate, catalogs, dayPrices, activeLabor, tratoHEView, cosechaView, tratoView, dayNotes, daysWithPiso]);
+  }, [days, readOnly, photoMode, isCosechaLabor, isTratoLabor, isTratoHELabor, dayCombosByDate, dayTiersByDate, catalogs, dayPrices, activeLabor, tratoHEView, cosechaView, tratoView, dayNotes, daysWithPiso, isMobile]);
 
   if (loading) return <div className="text-[var(--color-muted)]">Cargando...</div>;
   if (!cycle) return <div className="text-[var(--color-muted)]">Ciclo no encontrado.</div>;
@@ -2861,6 +2897,17 @@ export default function CycleDetail() {
                   <div className="text-[var(--color-muted)]">
                     {tratoTypeLabel(catalogs, l.tratoType ?? 0)} · {totalQty.toLocaleString("es-CL")} unid.
                   </div>
+                  {(() => {
+                    const n = tratoPeopleCountByLabor[l.id] || 0;
+                    if (n === 0) return null;
+                    const avg = totalQty / n;
+                    return (
+                      <div className="text-[var(--color-muted)]">
+                        {n} persona{n === 1 ? "" : "s"} · prom{" "}
+                        {avg.toLocaleString("es-CL", { maximumFractionDigits: 1 })}/persona
+                      </div>
+                    );
+                  })()}
                   {tratoTierMetricsByLabor[l.id] && Object.keys(tratoTierMetricsByLabor[l.id]).length > 1 && (
                     <div className="mt-0.5 space-y-0">
                       {Object.entries(tratoTierMetricsByLabor[l.id])
@@ -3350,6 +3397,16 @@ export default function CycleDetail() {
                   // Hay desglose visible cuando existen ≥2 tiers con producción
                   // — sino la línea final "=$X" alcanza por sí sola.
                   const tiersWithQty = tierTotals.filter((x) => x.qty > 0).length;
+                  // Personas con producción real ese día (al menos un tier con
+                  // qty > 0). Sirve para mostrar "N personas · prom X/persona"
+                  // y evaluar rendimiento rápido sin abrir el detalle.
+                  const peopleCount = workers.reduce((acc, w) => {
+                    const hasProd = tiers.some(
+                      (t) => Number(wdMap[workdayMapKey(w.rut, d, t.key)]?.qty) > 0,
+                    );
+                    return acc + (hasProd ? 1 : 0);
+                  }, 0);
+                  const avgPerPerson = peopleCount > 0 ? totalQty / peopleCount : 0;
                   return (
                     <div
                       key={d}
@@ -3359,9 +3416,19 @@ export default function CycleDetail() {
                           : "border-[var(--color-border)] bg-[var(--color-surface-2)]"
                       }`}
                     >
-                      <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-start justify-between gap-2">
                         <span className="font-medium text-[var(--color-text)]">{d}</span>
-                        {totalQty > 0 && <span className="text-[var(--color-muted)]">{totalQty.toLocaleString("es-CL")}</span>}
+                        {totalQty > 0 && (
+                          <div className="flex flex-col items-end leading-tight">
+                            <span className="text-[var(--color-muted)]">{totalQty.toLocaleString("es-CL")}</span>
+                            {peopleCount > 0 && (
+                              <span className="text-[10px] text-[var(--color-muted)]">
+                                {peopleCount} pers · prom{" "}
+                                {avgPerPerson.toLocaleString("es-CL", { maximumFractionDigits: 1 })}
+                              </span>
+                            )}
+                          </div>
+                        )}
                       </div>
                       {tiers.map((t, i) => {
                         const tt = tierTotals[i] || { qty: 0, amount: 0 };

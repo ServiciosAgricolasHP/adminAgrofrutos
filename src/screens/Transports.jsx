@@ -933,6 +933,49 @@ function TripsTab() {
 
   const total = filtered.reduce((s, t) => s + (Number(t.amount) || 0), 0);
 
+  // Agrupado por transportista. Cada grupo trae el alias, el total, y el
+  // desglose pendiente/pagado para que el header sea informativo sin tener
+  // que expandir. Si la vuelta no tiene carrierId asociable se cae a un
+  // grupo "Sin transportista" para no perder esas filas.
+  const byCarrier = useMemo(() => {
+    const groups = new Map();
+    for (const t of filtered) {
+      const cid = t.carrierId || "__none__";
+      if (!groups.has(cid)) {
+        const c = carrierById.get(t.carrierId);
+        groups.set(cid, {
+          carrierId: cid,
+          alias: c?.alias || (cid === "__none__" ? "Sin transportista" : "—"),
+          name: c?.name || "",
+          trips: [],
+          total: 0,
+          pendingCount: 0,
+          paidCount: 0,
+          pendingTotal: 0,
+        });
+      }
+      const g = groups.get(cid);
+      g.trips.push(t);
+      const amt = Number(t.amount) || 0;
+      g.total += amt;
+      if (t.status === "paid") g.paidCount += 1;
+      else { g.pendingCount += 1; g.pendingTotal += amt; }
+    }
+    return [...groups.values()].sort((a, b) => a.alias.localeCompare(b.alias, "es"));
+  }, [filtered, carrierById]);
+
+  // Set de transportistas expandidos. Default: VACÍO (todos colapsados).
+  // El usuario solicitó que arranquen colapsados así no se mezclan visualmente.
+  const [expandedCarriers, setExpandedCarriers] = useState(() => new Set());
+  const toggleCarrier = (cid) => setExpandedCarriers((prev) => {
+    const next = new Set(prev);
+    if (next.has(cid)) next.delete(cid);
+    else next.add(cid);
+    return next;
+  });
+  const expandAll = () => setExpandedCarriers(new Set(byCarrier.map((g) => g.carrierId)));
+  const collapseAll = () => setExpandedCarriers(new Set());
+
   return (
     <div>
       <div className="mb-3 grid grid-cols-1 gap-2 md:grid-cols-5">
@@ -1004,129 +1047,186 @@ function TripsTab() {
         <div className="rounded-md border border-dashed border-[var(--color-border)] py-8 text-center text-sm text-[var(--color-muted)]">
           Sin vueltas
         </div>
-      ) : isMobile ? (
-        <div className="space-y-2">
-          {filtered.map((t) => {
-            const c = carrierById.get(t.carrierId);
-            const cy = cycleById.get(t.cycleId);
-            const fa = faenaById.get(t.faenaId);
-            const sb = subfaenaById.get(t.subfaenaId);
-            return (
-              <div
-                key={t.id}
-                className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-3 space-y-2"
-              >
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0">
-                    <div className="font-medium leading-tight">{c ? c.alias : "—"}</div>
-                    <div className="font-mono text-xs text-[var(--color-muted)]">{t.date}</div>
-                  </div>
-                  <div className="text-right">
-                    <div className="font-semibold tabular-nums">{fmtCurrency(t.amount)}</div>
-                    {t.status === "paid" ? (
-                      <span className="rounded-full bg-[var(--color-success-soft)] px-1.5 py-0.5 text-[11px] text-[var(--color-success)]">
-                        pagado
-                      </span>
-                    ) : (
-                      <span className="rounded-full bg-[var(--color-warning-soft)] px-1.5 py-0.5 text-[11px] text-[var(--color-warning)]">
-                        pendiente
-                      </span>
-                    )}
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-x-2 gap-y-1 text-xs">
-                  <div>
-                    <span className="text-[var(--color-muted)]">Vehículo: </span>
-                    {t.vehicleAlias || "—"}
-                  </div>
-                  <div>
-                    <span className="text-[var(--color-muted)]">Ciclo: </span>
-                    {cy?.label || t.cycleId}
-                  </div>
-                  <div className="col-span-2">
-                    <span className="text-[var(--color-muted)]">Faena: </span>
-                    {fa?.name || "—"}
-                    {sb && <span className="text-[var(--color-muted)]"> / {sb.name}</span>}
-                  </div>
-                  <div>
-                    <span className="text-[var(--color-muted)]">Destino: </span>
-                    {t.destino || "—"}
-                  </div>
-                  <div>
-                    <span className="text-[var(--color-muted)]">#Pers: </span>
-                    {t.personCount ?? "—"}
-                  </div>
-                  <div>
-                    <span className="text-[var(--color-muted)]">Tipo: </span>
-                    {t.kind === "approach" ? "acercamiento" : "vuelta"}
-                  </div>
-                  <div>
-                    <span className="text-[var(--color-muted)]">Vlts/Tarifa: </span>
-                    <span className="tabular-nums">{t.qty} × {fmtCurrency(t.rate)}</span>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
       ) : (
-        <div className="overflow-auto rounded-md border border-[var(--color-border)]">
-          <table className="w-full text-sm">
-            <thead className="sticky top-0 bg-[var(--color-surface-2)] text-left text-[var(--color-muted)]">
-              <tr>
-                <th className="px-2 py-2">Fecha</th>
-                <th className="px-2 py-2">Transportista</th>
-                <th className="px-2 py-2">Vehículo</th>
-                <th className="px-2 py-2">Ciclo</th>
-                <th className="px-2 py-2">Faena / Subfaena</th>
-                <th className="px-2 py-2">Destino</th>
-                <th className="px-2 py-2 text-right">#Pers</th>
-                <th className="px-2 py-2">Tipo</th>
-                <th className="px-2 py-2 text-right">Vlts</th>
-                <th className="px-2 py-2 text-right">Tarifa</th>
-                <th className="px-2 py-2 text-right">Monto</th>
-                <th className="px-2 py-2">Estado</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map((t) => {
-                const c = carrierById.get(t.carrierId);
-                const cy = cycleById.get(t.cycleId);
-                const fa = faenaById.get(t.faenaId);
-                const sb = subfaenaById.get(t.subfaenaId);
-                return (
-                  <tr key={t.id} className="border-t border-[var(--color-border)]">
-                    <td className="px-2 py-1.5 tabular-nums">{t.date}</td>
-                    <td className="px-2 py-1.5">{c ? c.alias : "—"}</td>
-                    <td className="px-2 py-1.5">{t.vehicleAlias || "—"}</td>
-                    <td className="px-2 py-1.5">{cy?.label || t.cycleId}</td>
-                    <td className="px-2 py-1.5">
-                      {fa?.name || "—"}
-                      {sb && <span className="text-[var(--color-muted)]"> / {sb.name}</span>}
-                    </td>
-                    <td className="px-2 py-1.5">{t.destino || "—"}</td>
-                    <td className="px-2 py-1.5 text-right tabular-nums">{t.personCount ?? "—"}</td>
-                    <td className="px-2 py-1.5">{t.kind === "approach" ? "acercamiento" : "vuelta"}</td>
-                    <td className="px-2 py-1.5 text-right tabular-nums">{t.qty}</td>
-                    <td className="px-2 py-1.5 text-right tabular-nums">{fmtCurrency(t.rate)}</td>
-                    <td className="px-2 py-1.5 text-right font-medium tabular-nums">{fmtCurrency(t.amount)}</td>
-                    <td className="px-2 py-1.5">
-                      {t.status === "paid" ? (
-                        <span className="rounded-full bg-[var(--color-success-soft)] px-1.5 py-0.5 text-[11px] text-[var(--color-success)]">
-                          pagado
-                        </span>
-                      ) : (
-                        <span className="rounded-full bg-[var(--color-warning-soft)] px-1.5 py-0.5 text-[11px] text-[var(--color-warning)]">
-                          pendiente
+        <>
+          {/* Controles expandir/colapsar todos. Útil cuando hay muchos
+              transportistas y querés abrirlos a todos de un toque. */}
+          <div className="mb-2 flex items-center justify-end gap-1 text-xs">
+            <span className="mr-1 text-[var(--color-muted)]">
+              {byCarrier.length} transportista{byCarrier.length === 1 ? "" : "s"}
+            </span>
+            <button
+              type="button"
+              onClick={expandAll}
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 hover:bg-[var(--color-accent-soft)]"
+              disabled={expandedCarriers.size === byCarrier.length}
+            >
+              ▾ Expandir todos
+            </button>
+            <button
+              type="button"
+              onClick={collapseAll}
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 hover:bg-[var(--color-accent-soft)]"
+              disabled={expandedCarriers.size === 0}
+            >
+              ▸ Colapsar todos
+            </button>
+          </div>
+          <div className="space-y-2">
+            {byCarrier.map((g) => {
+              const expanded = expandedCarriers.has(g.carrierId);
+              return (
+                <div key={g.carrierId} className="rounded-md border border-[var(--color-border)]">
+                  <button
+                    type="button"
+                    onClick={() => toggleCarrier(g.carrierId)}
+                    className="flex w-full items-center gap-2 bg-[var(--color-surface-2)] px-3 py-2 text-left text-sm hover:bg-[var(--color-accent-soft)]"
+                  >
+                    <span className="text-[var(--color-muted)]">{expanded ? "▾" : "▸"}</span>
+                    <span className="font-semibold">{g.alias}</span>
+                    {g.name && <span className="text-xs text-[var(--color-muted)]">· {g.name}</span>}
+                    <span className="ml-2 text-[10px] text-[var(--color-muted)]">
+                      {g.trips.length} vuelta{g.trips.length === 1 ? "" : "s"}
+                      {g.pendingCount > 0 && (
+                        <span className="ml-1 text-[var(--color-warning)]">· {g.pendingCount} pend.</span>
+                      )}
+                      {g.paidCount > 0 && (
+                        <span className="ml-1 text-[var(--color-success)]">· {g.paidCount} pag.</span>
+                      )}
+                    </span>
+                    <span className="ml-auto text-right">
+                      <span className="block font-semibold tabular-nums">{fmtCurrency(g.total)}</span>
+                      {g.pendingTotal > 0 && g.pendingTotal !== g.total && (
+                        <span className="block text-[10px] text-[var(--color-warning)] tabular-nums">
+                          pend: {fmtCurrency(g.pendingTotal)}
                         </span>
                       )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+                    </span>
+                  </button>
+                  {expanded && (
+                    isMobile ? (
+                      <div className="space-y-2 p-2">
+                        {g.trips.map((t) => {
+                          const cy = cycleById.get(t.cycleId);
+                          const fa = faenaById.get(t.faenaId);
+                          const sb = subfaenaById.get(t.subfaenaId);
+                          return (
+                            <div
+                              key={t.id}
+                              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-2.5 space-y-2"
+                            >
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="font-mono text-xs text-[var(--color-muted)]">{t.date}</div>
+                                <div className="text-right">
+                                  <div className="font-semibold tabular-nums">{fmtCurrency(t.amount)}</div>
+                                  {t.status === "paid" ? (
+                                    <span className="rounded-full bg-[var(--color-success-soft)] px-1.5 py-0.5 text-[11px] text-[var(--color-success)]">
+                                      pagado
+                                    </span>
+                                  ) : (
+                                    <span className="rounded-full bg-[var(--color-warning-soft)] px-1.5 py-0.5 text-[11px] text-[var(--color-warning)]">
+                                      pendiente
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                              <div className="grid grid-cols-2 gap-x-2 gap-y-1 text-xs">
+                                <div>
+                                  <span className="text-[var(--color-muted)]">Vehículo: </span>
+                                  {t.vehicleAlias || "—"}
+                                </div>
+                                <div>
+                                  <span className="text-[var(--color-muted)]">Ciclo: </span>
+                                  {cy?.label || t.cycleId}
+                                </div>
+                                <div className="col-span-2">
+                                  <span className="text-[var(--color-muted)]">Faena: </span>
+                                  {fa?.name || "—"}
+                                  {sb && <span className="text-[var(--color-muted)]"> / {sb.name}</span>}
+                                </div>
+                                <div>
+                                  <span className="text-[var(--color-muted)]">Destino: </span>
+                                  {t.destino || "—"}
+                                </div>
+                                <div>
+                                  <span className="text-[var(--color-muted)]">#Pers: </span>
+                                  {t.personCount ?? "—"}
+                                </div>
+                                <div>
+                                  <span className="text-[var(--color-muted)]">Tipo: </span>
+                                  {t.kind === "approach" ? "acercamiento" : "vuelta"}
+                                </div>
+                                <div>
+                                  <span className="text-[var(--color-muted)]">Vlts/Tarifa: </span>
+                                  <span className="tabular-nums">{t.qty} × {fmtCurrency(t.rate)}</span>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-sm">
+                          <thead className="bg-[var(--color-surface-2)]/60 text-left text-[var(--color-muted)]">
+                            <tr>
+                              <th className="px-2 py-1.5">Fecha</th>
+                              <th className="px-2 py-1.5">Vehículo</th>
+                              <th className="px-2 py-1.5">Ciclo</th>
+                              <th className="px-2 py-1.5">Faena / Subfaena</th>
+                              <th className="px-2 py-1.5">Destino</th>
+                              <th className="px-2 py-1.5 text-right">#Pers</th>
+                              <th className="px-2 py-1.5">Tipo</th>
+                              <th className="px-2 py-1.5 text-right">Vlts</th>
+                              <th className="px-2 py-1.5 text-right">Tarifa</th>
+                              <th className="px-2 py-1.5 text-right">Monto</th>
+                              <th className="px-2 py-1.5">Estado</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {g.trips.map((t) => {
+                              const cy = cycleById.get(t.cycleId);
+                              const fa = faenaById.get(t.faenaId);
+                              const sb = subfaenaById.get(t.subfaenaId);
+                              return (
+                                <tr key={t.id} className="border-t border-[var(--color-border)]">
+                                  <td className="px-2 py-1.5 tabular-nums">{t.date}</td>
+                                  <td className="px-2 py-1.5">{t.vehicleAlias || "—"}</td>
+                                  <td className="px-2 py-1.5">{cy?.label || t.cycleId}</td>
+                                  <td className="px-2 py-1.5">
+                                    {fa?.name || "—"}
+                                    {sb && <span className="text-[var(--color-muted)]"> / {sb.name}</span>}
+                                  </td>
+                                  <td className="px-2 py-1.5">{t.destino || "—"}</td>
+                                  <td className="px-2 py-1.5 text-right tabular-nums">{t.personCount ?? "—"}</td>
+                                  <td className="px-2 py-1.5">{t.kind === "approach" ? "acercamiento" : "vuelta"}</td>
+                                  <td className="px-2 py-1.5 text-right tabular-nums">{t.qty}</td>
+                                  <td className="px-2 py-1.5 text-right tabular-nums">{fmtCurrency(t.rate)}</td>
+                                  <td className="px-2 py-1.5 text-right font-medium tabular-nums">{fmtCurrency(t.amount)}</td>
+                                  <td className="px-2 py-1.5">
+                                    {t.status === "paid" ? (
+                                      <span className="rounded-full bg-[var(--color-success-soft)] px-1.5 py-0.5 text-[11px] text-[var(--color-success)]">
+                                        pagado
+                                      </span>
+                                    ) : (
+                                      <span className="rounded-full bg-[var(--color-warning-soft)] px-1.5 py-0.5 text-[11px] text-[var(--color-warning)]">
+                                        pendiente
+                                      </span>
+                                    )}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    )
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </>
       )}
     </div>
   );
@@ -1972,6 +2072,10 @@ function BalanceSummary({ carriers, reloadVersion }) {
   const toast = useToast();
   const [pendingTrips, setPendingTrips] = useState([]);
   const [pendingPayments, setPendingPayments] = useState([]);
+  // Quincenas pendientes (transportPayrolls). Cada quincena agrupa N resúmenes
+  // y se cuenta aparte en el balance — el monto del resumen se atribuye a la
+  // columna "Quincenas" en lugar de "Resúmenes sueltos" para no duplicar.
+  const [pendingPayrolls, setPendingPayrolls] = useState([]);
   const [loading, setLoading] = useState(true);
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
@@ -1984,13 +2088,15 @@ function BalanceSummary({ carriers, reloadVersion }) {
     (async () => {
       setLoading(true);
       try {
-        const [trips, allPayments] = await Promise.all([
+        const [trips, allPayments, allPayrolls] = await Promise.all([
           tripsService.listPendingUnlinked(),
           paymentsService.listAll(),
+          transportPayrollsService.listAll(),
         ]);
         if (cancelled) return;
         setPendingTrips(trips);
         setPendingPayments(allPayments.filter((p) => p.status === "pending"));
+        setPendingPayrolls(allPayrolls.filter((p) => p.status === "pending"));
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -2022,6 +2128,29 @@ function BalanceSummary({ carriers, reloadVersion }) {
     [pendingPayments, dateFrom, dateTo],
   );
 
+  // Quincenas pendientes filtradas por overlap del período. Misma lógica que
+  // payments — si la quincena no tiene período, se incluye igual.
+  const payrollsInRange = useMemo(
+    () =>
+      pendingPayrolls.filter((q) => {
+        if (!dateFrom && !dateTo) return true;
+        const qFrom = q.periodFrom || q.periodTo || "";
+        const qTo = q.periodTo || q.periodFrom || "";
+        if (!qFrom && !qTo) return true;
+        if (dateFrom && qTo && qTo < dateFrom) return false;
+        if (dateTo && qFrom && qFrom > dateTo) return false;
+        return true;
+      }),
+    [pendingPayrolls, dateFrom, dateTo],
+  );
+
+  // Index de resúmenes pendientes por id, para resolver los paymentIds de cada
+  // quincena rápidamente y atribuir el monto al carrier correcto.
+  const pendingPaymentsById = useMemo(
+    () => new Map(pendingPayments.map((p) => [p.id, p])),
+    [pendingPayments],
+  );
+
   const rows = useMemo(() => {
     const map = new Map();
     const ensure = (carrierId) => {
@@ -2035,6 +2164,8 @@ function BalanceSummary({ carriers, reloadVersion }) {
           tripTotal: 0,
           paymentCount: 0,
           paymentTotal: 0,
+          quincenaCount: 0,
+          quincenaTotal: 0,
         });
       }
       return map.get(carrierId);
@@ -2044,20 +2175,44 @@ function BalanceSummary({ carriers, reloadVersion }) {
       e.tripCount += 1;
       e.tripTotal += Number(t.amount) || 0;
     }
+    // Resúmenes SUELTOS (sin quincena): se cuentan acá. Los que ya están en
+    // una quincena se atribuyen abajo, en la columna Quincenas, para que el
+    // mismo monto no aparezca dos veces en el total.
     for (const p of paymentsInRange) {
+      if (p.payrollId) continue;
       const e = ensure(p.carrierId);
       e.paymentCount += 1;
       e.paymentTotal += Number(p.total) || 0;
     }
+    // Quincenas: por cada una, ver qué resúmenes contiene y sumar el monto al
+    // carrier de cada resumen. Una quincena con resúmenes de varios carriers
+    // contribuye fraccionalmente a cada uno (caso raro pero posible).
+    for (const q of payrollsInRange) {
+      const totalsByCarrier = new Map();
+      for (const pid of q.paymentIds || []) {
+        const p = pendingPaymentsById.get(pid);
+        if (!p) continue;
+        totalsByCarrier.set(
+          p.carrierId,
+          (totalsByCarrier.get(p.carrierId) || 0) + (Number(p.total) || 0),
+        );
+      }
+      for (const [cid, amt] of totalsByCarrier) {
+        const e = ensure(cid);
+        e.quincenaCount += 1;
+        e.quincenaTotal += amt;
+      }
+    }
     return [...map.values()]
-      .map((e) => ({ ...e, grandTotal: e.tripTotal + e.paymentTotal }))
-      .filter((e) => e.tripCount + e.paymentCount > 0)
+      .map((e) => ({ ...e, grandTotal: e.tripTotal + e.paymentTotal + e.quincenaTotal }))
+      .filter((e) => e.tripCount + e.paymentCount + e.quincenaCount > 0)
       .sort((a, b) => b.grandTotal - a.grandTotal);
-  }, [carriers, tripsInRange, paymentsInRange]);
+  }, [carriers, tripsInRange, paymentsInRange, payrollsInRange, pendingPaymentsById]);
 
   const grandTotal = rows.reduce((s, r) => s + r.grandTotal, 0);
   const tripsTotal = rows.reduce((s, r) => s + r.tripTotal, 0);
   const paymentsTotal = rows.reduce((s, r) => s + r.paymentTotal, 0);
+  const quincenasTotal = rows.reduce((s, r) => s + r.quincenaTotal, 0);
 
   const handleCopyImage = async () => {
     if (!printRef.current) return;
@@ -2240,6 +2395,8 @@ function BalanceSummary({ carriers, reloadVersion }) {
                     <th style={{ ...cellH, textAlign: "right" }}>$ vueltas</th>
                     <th style={{ ...cellH, textAlign: "right" }}>Resúmenes</th>
                     <th style={{ ...cellH, textAlign: "right" }}>$ resúmenes</th>
+                    <th style={{ ...cellH, textAlign: "right" }}>Quincenas</th>
+                    <th style={{ ...cellH, textAlign: "right" }}>$ quincenas</th>
                     <th style={{ ...cellH, textAlign: "right" }}>Total a pagar</th>
                   </tr>
                 </thead>
@@ -2264,6 +2421,12 @@ function BalanceSummary({ carriers, reloadVersion }) {
                       <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
                         {r.paymentTotal > 0 ? fmtCurrency(r.paymentTotal) : ""}
                       </td>
+                      <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                        {r.quincenaCount || ""}
+                      </td>
+                      <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                        {r.quincenaTotal > 0 ? fmtCurrency(r.quincenaTotal) : ""}
+                      </td>
                       <td
                         style={{
                           ...cell,
@@ -2285,6 +2448,10 @@ function BalanceSummary({ carriers, reloadVersion }) {
                     <td style={cell}></td>
                     <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
                       {paymentsTotal > 0 ? fmtCurrency(paymentsTotal) : ""}
+                    </td>
+                    <td style={cell}></td>
+                    <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
+                      {quincenasTotal > 0 ? fmtCurrency(quincenasTotal) : ""}
                     </td>
                     <td
                       style={{
@@ -2309,6 +2476,62 @@ function BalanceSummary({ carriers, reloadVersion }) {
 }
 
 function PaymentSection({ title, payments, carrierById, transportPayrollById, onView, empty, dim = false }) {
+  // Agrupado por transportista. Cada grupo es colapsable; default expandido
+  // porque típicamente hay pocos resúmenes por transportista (1-3) y el
+  // usuario quiere verlos para click-to-detail.
+  const groups = useMemo(() => {
+    const map = new Map();
+    for (const p of payments) {
+      const cid = p.carrierId || "__none__";
+      if (!map.has(cid)) {
+        const c = carrierById.get(p.carrierId);
+        map.set(cid, {
+          carrierId: cid,
+          alias: c?.alias || (cid === "__none__" ? "Sin transportista" : "—"),
+          name: c?.name || "",
+          items: [],
+          total: 0,
+        });
+      }
+      const g = map.get(cid);
+      g.items.push(p);
+      g.total += Number(p.total) || 0;
+    }
+    return [...map.values()].sort((a, b) => a.alias.localeCompare(b.alias, "es"));
+  }, [payments, carrierById]);
+
+  const [collapsedCarriers, setCollapsedCarriers] = useState(() => new Set());
+  const toggleCarrier = (cid) => setCollapsedCarriers((prev) => {
+    const next = new Set(prev);
+    if (next.has(cid)) next.delete(cid);
+    else next.add(cid);
+    return next;
+  });
+
+  const fmtDate = (d) => {
+    if (!d || typeof d !== "string") return "";
+    const m = d.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    return m ? `${m[3]}/${m[2]}/${m[1].slice(2)}` : d;
+  };
+
+  const renderPaymentCard = (p) => {
+    const c = carrierById.get(p.carrierId);
+    const from = fmtDate(p.periodFrom);
+    const to = fmtDate(p.periodTo);
+    const period = from && to && from !== to
+      ? `${from} → ${to}`
+      : (from || to || "");
+    return (
+      <button
+        key={p.id}
+        onClick={() => onView(p)}
+        className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-left text-sm hover:border-[var(--color-accent)]"
+      >
+        {paymentCardContent(p, c, period, transportPayrollById)}
+      </button>
+    );
+  };
+
   return (
     <div>
       <h3 className="mb-2 text-sm font-medium text-[var(--color-muted)]">{title}</h3>
@@ -2317,89 +2540,105 @@ function PaymentSection({ title, payments, carrierById, transportPayrollById, on
           {empty}
         </p>
       ) : (
-        <div className={`grid gap-2 ${dim ? "opacity-90" : ""}`}>
-          {payments.map((p) => {
-            const c = carrierById.get(p.carrierId);
-            const fmtDate = (d) => {
-              if (!d || typeof d !== "string") return "";
-              const m = d.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-              return m ? `${m[3]}/${m[2]}/${m[1].slice(2)}` : d;
-            };
-            const from = fmtDate(p.periodFrom);
-            const to = fmtDate(p.periodTo);
-            const period = from && to && from !== to
-              ? `${from} → ${to}`
-              : (from || to || "");
+        <div className={`space-y-2 ${dim ? "opacity-90" : ""}`}>
+          {groups.map((g) => {
+            const collapsed = collapsedCarriers.has(g.carrierId);
             return (
-              <button
-                key={p.id}
-                onClick={() => onView(p)}
-                className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-left text-sm hover:border-[var(--color-accent)]"
-              >
-                <div className="min-w-0 flex-1">
-                  <div className="font-medium">{c?.alias || p.carrierId} <span className="text-[var(--color-muted)]">— {c?.name}</span></div>
-                  <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
-                    {period ? (
-                      <span className="inline-flex items-center gap-1 rounded bg-[var(--color-accent-soft)] px-1.5 py-0.5 font-medium tabular-nums text-[var(--color-accent)]">
-                        📅 {period}
-                      </span>
-                    ) : (
-                      <span className="text-[var(--color-muted)] italic">sin período</span>
-                    )}
-                    {(() => {
-                      const tp = p.payrollId && transportPayrollById?.get(p.payrollId);
-                      if (tp) {
-                        const isPaid = tp.status === "paid";
-                        return (
-                          <span
-                            className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-medium ${
-                              isPaid
-                                ? "bg-[var(--color-success-soft)] text-[var(--color-success)]"
-                                : "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300"
-                            }`}
-                            title={`Quincena: ${tp.name}${isPaid ? " (pagada)" : " (pendiente)"}`}
-                          >
-                            🧾 {tp.name}{isPaid && " ✓"}
-                          </span>
-                        );
-                      }
-                      if (p.payrollId) {
-                        return (
-                          <span className="inline-flex items-center gap-1 rounded bg-[var(--color-surface-2)] px-1.5 py-0.5 text-[var(--color-muted)]" title="Quincena no cargada">
-                            🧾 quincena #{String(p.payrollId).slice(-4)}
-                          </span>
-                        );
-                      }
-                      return (
-                        <span className="inline-flex items-center gap-1 rounded border border-dashed border-[var(--color-border)] px-1.5 py-0.5 text-[var(--color-muted)]" title="Este resumen no está asignado a ninguna quincena">
-                          🧾 sin quincena
-                        </span>
-                      );
-                    })()}
-                    <span className="text-[var(--color-muted)]">· {(p.tripIds || []).length} vuelta{(p.tripIds || []).length === 1 ? "" : "s"}</span>
-                    {p.groupBy && (
-                      <span className="text-[var(--color-muted)]">· agrupado por {p.groupBy === "day" ? "día" : "faena"}</span>
-                    )}
+              <div key={g.carrierId} className="rounded-md border border-[var(--color-border)]">
+                <button
+                  type="button"
+                  onClick={() => toggleCarrier(g.carrierId)}
+                  className="flex w-full items-center gap-2 bg-[var(--color-surface-2)] px-3 py-2 text-left text-sm hover:bg-[var(--color-accent-soft)]"
+                >
+                  <span className="text-[var(--color-muted)]">{collapsed ? "▸" : "▾"}</span>
+                  <span className="font-semibold">{g.alias}</span>
+                  {g.name && <span className="text-xs text-[var(--color-muted)]">· {g.name}</span>}
+                  <span className="ml-2 text-[10px] text-[var(--color-muted)]">
+                    · {g.items.length} resumen{g.items.length === 1 ? "" : "es"}
+                  </span>
+                  <span className="ml-auto font-semibold tabular-nums">
+                    {fmtCurrency(g.total)}
+                  </span>
+                </button>
+                {!collapsed && (
+                  <div className="grid gap-2 p-2">
+                    {g.items.map(renderPaymentCard)}
                   </div>
-                </div>
-                <div className="text-right">
-                  <div className="font-semibold tabular-nums">{fmtCurrency(p.total)}</div>
-                  <div
-                    className={`text-[10px] ${
-                      p.status === "paid"
-                        ? "text-[var(--color-success)]"
-                        : "text-[var(--color-warning)]"
-                    }`}
-                  >
-                    {p.status === "paid" ? "pagado" : "pendiente"}
-                  </div>
-                </div>
-              </button>
+                )}
+              </div>
             );
           })}
         </div>
       )}
     </div>
+  );
+}
+
+// Contenido interno de la tarjeta de resumen — extraído del render agrupado
+// para mantener la lógica de badges (período, quincena, conteo de vueltas)
+// en un solo lugar.
+function paymentCardContent(p, c, period, transportPayrollById) {
+  return (
+    <>
+      <div className="min-w-0 flex-1">
+        <div className="font-medium">{c?.alias || p.carrierId} <span className="text-[var(--color-muted)]">— {c?.name}</span></div>
+        <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
+          {period ? (
+            <span className="inline-flex items-center gap-1 rounded bg-[var(--color-accent-soft)] px-1.5 py-0.5 font-medium tabular-nums text-[var(--color-accent)]">
+              📅 {period}
+            </span>
+          ) : (
+            <span className="text-[var(--color-muted)] italic">sin período</span>
+          )}
+          {(() => {
+            const tp = p.payrollId && transportPayrollById?.get(p.payrollId);
+            if (tp) {
+              const isPaid = tp.status === "paid";
+              return (
+                <span
+                  className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-medium ${
+                    isPaid
+                      ? "bg-[var(--color-success-soft)] text-[var(--color-success)]"
+                      : "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300"
+                  }`}
+                  title={`Quincena: ${tp.name}${isPaid ? " (pagada)" : " (pendiente)"}`}
+                >
+                  🧾 {tp.name}{isPaid && " ✓"}
+                </span>
+              );
+            }
+            if (p.payrollId) {
+              return (
+                <span className="inline-flex items-center gap-1 rounded bg-[var(--color-surface-2)] px-1.5 py-0.5 text-[var(--color-muted)]" title="Quincena no cargada">
+                  🧾 quincena #{String(p.payrollId).slice(-4)}
+                </span>
+              );
+            }
+            return (
+              <span className="inline-flex items-center gap-1 rounded border border-dashed border-[var(--color-border)] px-1.5 py-0.5 text-[var(--color-muted)]" title="Este resumen no está asignado a ninguna quincena">
+                🧾 sin quincena
+              </span>
+            );
+          })()}
+          <span className="text-[var(--color-muted)]">· {(p.tripIds || []).length} vuelta{(p.tripIds || []).length === 1 ? "" : "s"}</span>
+          {p.groupBy && (
+            <span className="text-[var(--color-muted)]">· agrupado por {p.groupBy === "day" ? "día" : "faena"}</span>
+          )}
+        </div>
+      </div>
+      <div className="text-right">
+        <div className="font-semibold tabular-nums">{fmtCurrency(p.total)}</div>
+        <div
+          className={`text-[10px] ${
+            p.status === "paid"
+              ? "text-[var(--color-success)]"
+              : "text-[var(--color-warning)]"
+          }`}
+        >
+          {p.status === "paid" ? "pagado" : "pendiente"}
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -3412,6 +3651,367 @@ function FaenaBatchTab() {
   );
 }
 
+// Balance general SOLO de quincenas pendientes. Por cada quincena pending,
+// suma los items NO pagados agrupados por transportista. Excluye:
+//   - Quincenas marcadas como pagadas (status === "paid").
+//   - Quincenas pending donde todos sus items individuales ya están pagados
+//     (caso borde: el usuario marcó cada resumen por separado en lugar de
+//     usar "Marcar quincena pagada" — la quincena queda pending pero no
+//     debe nada).
+function QuincenasBalanceSummary({ carriers, payrolls, payments }) {
+  const toast = useToast();
+  const [expanded, setExpanded] = useState(true);
+  const [busy, setBusy] = useState("");
+  const printRef = useRef(null);
+
+  const paymentsById = useMemo(
+    () => new Map(payments.map((p) => [p.id, p])),
+    [payments],
+  );
+
+  // Layout pivot: filas = transportistas, columnas = quincenas (excepto las
+  // totalmente pagadas), celdas = pending + paid del carrier en esa quincena.
+  // Las quincenas con status=paid o donde TODOS los items están pagados se
+  // excluyen — solo aparecen las que aún tienen al menos un item pendiente.
+  // Dentro de las incluidas, cada celda muestra el pendiente principal y, si
+  // hay items ya pagados de ese mismo carrier en esa quincena, una segunda
+  // línea con "pagado: $X" en gris.
+  const { pendingQuincenas, rows } = useMemo(() => {
+    const qList = [];
+    const pendMap = new Map(); // carrierId → Map(quincenaId → amount)
+    const paidMap = new Map(); // carrierId → Map(quincenaId → amount)
+    for (const q of payrolls) {
+      if (q.status === "paid") continue;
+      const pendByCarrier = new Map();
+      const paidByCarrier = new Map();
+      for (const pid of q.paymentIds || []) {
+        const p = paymentsById.get(pid);
+        if (!p) continue;
+        const cid = p.carrierId || "__none__";
+        const amt = Number(p.total) || 0;
+        if (p.status === "paid") {
+          paidByCarrier.set(cid, (paidByCarrier.get(cid) || 0) + amt);
+        } else {
+          pendByCarrier.set(cid, (pendByCarrier.get(cid) || 0) + amt);
+        }
+      }
+      // Excluir quincenas pending sin ningún item pendiente (todos paid sueltos).
+      if (pendByCarrier.size === 0) continue;
+      qList.push(q);
+      for (const [cid, amt] of pendByCarrier) {
+        if (!pendMap.has(cid)) pendMap.set(cid, new Map());
+        pendMap.get(cid).set(q.id, amt);
+      }
+      for (const [cid, amt] of paidByCarrier) {
+        if (!paidMap.has(cid)) paidMap.set(cid, new Map());
+        paidMap.get(cid).set(q.id, amt);
+      }
+    }
+    qList.sort((a, b) => {
+      const ta = a.createdAt?.toMillis?.() ?? a.createdAt?.seconds ?? 0;
+      const tb = b.createdAt?.toMillis?.() ?? b.createdAt?.seconds ?? 0;
+      return tb - ta;
+    });
+    // Carriers en las filas: cualquiera con monto (pending o paid) en alguna
+    // quincena incluida.
+    const carrierIds = new Set([...pendMap.keys(), ...paidMap.keys()]);
+    const carrierRows = [];
+    for (const cid of carrierIds) {
+      const pm = pendMap.get(cid) || new Map();
+      const pd = paidMap.get(cid) || new Map();
+      const pendingTotal = [...pm.values()].reduce((s, v) => s + v, 0);
+      const paidTotal = [...pd.values()].reduce((s, v) => s + v, 0);
+      if (pendingTotal + paidTotal <= 0) continue;
+      const c = carriers.find((x) => x.id === cid);
+      carrierRows.push({
+        carrierId: cid,
+        alias: c?.alias || (cid === "__none__" ? "Sin transportista" : "—"),
+        name: c?.name || "",
+        pending: pm,
+        paid: pd,
+        pendingTotal,
+        paidTotal,
+      });
+    }
+    // Ordenar por pendiente desc (lo más urgente primero), desempate por paid.
+    carrierRows.sort((a, b) => (b.pendingTotal - a.pendingTotal) || (b.paidTotal - a.paidTotal));
+    return { pendingQuincenas: qList, rows: carrierRows };
+  }, [carriers, payrolls, paymentsById]);
+
+  const grandPending = rows.reduce((s, r) => s + r.pendingTotal, 0);
+  const grandPaid = rows.reduce((s, r) => s + r.paidTotal, 0);
+  // Totales por columna (footer): pendiente y pagado separados.
+  const colTotals = useMemo(() => {
+    const map = new Map();
+    for (const q of pendingQuincenas) {
+      let pend = 0;
+      let paid = 0;
+      for (const r of rows) {
+        pend += r.pending.get(q.id) || 0;
+        paid += r.paid.get(q.id) || 0;
+      }
+      map.set(q.id, { pending: pend, paid });
+    }
+    return map;
+  }, [pendingQuincenas, rows]);
+  const quincenaCount = pendingQuincenas.length;
+
+  const handleCopyImage = async () => {
+    if (!printRef.current) return;
+    setBusy("copy");
+    try {
+      const blob = await toBlob(printRef.current, {
+        backgroundColor: "#ffffff",
+        pixelRatio: 2,
+      });
+      if (!blob) throw new Error("No se pudo generar la imagen");
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+      toast.success("Imagen copiada");
+    } catch (err) {
+      toast.error("Error: " + (err.message || err));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const handleDownload = async () => {
+    if (!printRef.current) return;
+    setBusy("download");
+    try {
+      const dataUrl = await toPng(printRef.current, {
+        backgroundColor: "#ffffff",
+        pixelRatio: 2,
+      });
+      const link = document.createElement("a");
+      link.download = "balance-quincenas.png";
+      link.href = dataUrl;
+      link.click();
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const handlePrint = () => {
+    if (!printRef.current) return;
+    const html = printRef.current.outerHTML;
+    const win = window.open("", "_blank", "width=900,height=700");
+    if (!win) return;
+    win.document.write(`<!DOCTYPE html><html><head><title>Balance de quincenas</title>
+      <style>
+        * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; box-sizing: border-box; }
+        body { font-family: ui-sans-serif, system-ui, sans-serif; padding: 20px; color: #000; margin: 0; }
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid #888; padding: 6px 8px; font-size: 12px; }
+        @media print { @page { size: landscape; margin: 12mm; } }
+      </style>
+    </head><body>${html}<script>window.onload = () => { window.focus(); window.print(); };</script></body></html>`);
+    win.document.close();
+  };
+
+  return (
+    <div className="mb-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-[var(--color-accent-soft)]"
+      >
+        <span className="flex items-center gap-2">
+          <span className="text-[var(--color-muted)]">{expanded ? "▾" : "▸"}</span>
+          <span className="font-medium">Balance de quincenas pendientes</span>
+        </span>
+        <span className="flex items-baseline gap-2">
+          <span className="text-xs text-[var(--color-muted)]">
+            {quincenaCount} quincena{quincenaCount === 1 ? "" : "s"} · {rows.length} transportista{rows.length === 1 ? "" : "s"}
+          </span>
+          <span className="font-semibold tabular-nums text-[var(--color-accent)]">
+            {fmtCurrency(grandPending)}
+          </span>
+        </span>
+      </button>
+
+      {expanded && (
+        <div className="border-t border-[var(--color-border)] p-3">
+          <div className="mb-3 flex flex-wrap items-center justify-end gap-1">
+            <button
+              onClick={handleCopyImage}
+              disabled={busy === "copy" || rows.length === 0}
+              className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)] disabled:opacity-50"
+            >
+              {busy === "copy" ? "..." : "📋 Copiar imagen"}
+            </button>
+            <button
+              onClick={handleDownload}
+              disabled={busy === "download" || rows.length === 0}
+              className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)] disabled:opacity-50"
+            >
+              {busy === "download" ? "..." : "📥 PNG"}
+            </button>
+            <button
+              onClick={handlePrint}
+              disabled={rows.length === 0}
+              className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)] disabled:opacity-50"
+            >
+              🖨 Imprimir
+            </button>
+          </div>
+
+          {rows.length === 0 ? (
+            <div className="rounded-md border border-dashed border-[var(--color-border)] py-4 text-center text-xs text-[var(--color-muted)]">
+              Sin quincenas pendientes.
+            </div>
+          ) : (
+            <div
+              ref={printRef}
+              style={{
+                background: "#ffffff",
+                color: "#000",
+                padding: 16,
+                fontFamily: "ui-sans-serif, system-ui, sans-serif",
+                overflowX: "auto",
+              }}
+            >
+              <div style={{ marginBottom: 10 }}>
+                <div style={{ fontWeight: 700, fontSize: 15 }}>
+                  Balance de quincenas pendientes
+                </div>
+                <div style={{ fontSize: 11, color: "#555" }}>
+                  {quincenaCount} quincena{quincenaCount === 1 ? "" : "s"} · {rows.length} transportista{rows.length === 1 ? "" : "s"}
+                  {" · "}Generado{" "}
+                  {new Date().toLocaleDateString("es-CL", {
+                    day: "2-digit",
+                    month: "short",
+                    year: "numeric",
+                  })}
+                </div>
+              </div>
+              <table style={{ borderCollapse: "collapse", width: "100%" }}>
+                <thead>
+                  <tr style={{ background: "#9dc3e6" }}>
+                    <th style={cellH}>Transportista</th>
+                    {pendingQuincenas.map((q) => {
+                      const period = (q.periodFrom || q.periodTo)
+                        ? `${q.periodFrom || "?"} → ${q.periodTo || "?"}`
+                        : "";
+                      return (
+                        <th key={q.id} style={{ ...cellH, textAlign: "right", minWidth: 110 }}>
+                          <div>{q.name}</div>
+                          {period && (
+                            <div style={{ fontSize: 10, fontWeight: 400, color: "#333" }}>
+                              {period}
+                            </div>
+                          )}
+                        </th>
+                      );
+                    })}
+                    <th style={{ ...cellH, textAlign: "right", background: "#7cb1d8" }}>
+                      Total
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r) => (
+                    <tr key={r.carrierId}>
+                      <td style={cell}>
+                        <span style={{ fontWeight: 600 }}>{r.alias}</span>
+                        {r.name && (
+                          <span style={{ color: "#666", marginLeft: 6, fontSize: 11 }}>
+                            {r.name}
+                          </span>
+                        )}
+                      </td>
+                      {pendingQuincenas.map((q) => {
+                        const pend = r.pending.get(q.id) || 0;
+                        const paid = r.paid.get(q.id) || 0;
+                        return (
+                          <td
+                            key={q.id}
+                            style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}
+                          >
+                            {pend > 0 && <div>{fmtCurrency(pend)}</div>}
+                            {paid > 0 && (
+                              <div style={{ color: "#16a34a", fontSize: 10, fontStyle: "italic" }}>
+                                pagado: {fmtCurrency(paid)}
+                              </div>
+                            )}
+                          </td>
+                        );
+                      })}
+                      <td
+                        style={{
+                          ...cell,
+                          textAlign: "right",
+                          fontWeight: 700,
+                          fontVariantNumeric: "tabular-nums",
+                          background: "#eaf4fb",
+                        }}
+                      >
+                        {fmtCurrency(r.pendingTotal)}
+                        {r.paidTotal > 0 && (
+                          <div style={{ color: "#16a34a", fontSize: 10, fontStyle: "italic", fontWeight: 600 }}>
+                            pagado: {fmtCurrency(r.paidTotal)}
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                  <tr style={{ background: "#c6efce" }}>
+                    <td style={{ ...cell, fontWeight: 700 }}>Total pendiente</td>
+                    {pendingQuincenas.map((q) => (
+                      <td
+                        key={q.id}
+                        style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}
+                      >
+                        {fmtCurrency(colTotals.get(q.id)?.pending || 0)}
+                      </td>
+                    ))}
+                    <td
+                      style={{
+                        ...cell,
+                        textAlign: "right",
+                        fontWeight: 700,
+                        fontSize: 13,
+                        fontVariantNumeric: "tabular-nums",
+                      }}
+                    >
+                      {fmtCurrency(grandPending)}
+                    </td>
+                  </tr>
+                  <tr style={{ background: "#dcedc8" }}>
+                    <td style={{ ...cell, fontWeight: 700, color: "#15803d" }}>Total pagado</td>
+                    {pendingQuincenas.map((q) => {
+                      const paid = colTotals.get(q.id)?.paid || 0;
+                      return (
+                        <td
+                          key={q.id}
+                          style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums", color: "#15803d" }}
+                        >
+                          {paid > 0 ? fmtCurrency(paid) : ""}
+                        </td>
+                      );
+                    })}
+                    <td
+                      style={{
+                        ...cell,
+                        textAlign: "right",
+                        fontWeight: 700,
+                        fontSize: 13,
+                        fontVariantNumeric: "tabular-nums",
+                        color: "#15803d",
+                      }}
+                    >
+                      {fmtCurrency(grandPaid)}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ============================================================
 // PAYROLLS (QUINCENAS) TAB
 // ============================================================
@@ -3547,6 +4147,14 @@ function PayrollsTab() {
           + Nueva quincena
         </button>
       </div>
+
+      {!loading && payrolls.length > 0 && (
+        <QuincenasBalanceSummary
+          carriers={carriers}
+          payrolls={payrolls}
+          payments={payments}
+        />
+      )}
 
       {loading ? (
         <div className="rounded-lg border border-dashed border-[var(--color-border)] py-10 text-center text-sm text-[var(--color-muted)]">

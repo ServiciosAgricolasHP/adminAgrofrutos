@@ -124,7 +124,7 @@ function formatRowMetric(row, type, catalogs) {
   }
   if (type === "tratoHE") {
     const parts = [];
-    if (row.qty > 0) parts.push(`${fmtNumber(row.qty)} j`);
+    if (row.qty > 0) parts.push(`${fmtNumber(row.qty)} jornadas`);
     if (row.overtimeHours > 0) parts.push(`${fmtNumber(row.overtimeHours)} HE`);
     return parts.join(" + ");
   }
@@ -137,7 +137,7 @@ function formatRowMetric(row, type, catalogs) {
 function formatTotalsMetric(totals, type, rows, catalogs) {
   if (type === "tratoHE") {
     const parts = [];
-    if (totals.qty > 0) parts.push(`${fmtNumber(totals.qty)} j`);
+    if (totals.qty > 0) parts.push(`${fmtNumber(totals.qty)} jornadas`);
     if (totals.overtimeHours > 0) parts.push(`${fmtNumber(totals.overtimeHours)} HE`);
     return parts.join(" + ");
   }

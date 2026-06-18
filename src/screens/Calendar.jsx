@@ -5,7 +5,7 @@ import { faenasService, subfaenasService, cyclesService, workersService } from "
 import { tripsService } from "../services/transportsService";
 import { useCarriers } from "../contexts/CarriersContext";
 import { useCatalogs } from "../contexts/CatalogsContext";
-import { tratoTypeLabel, cosechaUnit, qualityLabel, containerLabel, getTratoTierTotals } from "../utils/cosechaCombos";
+import { tratoTypeLabel, tratoUnitLabel, cosechaUnit, qualityLabel, containerLabel, getTratoTierTotals, getTratoTiers } from "../utils/cosechaCombos";
 import { useIsMobile } from "../hooks/useIsMobile";
 
 // ============================================================================
@@ -108,17 +108,30 @@ function laborMetricLabel(l, catalogs) {
   }
   if (l.laborType === "trato") {
     if (!(l.tratoQty > 0)) return "";
-    const unit = tratoTypeLabel(catalogs, l.tratoType ?? 0);
-    return `${fmtNumber(l.tratoQty)} ${unit}`;
+    const typeLabel = tratoTypeLabel(catalogs, l.tratoType ?? 0);
+    // Si recolectamos al menos una unidad real de los tiers (plantas, metros,
+    // etc.) la usamos como cuerpo del label y el tipo queda entre paréntesis.
+    // Si no hay unidad (catálogo viejo / sin tier configurado), cae al tipo.
+    const units = l.tratoUnits ? [...l.tratoUnits]
+      .map((u) => tratoUnitLabel(catalogs, u))
+      .filter(Boolean)
+      .map((s) => s.toLowerCase()) : [];
+    if (units.length === 1) {
+      return `${fmtNumber(l.tratoQty)} ${units[0]} (${typeLabel.toLowerCase()})`;
+    }
+    if (units.length > 1) {
+      return `${fmtNumber(l.tratoQty)} ${units.join("/")} (${typeLabel.toLowerCase()})`;
+    }
+    return `${fmtNumber(l.tratoQty)} ${typeLabel}`;
   }
   if (l.laborType === "tratoHE") {
     const parts = [];
-    if (l.jornadas > 0) parts.push(`${fmtNumber(l.jornadas)} j`);
+    if (l.jornadas > 0) parts.push(`${fmtNumber(l.jornadas)} jornadas`);
     if (l.overtimeHours > 0) parts.push(`${fmtNumber(l.overtimeHours)} HE`);
     return parts.join(" + ");
   }
   // main / supervision / extra → solo jornadas
-  return l.jornadas > 0 ? `${fmtNumber(l.jornadas)} j` : "";
+  return l.jornadas > 0 ? `${fmtNumber(l.jornadas)} jornadas` : "";
 }
 
 // ============================================================================
@@ -945,11 +958,13 @@ function DayDetailDrawer({ date, subfaenaId, workdays, trips, cycleById, subfaen
           containers: new Set(),
           kilos: 0,
           tratoQty: 0,
+          tratoUnits: new Set(),
           jornadas: 0,
           overtimeHours: 0,
           amount: 0,
           workersMap: new Map(),
           qualityMap: new Map(),
+          _cycle: cycle,
         });
       }
       const e = map.get(key);
@@ -998,6 +1013,17 @@ function DayDetailDrawer({ date, subfaenaId, workdays, trips, cycleById, subfaen
         const q = getTratoTierTotals(wd).qty;
         e.tratoQty += q;
         wEntry.tratoQty += q;
+        // Resolver unidades reales (plantas/metros/etc.) leyendo los tiers
+        // configurados en el dayPrices del ciclo para ese labor y fecha. Si
+        // el workday usa tiers múltiples, juntamos todas las unidades.
+        if (e._cycle?.dayPrices) {
+          const tiers = getTratoTiers(e._cycle.dayPrices, wd.laborId, wd.date);
+          const tierKeys = wd.tiers ? Object.keys(wd.tiers) : ["0"];
+          for (const tk of tierKeys) {
+            const tier = tiers[Number(tk)];
+            if (tier?.unit != null) e.tratoUnits.add(tier.unit);
+          }
+        }
       } else if (t === "tratoHE") {
         const j = Number(wd.qty) || 0;
         const oh = Number(wd.overtimeHours) || 0;
@@ -1107,9 +1133,21 @@ function DayDetailDrawer({ date, subfaenaId, workdays, trips, cycleById, subfaen
                       const cosechaUnitForLabor = l.laborType === "cosecha"
                         ? cosechaUnit(catalogs, l.containers).toLowerCase()
                         : "";
-                      const tratoUnitForLabor = l.laborType === "trato"
-                        ? tratoTypeLabel(catalogs, l.tratoType ?? 0)
-                        : "";
+                      // Label de unidad para trato en el detalle por
+                      // trabajador. Prefiere la unidad real (plantas, metros)
+                      // y deja el tipo (poda/amarre) entre paréntesis. Si no
+                      // hay unidad configurada en los tiers, cae al tipo solo.
+                      const tratoUnitForLabor = (() => {
+                        if (l.laborType !== "trato") return "";
+                        const units = l.tratoUnits ? [...l.tratoUnits]
+                          .map((u) => tratoUnitLabel(catalogs, u))
+                          .filter(Boolean)
+                          .map((s) => s.toLowerCase()) : [];
+                        const typeLabel = tratoTypeLabel(catalogs, l.tratoType ?? 0).toLowerCase();
+                        if (units.length === 1) return `${units[0]} (${typeLabel})`;
+                        if (units.length > 1) return `${units.join("/")} (${typeLabel})`;
+                        return typeLabel;
+                      })();
                       return (
                         <Fragment key={l.key}>
                           <tr
@@ -1134,17 +1172,38 @@ function DayDetailDrawer({ date, subfaenaId, workdays, trips, cycleById, subfaen
                                   {l.jornadas > 0 && (
                                     <span>
                                       {fmtNumber(l.jornadas)}{" "}
-                                      <span className="text-[var(--color-muted)]">jorn.</span>
+                                      <span className="text-[var(--color-muted)]">jornadas</span>
                                     </span>
                                   )}
                                   {l.overtimeHours > 0 && (
                                     <span>
                                       {fmtNumber(l.overtimeHours)}{" "}
-                                      <span className="text-[var(--color-muted)]">HE</span>
+                                      <span className="text-[var(--color-muted)]">horas extras</span>
                                     </span>
                                   )}
                                 </div>
-                              ) : (
+                              ) : l.laborType === "trato" ? (() => {
+                                // Personas con producción real ese día (tratoQty > 0),
+                                // no todos los del listado. Permite ver "X plantas
+                                // hechas entre N personas → prom Y/persona", que es la
+                                // métrica útil para evaluar rendimiento. Usamos
+                                // workersBreakdown porque el byLabor final descarta
+                                // workersMap antes de retornar (ver línea ~1047).
+                                const peopleWithProd = (l.workersBreakdown || [])
+                                  .filter((w) => (w.tratoQty || 0) > 0);
+                                const n = peopleWithProd.length;
+                                const avg = n > 0 ? l.tratoQty / n : 0;
+                                return (
+                                  <div className="flex flex-col items-end leading-tight">
+                                    <span>{laborMetricLabel(l, catalogs)}</span>
+                                    {n > 0 && (
+                                      <span className="text-[10px] text-[var(--color-muted)]">
+                                        {n} persona{n === 1 ? "" : "s"} · prom {fmtNumber(avg)}/persona
+                                      </span>
+                                    )}
+                                  </div>
+                                );
+                              })() : (
                                 laborMetricLabel(l, catalogs)
                               )}
                             </td>
@@ -1207,10 +1266,10 @@ function DayDetailDrawer({ date, subfaenaId, workdays, trips, cycleById, subfaen
                                         prodParts.push(`${fmtNumber(w.tratoQty)} ${tratoUnitForLabor}`);
                                       }
                                       if (w.jornadas > 0) {
-                                        prodParts.push(`${fmtNumber(w.jornadas)} j`);
+                                        prodParts.push(`${fmtNumber(w.jornadas)} jornadas`);
                                       }
                                       if (w.overtimeHours > 0) {
-                                        prodParts.push(`${fmtNumber(w.overtimeHours)} HE`);
+                                        prodParts.push(`${fmtNumber(w.overtimeHours)} horas extras`);
                                       }
                                       if (w.pisoAmount > 0) {
                                         prodParts.push(`🪙 ${fmtCurrency(w.pisoAmount)}`);
@@ -1227,13 +1286,13 @@ function DayDetailDrawer({ date, subfaenaId, workdays, trips, cycleById, subfaen
                                                 {w.jornadas > 0 && (
                                                   <span>
                                                     {fmtNumber(w.jornadas)}{" "}
-                                                    <span className="text-[var(--color-muted)]">jorn.</span>
+                                                    <span className="text-[var(--color-muted)]">jornadas</span>
                                                   </span>
                                                 )}
                                                 {w.overtimeHours > 0 && (
                                                   <span>
                                                     {fmtNumber(w.overtimeHours)}{" "}
-                                                    <span className="text-[var(--color-muted)]">HE</span>
+                                                    <span className="text-[var(--color-muted)]">horas extras</span>
                                                   </span>
                                                 )}
                                                 {w.pisoAmount > 0 && (

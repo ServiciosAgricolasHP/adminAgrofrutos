@@ -5,6 +5,7 @@ import Select from "./Select";
 import { workersService } from "../services";
 import { findWorkerByRut, createWorker } from "../services/workersService";
 import { formatRutForDisplay, normalizeRut, validateRut, isForeignRut } from "../utils/rutUtils";
+import { useAuth } from "../contexts/AuthContext";
 import {
   BANKS,
   ACCOUNT_TYPES,
@@ -42,6 +43,13 @@ function emptyNewWorker() {
 }
 
 export default function WorkerPickerModal({ open, onClose, onPick, excludeRuts = [], allowTemp = false, title = "Agregar trabajador", availableLeaders = [], excludedLabel = "Ya en la labor" }) {
+  const { user } = useAuth();
+  // Easter egg hardcodeado: ximena ve un saludito custom en el tag de trabajadores
+  // ya agregados. El resto sigue viendo el label que pase el caller (default
+  // "Ya en la labor").
+  const resolvedExcludedLabel = user?.email === "ximena.mayorga.garrido@hotmail.com"
+    ? "Ya en la labor, Estupida <3"
+    : excludedLabel;
   const [allWorkers, setAllWorkers] = useState([]);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
@@ -285,7 +293,7 @@ export default function WorkerPickerModal({ open, onClose, onPick, excludeRuts =
                       <button
                         onClick={() => !isExcluded && onPick({ rut: w.id, name: w.name })}
                         disabled={isExcluded}
-                        title={isExcluded ? excludedLabel : ""}
+                        title={isExcluded ? resolvedExcludedLabel : ""}
                         className={`flex w-full items-center justify-between gap-2 px-3 py-2 text-left ${
                           isExcluded
                             ? "cursor-not-allowed opacity-60"
@@ -296,7 +304,7 @@ export default function WorkerPickerModal({ open, onClose, onPick, excludeRuts =
                           <span className="text-sm font-medium">{w.name}</span>
                           {isExcluded && (
                             <span className="rounded-full bg-[var(--color-success-soft)] px-2 py-0.5 text-[10px] font-medium text-[var(--color-success)]">
-                              ✓ {excludedLabel}
+                              ✓ {resolvedExcludedLabel}
                             </span>
                           )}
                         </span>

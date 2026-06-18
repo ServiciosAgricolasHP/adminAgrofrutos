@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { toBlob } from "html-to-image";
 import {
   faenasService,
   subfaenasService,
@@ -48,6 +49,42 @@ const fmtCurrency = (v) =>
   new Intl.NumberFormat("es-CL", { style: "currency", currency: "CLP", minimumFractionDigits: 0 }).format(
     Number(v) || 0,
   );
+
+// Denominaciones CLP que el usuario tiene disponibles para pagar efectivo.
+// Orden descendente porque la descomposición es greedy (toma el billete más
+// grande que entra y baja). $100 es la unidad más chica → cualquier monto
+// redondeado a múltiplo de $100 es descomponible exactamente.
+const CASH_DENOMINATIONS = [10000, 5000, 1000, 500, 100];
+
+// Para cada item de efectivo: redondea el monto hacia arriba al múltiplo de
+// $100 más cercano y descompone en cuántos billetes/monedas de cada
+// denominación se necesitan. Devuelve `{ totalNeeded, counts, perWorker }`
+// donde counts es un Map(denominacion → cantidad necesaria total).
+function estimateCashBreakdown(cashItems) {
+  const counts = new Map(CASH_DENOMINATIONS.map((d) => [d, 0]));
+  const perWorker = [];
+  let totalNeeded = 0;
+  let totalOriginal = 0;
+  for (const it of cashItems) {
+    const original = Number(it.amount) || 0;
+    const rounded = Math.ceil(original / 100) * 100;
+    const delta = rounded - original;
+    let remaining = rounded;
+    const breakdown = {};
+    for (const d of CASH_DENOMINATIONS) {
+      const n = Math.floor(remaining / d);
+      if (n > 0) {
+        counts.set(d, counts.get(d) + n);
+        breakdown[d] = n;
+        remaining -= n * d;
+      }
+    }
+    perWorker.push({ rut: it.rut, name: it.name, leader: it.groupLeader, original, rounded, delta, breakdown });
+    totalNeeded += rounded;
+    totalOriginal += original;
+  }
+  return { totalNeeded, totalOriginal, counts, perWorker };
+}
 
 const fmtDate = (v) => {
   if (!v) return "—";
@@ -3158,6 +3195,7 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
   const [showTitleEditor, setShowTitleEditor] = useState(false);
   const [printing, setPrinting] = useState(false);
   const [printingDetail, setPrintingDetail] = useState(false);
+  const [showCashEstimation, setShowCashEstimation] = useState(false);
 
   const setCycleTitle = (cid, val) => {
     setCycleTitleOverrides((prev) => {
@@ -3230,12 +3268,12 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4 py-6" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-2 py-3 sm:px-4 sm:py-6" onClick={onClose}>
       <div
-        className="flex max-h-[90vh] w-full max-w-4xl flex-col rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-2xl"
+        className="flex max-h-[94vh] w-full max-w-4xl flex-col rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-2xl sm:max-h-[90vh]"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex shrink-0 items-center justify-between border-b border-[var(--color-border)] px-5 py-3">
+        <div className="flex shrink-0 items-center justify-between border-b border-[var(--color-border)] px-3 py-3 sm:px-5">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <h2 className="font-semibold">{payroll.name}</h2>
@@ -3270,7 +3308,7 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
           </div>
           <button onClick={onClose} className="ml-3 text-[var(--color-muted)] hover:text-[var(--color-text)]">✕</button>
         </div>
-        <div className="flex-1 space-y-5 overflow-y-auto px-5 py-4">
+        <div className="flex-1 space-y-4 overflow-y-auto px-3 py-3 sm:space-y-5 sm:px-5 sm:py-4">
           {showTitleEditor && cycleDetails.length > 0 && (
             <section className="rounded-lg border border-[var(--color-accent)]/50 bg-[var(--color-accent-soft)]/40 p-4">
               <div className="mb-2 flex items-center justify-between">
@@ -3324,14 +3362,14 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
               Edge-to-edge sticky (negativos -mx/-mt anulan el padding del padre
               para que el fondo opaco cubra todo el ancho cuando se scrollea —
               sino quedan gaps transparentes a los costados). */}
-          <section className="sticky top-0 z-20 -mx-5 -mt-4 mb-1 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-5 pb-2 pt-3 shadow-sm">
+          <section className="sticky top-0 z-20 -mx-3 -mt-3 mb-1 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3 pb-2 pt-2 shadow-sm sm:-mx-5 sm:-mt-4 sm:px-5 sm:pt-3">
             <div className="flex flex-wrap items-center gap-2">
               <input
                 type="text"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="🔍 Buscar por RUT, nombre o líder…"
-                className="min-w-[200px] flex-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2.5 py-1.5 text-sm outline-none focus:border-[var(--color-accent)]"
+                className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2.5 py-1.5 text-sm outline-none focus:border-[var(--color-accent)] sm:w-auto sm:min-w-[200px] sm:flex-1"
               />
               <div className="inline-flex overflow-hidden rounded-md border border-[var(--color-border)] text-xs">
                 {[
@@ -3570,7 +3608,8 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
                         </button>
                       </div>
                       {!collapsed && (
-                        <table className="w-full text-sm">
+                        <div className="overflow-x-auto">
+                        <table className="w-full min-w-[640px] text-sm sm:min-w-0">
                           <thead className="bg-[var(--color-surface-2)] text-left text-[var(--color-muted)]">
                             <tr>
                               <th className="px-2 py-1 w-4"></th>
@@ -3601,6 +3640,7 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
                             ))}
                           </tbody>
                         </table>
+                        </div>
                       )}
                     </div>
                   );
@@ -3677,7 +3717,16 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
             <span>TOTAL: {fmtCurrency(payroll.total || 0)}</span>
           </div>
         </div>
-        <div className="flex shrink-0 justify-end gap-2 border-t border-[var(--color-border)] px-5 py-3">
+        <div className="flex shrink-0 flex-wrap justify-end gap-1.5 border-t border-[var(--color-border)] px-3 py-3 sm:gap-2 sm:px-5">
+          {cash.length > 0 && (
+            <button
+              onClick={() => setShowCashEstimation(true)}
+              title="Cuántos billetes y monedas de cada denominación se necesitan para pagar el efectivo de esta nómina"
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-4 py-2 text-sm font-medium hover:bg-[var(--color-accent-soft)]"
+            >
+              💵 Estimación efectivo
+            </button>
+          )}
           {cashGroups.length > 0 && (
             <button
               onClick={handlePrint}
@@ -3725,7 +3774,234 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
         worker={workerSummaryFor ? { id: workerSummaryFor.rut, name: workerSummaryFor.name } : null}
         onClose={() => setWorkerSummaryFor(null)}
       />
+      {showCashEstimation && (
+        <CashEstimationModal
+          cashItems={cash}
+          payrollName={payroll.name}
+          onClose={() => setShowCashEstimation(false)}
+        />
+      )}
     </div>
+  );
+}
+
+// Modal de estimación de efectivo: dice cuántos billetes/monedas de cada
+// denominación se necesitan para pagar la nómina en efectivo. Cada monto se
+// redondea HACIA ARRIBA al múltiplo de $100 más cercano para garantizar que
+// sea descomponible exactamente con denominaciones de [10000, 5000, 1000,
+// 500, 100].
+function CashEstimationModal({ cashItems, payrollName, onClose }) {
+  const toast = useToast();
+  const est = useMemo(() => estimateCashBreakdown(cashItems), [cashItems]);
+  const [showDetail, setShowDetail] = useState(false);
+  const [busy, setBusy] = useState("");
+  const captureRef = useRef(null);
+  const diff = est.totalNeeded - est.totalOriginal;
+
+  // Snapshot textual del desglose principal (sin el detalle por trabajador,
+  // para que entre en un chat o nota). Las cantidades quedan alineadas con
+  // padStart para que se lea ordenado en monospace.
+  const buildPlainText = () => {
+    const lines = [];
+    lines.push(`💵 Estimación de efectivo — ${payrollName}`);
+    lines.push(`${cashItems.length} trabajador(es) · Total: ${fmtCurrency(est.totalNeeded)}`);
+    if (diff > 0) {
+      lines.push(`(Original ${fmtCurrency(est.totalOriginal)} + redondeo ${fmtCurrency(diff)})`);
+    }
+    lines.push("");
+    lines.push("Billetes y monedas:");
+    for (const d of CASH_DENOMINATIONS) {
+      const n = est.counts.get(d) || 0;
+      if (n === 0) continue;
+      const isBill = d >= 1000;
+      const denomStr = fmtCurrency(d).padStart(9, " ");
+      const qtyStr = String(n).padStart(4, " ");
+      const subStr = fmtCurrency(n * d).padStart(11, " ");
+      lines.push(`  ${denomStr} ${isBill ? "billete" : " moneda"} × ${qtyStr} = ${subStr}`);
+    }
+    lines.push("");
+    const totalQty = [...est.counts.values()].reduce((s, v) => s + v, 0);
+    lines.push(`Total: ${totalQty} billetes/monedas · ${fmtCurrency(est.totalNeeded)}`);
+    return lines.join("\n");
+  };
+
+  const handleCopyText = async () => {
+    setBusy("text");
+    try {
+      await navigator.clipboard.writeText(buildPlainText());
+      toast.success("Texto copiado");
+    } catch (err) {
+      toast.error("Error al copiar: " + (err.message || err));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const handleCopyImage = async () => {
+    if (!captureRef.current) return;
+    setBusy("image");
+    try {
+      const blob = await toBlob(captureRef.current, {
+        backgroundColor: "#ffffff",
+        pixelRatio: 2,
+      });
+      if (!blob) throw new Error("No se pudo generar la imagen");
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+      toast.success("Imagen copiada");
+    } catch (err) {
+      toast.error("Error al copiar: " + (err.message || err));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  return (
+    <Modal open onClose={onClose} title="💵 Estimación de efectivo" size="lg">
+      <div className="space-y-4 text-sm">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-xs text-[var(--color-muted)]">
+            Para <b>{payrollName}</b> · {cashItems.length} trabajador(es) en efectivo.
+            Cada monto se redondea hacia arriba al múltiplo de $100 más cercano.
+          </p>
+          <div className="flex gap-1">
+            <button
+              onClick={handleCopyText}
+              disabled={busy === "text"}
+              className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)] disabled:opacity-50"
+              title="Copiar el desglose como texto plano (para pegar en chat o notas)"
+            >
+              {busy === "text" ? "..." : "📋 Texto"}
+            </button>
+            <button
+              onClick={handleCopyImage}
+              disabled={busy === "image"}
+              className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)] disabled:opacity-50"
+              title="Copiar el desglose como imagen al portapapeles"
+            >
+              {busy === "image" ? "..." : "📋 Imagen"}
+            </button>
+          </div>
+        </div>
+        <div ref={captureRef} className="space-y-4" style={{ background: "var(--color-surface)" }}>
+
+        {/* Total destacado */}
+        <div className="rounded-lg border border-[var(--color-accent)] bg-[var(--color-accent-soft)] p-3">
+          <div className="text-xs text-[var(--color-muted)]">Total efectivo a llevar</div>
+          <div className="text-2xl font-bold tabular-nums text-[var(--color-accent)]">
+            {fmtCurrency(est.totalNeeded)}
+          </div>
+          {diff > 0 && (
+            <div className="mt-1 text-[11px] text-[var(--color-muted)]">
+              Original: {fmtCurrency(est.totalOriginal)} · Redondeo hacia arriba: +{fmtCurrency(diff)}
+            </div>
+          )}
+        </div>
+
+        {/* Tabla de denominaciones */}
+        <div>
+          <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-muted)]">
+            Billetes y monedas necesarios
+          </h4>
+          <div className="overflow-hidden rounded-md border border-[var(--color-border)]">
+            <table className="w-full text-sm">
+              <thead className="bg-[var(--color-surface-2)] text-left text-[var(--color-muted)]">
+                <tr>
+                  <th className="px-3 py-1.5">Denominación</th>
+                  <th className="px-3 py-1.5 text-right">Cantidad</th>
+                  <th className="px-3 py-1.5 text-right">Subtotal</th>
+                </tr>
+              </thead>
+              <tbody>
+                {CASH_DENOMINATIONS.map((d) => {
+                  const n = est.counts.get(d) || 0;
+                  const isBill = d >= 1000;
+                  return (
+                    <tr key={d} className="border-t border-[var(--color-border)]">
+                      <td className="px-3 py-1.5">
+                        <span className="font-medium">{fmtCurrency(d)}</span>
+                        <span className="ml-2 text-[10px] text-[var(--color-muted)]">
+                          {isBill ? "billete" : "moneda"}
+                        </span>
+                      </td>
+                      <td className={`px-3 py-1.5 text-right tabular-nums ${n === 0 ? "text-[var(--color-muted)]" : "font-semibold"}`}>
+                        {n}
+                      </td>
+                      <td className={`px-3 py-1.5 text-right tabular-nums ${n === 0 ? "text-[var(--color-muted)]" : ""}`}>
+                        {fmtCurrency(n * d)}
+                      </td>
+                    </tr>
+                  );
+                })}
+                <tr className="border-t-2 border-[var(--color-border)] bg-[var(--color-surface-2)]/60 font-semibold">
+                  <td className="px-3 py-1.5">Total</td>
+                  <td className="px-3 py-1.5 text-right tabular-nums">
+                    {[...est.counts.values()].reduce((s, v) => s + v, 0)}
+                  </td>
+                  <td className="px-3 py-1.5 text-right tabular-nums text-[var(--color-accent)]">
+                    {fmtCurrency(est.totalNeeded)}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        </div>
+
+        {/* Detalle por trabajador (colapsable) — fuera del captureRef para que
+            no entre en la imagen copiada (puede ser muy largo). */}
+        <div>
+          <button
+            type="button"
+            onClick={() => setShowDetail((v) => !v)}
+            className="flex w-full items-center gap-2 text-left text-xs font-semibold text-[var(--color-muted)] hover:text-[var(--color-accent)]"
+          >
+            <span>{showDetail ? "▾" : "▸"}</span>
+            <span>Detalle por trabajador ({est.perWorker.length})</span>
+          </button>
+          {showDetail && (
+            <div className="mt-2 overflow-x-auto rounded-md border border-[var(--color-border)]">
+              <table className="w-full text-xs">
+                <thead className="bg-[var(--color-surface-2)] text-left text-[var(--color-muted)]">
+                  <tr>
+                    <th className="px-2 py-1">Nombre</th>
+                    <th className="px-2 py-1 text-right">Original</th>
+                    <th className="px-2 py-1 text-right">Redondeado</th>
+                    {CASH_DENOMINATIONS.map((d) => (
+                      <th key={d} className="px-2 py-1 text-right">{fmtCurrency(d).replace("$", "")}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {est.perWorker.map((w) => (
+                    <tr key={w.rut} className="border-t border-[var(--color-border)]">
+                      <td className="px-2 py-1">
+                        <div className="font-medium">{w.name}</div>
+                        {w.leader && (
+                          <div className="text-[9px] text-[var(--color-muted)]">{w.leader}</div>
+                        )}
+                      </td>
+                      <td className="px-2 py-1 text-right tabular-nums">{fmtCurrency(w.original)}</td>
+                      <td className="px-2 py-1 text-right tabular-nums font-semibold">
+                        {fmtCurrency(w.rounded)}
+                        {w.delta > 0 && (
+                          <div className="text-[9px] text-[var(--color-muted)]">+{fmtCurrency(w.delta)}</div>
+                        )}
+                      </td>
+                      {CASH_DENOMINATIONS.map((d) => (
+                        <td key={d} className="px-2 py-1 text-right tabular-nums">
+                          {w.breakdown[d] || ""}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+    </Modal>
   );
 }
 
