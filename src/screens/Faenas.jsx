@@ -1585,7 +1585,12 @@ function SelectedDetail({
           )}
           <div>
             <div className="text-xs uppercase tracking-wider text-[var(--color-muted)]">Detalle</div>
-            <div className="text-base font-semibold">{selected.name}</div>
+            <div
+              className="text-2xl font-bold leading-tight"
+              style={{ color: cardColor || "var(--color-accent)" }}
+            >
+              {selected.name}
+            </div>
           </div>
         </div>
         <button
@@ -1790,12 +1795,12 @@ function GroupHeader({ group, count, editable, isUngrouped, collapsed, onToggleC
               if (e.key === "Escape") { setEditingName(false); setName(group.name); }
             }}
             autoFocus
-            className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-0.5 text-base font-semibold outline-none focus:border-[var(--color-accent)]"
+            className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-0.5 text-xl font-bold text-[var(--color-accent)] outline-none focus:border-[var(--color-accent)]"
           />
         ) : (
           <h2
             onClick={() => editable && !isUngrouped && setEditingName(true)}
-            className={`text-base font-semibold ${editable && !isUngrouped ? "cursor-pointer hover:text-[var(--color-accent)]" : ""}`}
+            className={`text-xl font-bold text-[var(--color-accent)] ${editable && !isUngrouped ? "cursor-pointer hover:opacity-80" : ""}`}
           >
             {group.name}
           </h2>
