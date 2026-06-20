@@ -237,6 +237,60 @@ export const paymentsService = {
     });
   },
 
+  // Abonos parciales: un resumen pendiente puede tener N abonos antes de
+  // marcarse 100% pagado. Cada abono lleva { id, amount, date, notes,
+  // createdAt, createdBy }. El monto pendiente se calcula en cliente como
+  // total - sum(abonos). Cuando el usuario marca el resumen como `paid` los
+  // abonos quedan congelados; revertir el pago los deja intactos.
+  async addAbono(paymentId, { amount, date, notes = "" }) {
+    const before = await this.getById(paymentId);
+    if (!before) throw new Error("Resumen no encontrado");
+    if (before.status === "paid") throw new Error("Resumen pagado — revertí el pago antes de cargar abonos");
+    const amt = Number(amount) || 0;
+    if (amt <= 0) throw new Error("El monto del abono debe ser mayor a 0");
+    const abono = {
+      id: (typeof crypto !== "undefined" && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : `ab_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`,
+      amount: amt,
+      date: date || new Date().toISOString().slice(0, 10),
+      notes: String(notes || "").trim(),
+      createdAt: new Date().toISOString(),
+      createdBy: auth.currentUser?.uid || null,
+    };
+    const abonos = [...(before.abonos || []), abono];
+    await updateDoc(doc(db, PAYMENTS, paymentId), { abonos, ...stamp() });
+    await logAction({
+      action: "update",
+      entity: "transportPayment",
+      entityId: paymentId,
+      before,
+      after: { ...before, abonos },
+      meta: { addedAbono: abono },
+    });
+    return { ...before, abonos };
+  },
+
+  async removeAbono(paymentId, abonoId) {
+    const before = await this.getById(paymentId);
+    if (!before) throw new Error("Resumen no encontrado");
+    if (before.status === "paid") throw new Error("Resumen pagado — revertí el pago antes de modificar abonos");
+    const abonos = (before.abonos || []).filter((a) => a.id !== abonoId);
+    if (abonos.length === (before.abonos || []).length) {
+      throw new Error("Abono no encontrado");
+    }
+    await updateDoc(doc(db, PAYMENTS, paymentId), { abonos, ...stamp() });
+    await logAction({
+      action: "update",
+      entity: "transportPayment",
+      entityId: paymentId,
+      before,
+      after: { ...before, abonos },
+      meta: { removedAbonoId: abonoId },
+    });
+    return { ...before, abonos };
+  },
+
   // Actualiza solo el `total` del resumen (recalculado en cliente después de
   // editar el `amount` de alguna vuelta vinculada). Pago bloqueado para
   // resúmenes ya `paid`.

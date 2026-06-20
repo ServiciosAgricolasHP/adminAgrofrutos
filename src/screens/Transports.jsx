@@ -2175,6 +2175,14 @@ function BalanceSummary({ carriers, reloadVersion }) {
       e.tripCount += 1;
       e.tripTotal += Number(t.amount) || 0;
     }
+    // Pendiente real del resumen = total - sum(abonos). Si nunca cargaron
+    // abonos, equivale a `total`. Se usa para que el balance muestre lo que
+    // efectivamente falta cobrar, no el bruto.
+    const pendingOf = (p) => {
+      const total = Number(p?.total) || 0;
+      const abonado = (p?.abonos || []).reduce((s, a) => s + (Number(a.amount) || 0), 0);
+      return Math.max(0, total - abonado);
+    };
     // Resúmenes SUELTOS (sin quincena): se cuentan acá. Los que ya están en
     // una quincena se atribuyen abajo, en la columna Quincenas, para que el
     // mismo monto no aparezca dos veces en el total.
@@ -2182,7 +2190,7 @@ function BalanceSummary({ carriers, reloadVersion }) {
       if (p.payrollId) continue;
       const e = ensure(p.carrierId);
       e.paymentCount += 1;
-      e.paymentTotal += Number(p.total) || 0;
+      e.paymentTotal += pendingOf(p);
     }
     // Quincenas: por cada una, ver qué resúmenes contiene y sumar el monto al
     // carrier de cada resumen. Una quincena con resúmenes de varios carriers
@@ -2194,7 +2202,7 @@ function BalanceSummary({ carriers, reloadVersion }) {
         if (!p) continue;
         totalsByCarrier.set(
           p.carrierId,
-          (totalsByCarrier.get(p.carrierId) || 0) + (Number(p.total) || 0),
+          (totalsByCarrier.get(p.carrierId) || 0) + pendingOf(p),
         );
       }
       for (const [cid, amt] of totalsByCarrier) {
@@ -2628,6 +2636,21 @@ function paymentCardContent(p, c, period, transportPayrollById) {
       </div>
       <div className="text-right">
         <div className="font-semibold tabular-nums">{fmtCurrency(p.total)}</div>
+        {(() => {
+          // Si el resumen pendiente tiene abonos cargados, mostramos el
+          // pendiente real (total - abonos) abajo del bruto para que se vea
+          // de un vistazo cuánto falta sin abrir el detalle.
+          const abonado = (p.abonos || []).reduce((s, a) => s + (Number(a.amount) || 0), 0);
+          if (p.status !== "paid" && abonado > 0) {
+            const pending = Math.max(0, (Number(p.total) || 0) - abonado);
+            return (
+              <div className="text-[10px] tabular-nums text-[var(--color-warning)]">
+                pend: {fmtCurrency(pending)}
+              </div>
+            );
+          }
+          return null;
+        })()}
         <div
           className={`text-[10px] ${
             p.status === "paid"
@@ -2814,6 +2837,15 @@ function PaymentDetailModal({ open, onClose, payment, carrier, carriers = [], fa
   // estar "suelta" para futuras nóminas).
   const [editingTrip, setEditingTrip] = useState(null);
   const [confirmRemoveTrip, setConfirmRemoveTrip] = useState(null);
+  // Abonos: el resumen puede tener pagos parciales antes de marcarse 100%
+  // pagado. Mantenemos un estado local sincronizado con el doc para que el UI
+  // refleje los cambios sin esperar el reload del padre.
+  const [abonos, setAbonos] = useState(payment?.abonos || []);
+  const [newAbono, setNewAbono] = useState({ amount: "", date: "", notes: "" });
+  const [abonoBusy, setAbonoBusy] = useState(false);
+  useEffect(() => {
+    setAbonos(payment?.abonos || []);
+  }, [payment?.id, payment?.abonos]);
 
   useEffect(() => {
     if (!open || !payment) return;
@@ -2896,6 +2928,55 @@ function PaymentDetailModal({ open, onClose, payment, carrier, carriers = [], fa
       } catch { /* noop */ }
     } finally {
       setSavingTripId(null);
+    }
+  };
+
+  // Suma actual de abonos + monto pendiente. Calculados a partir del estado
+  // local `abonos` (no `payment.abonos`) para que el UI se actualice apenas
+  // se agrega/quita un abono, sin esperar el reload del padre.
+  const totalAbonado = abonos.reduce((s, a) => s + (Number(a.amount) || 0), 0);
+  const pendingAmount = Math.max(0, (Number(payment.total) || 0) - totalAbonado);
+
+  const handleAddAbono = async () => {
+    const amt = Number(newAbono.amount) || 0;
+    if (amt <= 0) {
+      toast.error("Ingresá un monto mayor a 0");
+      return;
+    }
+    if (amt > pendingAmount) {
+      const ok = window.confirm(
+        `El abono (${fmtCurrency(amt)}) supera el monto pendiente (${fmtCurrency(pendingAmount)}). ¿Continuar igual?`,
+      );
+      if (!ok) return;
+    }
+    setAbonoBusy(true);
+    try {
+      const updated = await paymentsService.addAbono(payment.id, {
+        amount: amt,
+        date: newAbono.date || new Date().toISOString().slice(0, 10),
+        notes: newAbono.notes,
+      });
+      setAbonos(updated.abonos || []);
+      setNewAbono({ amount: "", date: "", notes: "" });
+      if (onChanged) await onChanged();
+    } catch (err) {
+      toast.error("Error al cargar abono: " + (err.message || err));
+    } finally {
+      setAbonoBusy(false);
+    }
+  };
+
+  const handleRemoveAbono = async (abonoId) => {
+    if (!window.confirm("¿Eliminar este abono?")) return;
+    setAbonoBusy(true);
+    try {
+      const updated = await paymentsService.removeAbono(payment.id, abonoId);
+      setAbonos(updated.abonos || []);
+      if (onChanged) await onChanged();
+    } catch (err) {
+      toast.error("Error al eliminar abono: " + (err.message || err));
+    } finally {
+      setAbonoBusy(false);
     }
   };
 
@@ -3054,6 +3135,103 @@ function PaymentDetailModal({ open, onClose, payment, carrier, carriers = [], fa
           {savingTripId && <span className="ml-2 text-xs text-[var(--color-muted)]">guardando…</span>}
         </span>
       </div>
+
+      {/* Abonos parciales — solo cuando el resumen NO está marcado pagado.
+          Cuando está pagado los abonos se ven igual abajo pero no se pueden
+          modificar. */}
+      {(abonos.length > 0 || !isPaid) && (
+        <div className="mb-3 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] p-3 text-sm">
+          <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+            <span className="text-xs font-semibold uppercase tracking-wider text-[var(--color-muted)]">
+              💰 Abonos ({abonos.length})
+            </span>
+            <span className="flex flex-wrap items-baseline gap-3 text-xs">
+              <span className="text-[var(--color-muted)]">
+                Abonado:{" "}
+                <span className="font-semibold tabular-nums text-[var(--color-success)]">
+                  {fmtCurrency(totalAbonado)}
+                </span>
+              </span>
+              <span className="text-[var(--color-muted)]">
+                Pendiente:{" "}
+                <span className={`font-semibold tabular-nums ${pendingAmount === 0 ? "text-[var(--color-success)]" : "text-[var(--color-warning)]"}`}>
+                  {fmtCurrency(pendingAmount)}
+                </span>
+              </span>
+            </span>
+          </div>
+
+          {abonos.length > 0 && (
+            <ul className="mb-2 space-y-1">
+              {abonos.map((a) => (
+                <li
+                  key={a.id}
+                  className="flex flex-wrap items-center gap-2 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-xs"
+                >
+                  <span className="font-mono text-[var(--color-muted)]">{a.date || "—"}</span>
+                  <span className="font-semibold tabular-nums">{fmtCurrency(a.amount)}</span>
+                  {a.notes && (
+                    <span className="text-[var(--color-muted)] truncate">— {a.notes}</span>
+                  )}
+                  {!isPaid && (
+                    <button
+                      onClick={() => handleRemoveAbono(a.id)}
+                      disabled={abonoBusy}
+                      title="Eliminar este abono"
+                      className="ml-auto rounded border border-[var(--color-border)] px-1.5 py-0.5 text-[10px] text-[var(--color-danger)] hover:bg-[var(--color-danger-soft)] disabled:opacity-50"
+                    >
+                      ✕
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {!isPaid && (
+            <div className="flex flex-wrap items-end gap-2">
+              <label className="flex flex-col gap-0.5 text-[10px] text-[var(--color-muted)]">
+                Monto
+                <input
+                  type="number"
+                  min="0"
+                  step="100"
+                  placeholder="0"
+                  value={newAbono.amount}
+                  onChange={(e) => setNewAbono((p) => ({ ...p, amount: e.target.value }))}
+                  className="w-28 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-right text-sm tabular-nums outline-none focus:border-[var(--color-accent)]"
+                />
+              </label>
+              <label className="flex flex-col gap-0.5 text-[10px] text-[var(--color-muted)]">
+                Fecha
+                <input
+                  type="date"
+                  value={newAbono.date}
+                  onChange={(e) => setNewAbono((p) => ({ ...p, date: e.target.value }))}
+                  className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-sm outline-none focus:border-[var(--color-accent)]"
+                />
+              </label>
+              <label className="flex flex-1 flex-col gap-0.5 text-[10px] text-[var(--color-muted)]">
+                Nota (opcional)
+                <input
+                  type="text"
+                  placeholder="ej. transferencia, efectivo, cheque..."
+                  value={newAbono.notes}
+                  onChange={(e) => setNewAbono((p) => ({ ...p, notes: e.target.value }))}
+                  className="min-w-[140px] rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-sm outline-none focus:border-[var(--color-accent)]"
+                />
+              </label>
+              <button
+                onClick={handleAddAbono}
+                disabled={abonoBusy || !newAbono.amount}
+                className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
+              >
+                {abonoBusy ? "Cargando..." : "+ Abono"}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
 
       {loading ? (
         <div className="py-6 text-center text-sm text-[var(--color-muted)]">Cargando...</div>
@@ -3688,11 +3866,20 @@ function QuincenasBalanceSummary({ carriers, payrolls, payments }) {
         const p = paymentsById.get(pid);
         if (!p) continue;
         const cid = p.carrierId || "__none__";
-        const amt = Number(p.total) || 0;
+        const total = Number(p.total) || 0;
         if (p.status === "paid") {
-          paidByCarrier.set(cid, (paidByCarrier.get(cid) || 0) + amt);
+          paidByCarrier.set(cid, (paidByCarrier.get(cid) || 0) + total);
         } else {
-          pendByCarrier.set(cid, (pendByCarrier.get(cid) || 0) + amt);
+          // Resumen pending: el "abonado" (sum de abonos) cuenta como pagado,
+          // el resto como pendiente. Si no hay abonos, todo va a pendiente.
+          const abonado = (p.abonos || []).reduce((s, a) => s + (Number(a.amount) || 0), 0);
+          const pending = Math.max(0, total - abonado);
+          if (pending > 0) {
+            pendByCarrier.set(cid, (pendByCarrier.get(cid) || 0) + pending);
+          }
+          if (abonado > 0) {
+            paidByCarrier.set(cid, (paidByCarrier.get(cid) || 0) + Math.min(abonado, total));
+          }
         }
       }
       // Excluir quincenas pending sin ningún item pendiente (todos paid sueltos).

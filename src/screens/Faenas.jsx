@@ -22,6 +22,7 @@ import TextField from "../components/TextField";
 import Select from "../components/Select";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { workdayDocId } from "../utils/cosechaCombos";
+import ProductionSummaryModal from "../components/ProductionSummaryModal";
 
 const emptyFaena = { name: "", location: "", notes: "" };
 const emptySub = { name: "", notes: "" };
@@ -118,6 +119,12 @@ export default function Faenas() {
       return n;
     });
   };
+
+  // Set de subfaenas hidden ya auto-colapsadas en esta sesión. Sirve para
+  // que solo se "force" el colapso una vez por sub — si el usuario expande
+  // manualmente una sub oculta, queda expandida hasta refrescar la pestaña.
+  // Próximo reload vuelven a estado colapsado.
+  const processedHiddenRef = useRef(new Set());
   const toggleShowClosed = (subId) => {
     setShowClosedInSub((prev) => {
       const n = new Set(prev);
@@ -239,6 +246,49 @@ export default function Faenas() {
     if (!cyclesByFaena[selectedId]) loadCycles(selectedId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId]);
+
+  // Auto-colapsa subfaenas marcadas como hidden cuando se cargan. Solo se
+  // procesa una vez por sub-id por sesión (ver processedHiddenRef) para no
+  // pisar al usuario si decide expandir una sub oculta.
+  useEffect(() => {
+    if (!selectedId) return;
+    const subs = subsByFaena[selectedId];
+    if (!subs) return;
+    const toCollapse = [];
+    for (const s of subs) {
+      if (s.hidden && !processedHiddenRef.current.has(s.id)) {
+        toCollapse.push(s.id);
+        processedHiddenRef.current.add(s.id);
+      }
+    }
+    if (toCollapse.length > 0) {
+      setCollapsedSubs((prev) => {
+        const n = new Set(prev);
+        for (const id of toCollapse) n.add(id);
+        return n;
+      });
+    }
+  }, [selectedId, subsByFaena]);
+
+  // Marca/desmarca una subfaena como oculta. Persistido en Firestore para
+  // que la marca viaje con la cuenta (sino el dato sería poco útil — cada
+  // usuario tendría que ocultar de nuevo en su dispositivo).
+  const toggleHideSub = async (sub) => {
+    try {
+      await subfaenasService.update(sub.id, { hidden: !sub.hidden });
+      subfaenasService.invalidate();
+      // Si la marcamos oculta y no estaba en collapsedSubs, agregarla. Si
+      // la des-ocultamos, NO sacarla automáticamente (el usuario puede
+      // querer dejarla colapsada igual).
+      if (!sub.hidden) {
+        setCollapsedSubs((prev) => new Set(prev).add(sub.id));
+        processedHiddenRef.current.add(sub.id);
+      }
+      if (sub.faenaId) await loadSubs(sub.faenaId);
+    } catch (err) {
+      toast.error("Error al ocultar/mostrar subfaena: " + (err.message || err));
+    }
+  };
 
   // Cuando se abre el detalle de una faena, scrolleamos para que el panel
   // entre en viewport — si la tarjeta clickeada estaba en la última fila el
@@ -824,6 +874,7 @@ export default function Faenas() {
         onCreateSub={() => setSubForm({ mode: "create", faenaId: selected.id, data: { ...emptySub } })}
         onEditSub={(s) => setSubForm({ mode: "edit", faenaId: selected.id, data: { ...s } })}
         onDeleteSub={(s) => setConfirm({ kind: "sub", item: s, message: `¿Eliminar la subfaena "${s.name}"?` })}
+        onToggleHideSub={toggleHideSub}
         onCreateCycle={(subfaenaId) => openCreateCycle(selected.id, subfaenaId || "")}
         onEditCycle={(c) => openEditCycle(c, selected.id)}
         onOpenCloseFlow={(c) => openCloseFlow(c, selected.id)}
@@ -1459,6 +1510,15 @@ function ImportSection({ data, onChange }) {
 }
 
 function CycleRow({ cycle, subName, onEdit, onOpenCloseFlow, onReopen, onDelete }) {
+  // Estado local del modal de resumen — cada CycleRow gestiona su propio
+  // modal porque no hay nada que compartir con el padre. Para el resumen
+  // a nivel faena (todos los ciclos) hay un modal aparte en SelectedDetail.
+  const [resumenOpen, setResumenOpen] = useState(false);
+  // Solo tiene sentido mostrar el botón si el ciclo tiene al menos una labor
+  // de trato o cosecha (sino el modal saldría vacío).
+  const hasProdLabor = (cycle.labors || []).some(
+    (l) => l.type === "cosecha" || l.type === "trato",
+  );
   return (
     <li className="flex flex-wrap items-center justify-between gap-2 px-3 py-2">
       <div className="min-w-0 flex-1">
@@ -1482,6 +1542,15 @@ function CycleRow({ cycle, subName, onEdit, onOpenCloseFlow, onReopen, onDelete 
         </div>
       </div>
       <div className="ml-auto flex shrink-0 flex-wrap gap-1.5">
+        {hasProdLabor && (
+          <button
+            onClick={() => setResumenOpen(true)}
+            title="Ver producción día por día con precios, unidades y rendimiento"
+            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2.5 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
+          >
+            📊 Resumen
+          </button>
+        )}
         <Link
           to={`/cycles/${cycle.id}`}
           className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2.5 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
@@ -1522,6 +1591,14 @@ function CycleRow({ cycle, subName, onEdit, onOpenCloseFlow, onReopen, onDelete 
           Eliminar
         </button>
       </div>
+      {resumenOpen && (
+        <ProductionSummaryModal
+          open
+          onClose={() => setResumenOpen(false)}
+          title={`Producción · ${cycle.label}`}
+          cycles={[cycle]}
+        />
+      )}
     </li>
   );
 }
@@ -1534,6 +1611,7 @@ function SelectedDetail({
   onCreateSub,
   onEditSub,
   onDeleteSub,
+  onToggleHideSub,
   onCreateCycle,
   onEditCycle,
   onOpenCloseFlow,
@@ -1555,6 +1633,25 @@ function SelectedDetail({
 
   const hasSubs = (subs || []).length > 0;
   const allCollapsed = hasSubs && (subs || []).every((s) => collapsedSubs?.has(s.id));
+
+  // Resumen de producción a nivel faena: arranca cerrado y el usuario lo
+  // abre con el botón. Cuando se abre, le pasamos TODOS los ciclos con
+  // labores de trato/cosecha (abiertos y cerrados). El modal por dentro
+  // tiene chips para togglear cuáles incluir — default arranca con los
+  // abiertos seleccionados, los cerrados quedan apagados.
+  const [resumenOpen, setResumenOpen] = useState(false);
+  const cyclesWithProd = (cycles || []).filter((c) =>
+    (c.labors || []).some((l) => l.type === "cosecha" || l.type === "trato"),
+  );
+  // Ordenamos: abiertos primero, después cerrados (más reciente primero).
+  const cyclesForResumen = [...cyclesWithProd].sort((a, b) => {
+    if (a.status !== b.status) return a.status === "closed" ? 1 : -1;
+    return (b.startDate || "").localeCompare(a.startDate || "");
+  });
+  // Defaults para el modal: solo los abiertos prendidos.
+  const defaultEnabledIds = cyclesForResumen
+    .filter((c) => c.status !== "closed")
+    .map((c) => c.id);
 
   return (
     <div
@@ -1593,14 +1690,35 @@ function SelectedDetail({
             </div>
           </div>
         </div>
-        <button
-          onClick={onCreateSub}
-          className="rounded-md px-3 py-1.5 text-xs font-medium text-[var(--color-accent-fg)] transition-colors hover:opacity-90"
-          style={{ backgroundColor: cardColor || "var(--color-accent)" }}
-        >
-          + Subfaena
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          {cyclesForResumen.length > 0 && (
+            <button
+              onClick={() => setResumenOpen(true)}
+              title="Resumen de producción de todos los ciclos de esta faena (filtros adentro)"
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-accent-soft)]"
+            >
+              📊 Resumen producción
+            </button>
+          )}
+          <button
+            onClick={onCreateSub}
+            className="rounded-md px-3 py-1.5 text-xs font-medium text-[var(--color-accent-fg)] transition-colors hover:opacity-90"
+            style={{ backgroundColor: cardColor || "var(--color-accent)" }}
+          >
+            + Subfaena
+          </button>
+        </div>
       </div>
+
+      {resumenOpen && (
+        <ProductionSummaryModal
+          open
+          onClose={() => setResumenOpen(false)}
+          title={`Producción · ${selected.name}`}
+          cycles={cyclesForResumen}
+          initialEnabledCycleIds={defaultEnabledIds}
+        />
+      )}
 
       {!cycles || !subs ? (
         <div className="px-5 py-4 text-sm text-[var(--color-muted)]">Cargando...</div>
@@ -1624,126 +1742,238 @@ function SelectedDetail({
           )}
         </div>
       ) : (
-        <div className="space-y-3 px-5 py-4">
-          <div className="flex flex-wrap items-center justify-between gap-2 text-xs uppercase tracking-wider text-[var(--color-muted)]">
-            <span>Subfaenas ({subs.length})</span>
-            <div className="flex flex-wrap gap-1">
-              <button
-                onClick={allCollapsed ? onExpandAllSubs : onCollapseAllSubs}
-                title={allCollapsed ? "Expandir todas las subfaenas" : "Colapsar todas las subfaenas"}
-                className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-[10px] normal-case tracking-normal hover:bg-[var(--color-accent-soft)]"
-              >
-                {allCollapsed ? "▾ Expandir todo" : "▸ Colapsar todo"}
-              </button>
-              <button
-                onClick={onCreateSub}
-                className="rounded-md bg-[var(--color-accent)] px-3 py-1 text-xs font-medium normal-case text-[var(--color-accent-fg)] hover:bg-[var(--color-accent-hover)]"
-              >
-                + Subfaena
-              </button>
+        <SubfaenaListBody
+          subs={subs}
+          cyclesBySub={cyclesBySub}
+          collapsedSubs={collapsedSubs}
+          onToggleSubCollapse={onToggleSubCollapse}
+          allCollapsed={allCollapsed}
+          onExpandAllSubs={onExpandAllSubs}
+          onCollapseAllSubs={onCollapseAllSubs}
+          onCreateSub={onCreateSub}
+          onEditSub={onEditSub}
+          onDeleteSub={onDeleteSub}
+          onToggleHideSub={onToggleHideSub}
+          onCreateCycle={onCreateCycle}
+          onEditCycle={onEditCycle}
+          onOpenCloseFlow={onOpenCloseFlow}
+          onReopenCycle={onReopenCycle}
+          onDeleteCycle={onDeleteCycle}
+          showClosedInSub={showClosedInSub}
+          onToggleShowClosed={onToggleShowClosed}
+        />
+      )}
+    </div>
+  );
+}
+
+// Renderiza la lista de subfaenas. Separa visibles (no hidden) y ocultas
+// (hidden), las ocultas van en un grupo colapsable al final para que no
+// ocupen espacio salvo que el usuario las pida ver.
+function SubfaenaListBody({
+  subs,
+  cyclesBySub,
+  collapsedSubs,
+  onToggleSubCollapse,
+  allCollapsed,
+  onExpandAllSubs,
+  onCollapseAllSubs,
+  onCreateSub,
+  onEditSub,
+  onDeleteSub,
+  onToggleHideSub,
+  onCreateCycle,
+  onEditCycle,
+  onOpenCloseFlow,
+  onReopenCycle,
+  onDeleteCycle,
+  showClosedInSub,
+  onToggleShowClosed,
+}) {
+  const visibleSubs = subs.filter((s) => !s.hidden);
+  const hiddenSubs = subs.filter((s) => s.hidden);
+  // Por sesión: el wrapper de ocultas arranca cerrado.
+  const [hiddenGroupOpen, setHiddenGroupOpen] = useState(false);
+
+  const renderSubCard = (s) => {
+    const subCycles = cyclesBySub[s.id] || [];
+    const openCycles = subCycles.filter((c) => c.status !== "closed");
+    const closedCycles = subCycles.filter((c) => c.status === "closed");
+    const isCollapsed = !!collapsedSubs?.has(s.id);
+    const closedHiddenByDefault = openCycles.length > 0;
+    const showClosed = !closedHiddenByDefault || !!showClosedInSub?.has(s.id);
+    return (
+      <div key={s.id} className="rounded-md border border-[var(--color-border)]">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2">
+          <button
+            onClick={() => onToggleSubCollapse(s.id)}
+            aria-label={isCollapsed ? "Expandir" : "Colapsar"}
+            className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)] hover:text-[var(--color-accent)]"
+          >
+            {isCollapsed ? "▸" : "▾"}
+          </button>
+          <div
+            className="min-w-0 flex-1 cursor-pointer"
+            onClick={() => onToggleSubCollapse(s.id)}
+          >
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className={`truncate text-sm font-medium ${s.hidden ? "text-[var(--color-muted)]" : ""}`}>
+                {s.name}
+              </span>
+              {s.hidden && (
+                <span
+                  className="rounded bg-[var(--color-surface)] px-1.5 py-0.5 text-[10px] italic text-[var(--color-muted)]"
+                  title="Subfaena marcada como oculta — agrupada al final, arranca colapsada cada sesión"
+                >
+                  oculta
+                </span>
+              )}
+              <span className="rounded bg-[var(--color-surface)] px-1.5 py-0.5 text-[10px] text-[var(--color-muted)]">
+                {openCycles.length > 0 && <span className="text-[var(--color-accent)]">{openCycles.length} abierto{openCycles.length === 1 ? "" : "s"}</span>}
+                {openCycles.length > 0 && closedCycles.length > 0 && " · "}
+                {closedCycles.length > 0 && <span>{closedCycles.length} cerrado{closedCycles.length === 1 ? "" : "s"}</span>}
+                {subCycles.length === 0 && "sin ciclos"}
+              </span>
             </div>
+            {s.notes && !isCollapsed && (
+              <div className="truncate text-xs text-[var(--color-muted)]">{s.notes}</div>
+            )}
           </div>
-          {subs.map((s) => {
-            const subCycles = cyclesBySub[s.id] || [];
-            const openCycles = subCycles.filter((c) => c.status !== "closed");
-            const closedCycles = subCycles.filter((c) => c.status === "closed");
-            const isCollapsed = !!collapsedSubs?.has(s.id);
-            // Si hay abiertos y cerrados, los cerrados arrancan ocultos. Si
-            // solo hay cerrados (subfaena histórica), se muestran sí o sí —
-            // sino la subfaena se vería vacía.
-            const closedHiddenByDefault = openCycles.length > 0;
-            const showClosed = !closedHiddenByDefault || !!showClosedInSub?.has(s.id);
-            return (
-              <div key={s.id} className="rounded-md border border-[var(--color-border)]">
-                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2">
-                  <button
-                    onClick={() => onToggleSubCollapse(s.id)}
-                    aria-label={isCollapsed ? "Expandir" : "Colapsar"}
-                    className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)] hover:text-[var(--color-accent)]"
-                  >
-                    {isCollapsed ? "▸" : "▾"}
-                  </button>
-                  <div
-                    className="min-w-0 flex-1 cursor-pointer"
-                    onClick={() => onToggleSubCollapse(s.id)}
-                  >
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <span className="truncate text-sm font-medium">{s.name}</span>
-                      <span className="rounded bg-[var(--color-surface)] px-1.5 py-0.5 text-[10px] text-[var(--color-muted)]">
-                        {openCycles.length > 0 && <span className="text-[var(--color-accent)]">{openCycles.length} abierto{openCycles.length === 1 ? "" : "s"}</span>}
-                        {openCycles.length > 0 && closedCycles.length > 0 && " · "}
-                        {closedCycles.length > 0 && <span>{closedCycles.length} cerrado{closedCycles.length === 1 ? "" : "s"}</span>}
-                        {subCycles.length === 0 && "sin ciclos"}
-                      </span>
-                    </div>
-                    {s.notes && !isCollapsed && (
-                      <div className="truncate text-xs text-[var(--color-muted)]">{s.notes}</div>
-                    )}
-                  </div>
-                  <div className="ml-auto flex shrink-0 flex-wrap gap-1">
-                    <button
-                      onClick={() => onCreateCycle(s.id)}
-                      className="rounded-md bg-[var(--color-accent)] px-2.5 py-1 text-xs font-medium text-[var(--color-accent-fg)] hover:bg-[var(--color-accent-hover)]"
-                    >
-                      + Ciclo
-                    </button>
-                    <button
-                      onClick={() => onEditSub(s)}
-                      className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
-                    >
-                      Editar
-                    </button>
-                    <button
-                      onClick={() => onDeleteSub(s)}
-                      className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1 text-xs text-[var(--color-danger)] hover:bg-[var(--color-danger-soft)]"
-                    >
-                      Eliminar
-                    </button>
-                  </div>
-                </div>
-                {!isCollapsed && (
-                  subCycles.length === 0 ? (
-                    <div className="px-3 py-2 text-xs text-[var(--color-muted)]">Sin ciclos.</div>
-                  ) : (
-                    <>
-                      <ul className="divide-y divide-[var(--color-border)]">
-                        {openCycles.map((c) => (
-                          <CycleRow
-                            key={c.id}
-                            cycle={c}
-                            onEdit={onEditCycle}
-                            onOpenCloseFlow={onOpenCloseFlow}
-                            onReopen={onReopenCycle}
-                            onDelete={onDeleteCycle}
-                          />
-                        ))}
-                        {showClosed && closedCycles.map((c) => (
-                          <CycleRow
-                            key={c.id}
-                            cycle={c}
-                            onEdit={onEditCycle}
-                            onOpenCloseFlow={onOpenCloseFlow}
-                            onReopen={onReopenCycle}
-                            onDelete={onDeleteCycle}
-                          />
-                        ))}
-                      </ul>
-                      {closedHiddenByDefault && closedCycles.length > 0 && (
-                        <button
-                          onClick={() => onToggleShowClosed(s.id)}
-                          className="w-full border-t border-[var(--color-border)] bg-[var(--color-surface-2)]/50 px-3 py-1.5 text-left text-xs text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)] hover:text-[var(--color-accent)]"
-                        >
-                          {showClosed
-                            ? `▴ Ocultar ${closedCycles.length} ciclo${closedCycles.length === 1 ? "" : "s"} cerrado${closedCycles.length === 1 ? "" : "s"}`
-                            : `▾ Ver ${closedCycles.length} ciclo${closedCycles.length === 1 ? "" : "s"} cerrado${closedCycles.length === 1 ? "" : "s"}`}
-                        </button>
-                      )}
-                    </>
-                  )
-                )}
-              </div>
-            );
-          })}
+          <div className="ml-auto flex shrink-0 flex-wrap gap-1">
+            {/* Botón Ocultar / Mostrar: aparece sólo cuando todos los
+                ciclos están cerrados (para marcar oculta) o cuando la
+                sub ya está oculta (para des-ocultar) — sino marcar
+                oculta una sub con producción activa sería confuso. */}
+            {onToggleHideSub && (s.hidden || (openCycles.length === 0 && subCycles.length > 0)) && (
+              <button
+                onClick={() => onToggleHideSub(s)}
+                title={s.hidden
+                  ? "Desmarcar como oculta (volverá a aparecer expandida arriba)"
+                  : "Marcar como oculta (se mueve al grupo Ocultas al final)"}
+                className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
+              >
+                {s.hidden ? "Mostrar" : "Ocultar"}
+              </button>
+            )}
+            <button
+              onClick={() => onCreateCycle(s.id)}
+              className="rounded-md bg-[var(--color-accent)] px-2.5 py-1 text-xs font-medium text-[var(--color-accent-fg)] hover:bg-[var(--color-accent-hover)]"
+            >
+              + Ciclo
+            </button>
+            <button
+              onClick={() => onEditSub(s)}
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
+            >
+              Editar
+            </button>
+            <button
+              onClick={() => onDeleteSub(s)}
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1 text-xs text-[var(--color-danger)] hover:bg-[var(--color-danger-soft)]"
+            >
+              Eliminar
+            </button>
+          </div>
+        </div>
+        {!isCollapsed && (
+          subCycles.length === 0 ? (
+            <div className="px-3 py-2 text-xs text-[var(--color-muted)]">Sin ciclos.</div>
+          ) : (
+            <>
+              <ul className="divide-y divide-[var(--color-border)]">
+                {openCycles.map((c) => (
+                  <CycleRow
+                    key={c.id}
+                    cycle={c}
+                    onEdit={onEditCycle}
+                    onOpenCloseFlow={onOpenCloseFlow}
+                    onReopen={onReopenCycle}
+                    onDelete={onDeleteCycle}
+                  />
+                ))}
+                {showClosed && closedCycles.map((c) => (
+                  <CycleRow
+                    key={c.id}
+                    cycle={c}
+                    onEdit={onEditCycle}
+                    onOpenCloseFlow={onOpenCloseFlow}
+                    onReopen={onReopenCycle}
+                    onDelete={onDeleteCycle}
+                  />
+                ))}
+              </ul>
+              {closedHiddenByDefault && closedCycles.length > 0 && (
+                <button
+                  onClick={() => onToggleShowClosed(s.id)}
+                  className="w-full border-t border-[var(--color-border)] bg-[var(--color-surface-2)]/50 px-3 py-1.5 text-left text-xs text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)] hover:text-[var(--color-accent)]"
+                >
+                  {showClosed
+                    ? `▴ Ocultar ${closedCycles.length} ciclo${closedCycles.length === 1 ? "" : "s"} cerrado${closedCycles.length === 1 ? "" : "s"}`
+                    : `▾ Ver ${closedCycles.length} ciclo${closedCycles.length === 1 ? "" : "s"} cerrado${closedCycles.length === 1 ? "" : "s"}`}
+                </button>
+              )}
+            </>
+          )
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <div className="space-y-3 px-5 py-4">
+      <div className="flex flex-wrap items-center justify-between gap-2 text-xs uppercase tracking-wider text-[var(--color-muted)]">
+        <span>
+          Subfaenas ({visibleSubs.length}
+          {hiddenSubs.length > 0 && (
+            <span className="normal-case tracking-normal text-[var(--color-muted)]">
+              {" · "}{hiddenSubs.length} oculta{hiddenSubs.length === 1 ? "" : "s"}
+            </span>
+          )}
+          )
+        </span>
+        <div className="flex flex-wrap gap-1">
+          <button
+            onClick={allCollapsed ? onExpandAllSubs : onCollapseAllSubs}
+            title={allCollapsed ? "Expandir todas las subfaenas" : "Colapsar todas las subfaenas"}
+            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-[10px] normal-case tracking-normal hover:bg-[var(--color-accent-soft)]"
+          >
+            {allCollapsed ? "▾ Expandir todo" : "▸ Colapsar todo"}
+          </button>
+          <button
+            onClick={onCreateSub}
+            className="rounded-md bg-[var(--color-accent)] px-3 py-1 text-xs font-medium normal-case text-[var(--color-accent-fg)] hover:bg-[var(--color-accent-hover)]"
+          >
+            + Subfaena
+          </button>
+        </div>
+      </div>
+
+      {visibleSubs.map(renderSubCard)}
+
+      {/* Grupo colapsable de subfaenas ocultas. Por defecto cerrado para que
+          no ocupen espacio. Al expandir, cada sub adentro mantiene su propio
+          toggle de colapsar — pero entra al DOM ya colapsada igual (la lógica
+          de auto-colapso de hidden en processedHiddenRef sigue funcionando). */}
+      {hiddenSubs.length > 0 && (
+        <div className="rounded-md border border-dashed border-[var(--color-border)] bg-[var(--color-surface-2)]/30">
+          <button
+            type="button"
+            onClick={() => setHiddenGroupOpen((v) => !v)}
+            className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)] hover:text-[var(--color-accent)]"
+          >
+            <span>{hiddenGroupOpen ? "▾" : "▸"}</span>
+            <span className="font-medium uppercase tracking-wider">
+              Subfaenas ocultas ({hiddenSubs.length})
+            </span>
+            <span className="normal-case opacity-70">
+              {hiddenGroupOpen ? "click para ocultar" : "click para ver"}
+            </span>
+          </button>
+          {hiddenGroupOpen && (
+            <div className="space-y-3 border-t border-dashed border-[var(--color-border)] p-3">
+              {hiddenSubs.map(renderSubCard)}
+            </div>
+          )}
         </div>
       )}
     </div>
