@@ -184,10 +184,12 @@ export default function Payroll() {
       setWorkers(w);
       setPayrolls(p);
 
-      // Compute per-cycle paid/unpaid totals (for active cycles only).
+      // Compute per-cycle paid/unpaid totals + date range (for active cycles
+      // only). firstDay/lastDay alimentan el CycleSelector para mostrar el
+      // período de cada subfaena en pantalla cuando se arma una nómina.
       const activeIds = c.filter((x) => x.status !== "closed").map((x) => x.id);
       const stats = {};
-      for (const id of activeIds) stats[id] = { unpaid: 0, paid: 0, total: 0 };
+      for (const id of activeIds) stats[id] = { unpaid: 0, paid: 0, total: 0, firstDay: "", lastDay: "" };
       for (let i = 0; i < activeIds.length; i += 10) {
         const chunk = activeIds.slice(i, i + 10);
         const wds = await workdaysService.list({ wheres: [["cycleId", "in", chunk]] });
@@ -210,6 +212,10 @@ export default function Payroll() {
           stats[cid].total += amount;
           if (wd.payrollId) stats[cid].paid += amount;
           else stats[cid].unpaid += amount;
+          if (wd.date) {
+            if (!stats[cid].firstDay || wd.date < stats[cid].firstDay) stats[cid].firstDay = wd.date;
+            if (!stats[cid].lastDay || wd.date > stats[cid].lastDay) stats[cid].lastDay = wd.date;
+          }
         }
       }
       setCycleStats(stats);
@@ -1110,7 +1116,12 @@ function CycleSelector({ groups, selected, toggle, selectedLaborsByCycle, toggle
               {cycles.map((c) => {
                 const sub = subfaenaName(c.subfaenaId);
                 const isSelected = selected.has(c.id);
-                const stat = cycleStats?.[c.id] || { unpaid: 0, paid: 0, total: 0 };
+                const stat = cycleStats?.[c.id] || { unpaid: 0, paid: 0, total: 0, firstDay: "", lastDay: "" };
+                const periodLabel = (stat.firstDay || stat.lastDay)
+                  ? (stat.firstDay === stat.lastDay
+                      ? stat.firstDay
+                      : `${stat.firstDay || "?"} → ${stat.lastDay || "?"}`)
+                  : "";
                 const noUnpaid = stat.unpaid <= 0;
                 const labors = c.labors || [];
                 const selectedLabors = selectedLaborsByCycle?.get(c.id) || new Set();
@@ -1128,7 +1139,16 @@ function CycleSelector({ groups, selected, toggle, selectedLaborsByCycle, toggle
                       />
                       <div className="flex-1 text-sm">
                         <div className="font-medium">{c.label || c.id}</div>
-                        {sub && <div className="text-xs text-[var(--color-muted)]">{sub}</div>}
+                        {(sub || periodLabel) && (
+                          <div className="flex flex-wrap items-center gap-x-2 text-xs text-[var(--color-muted)]">
+                            {sub && <span>{sub}</span>}
+                            {periodLabel && (
+                              <span className="tabular-nums" title="Primer y último día con producción del ciclo">
+                                📅 {periodLabel}
+                              </span>
+                            )}
+                          </div>
+                        )}
                         {isSelected && labors.length > 0 && !allLaborsOn && (
                           <div className="text-xs text-amber-700 dark:text-amber-400">
                             {noneOn
