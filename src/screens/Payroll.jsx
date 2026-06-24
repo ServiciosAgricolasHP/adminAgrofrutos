@@ -633,6 +633,11 @@ export default function Payroll() {
             dayPrices: cycle?.dayPrices || {},
             labors: (cycle?.labors || []).map((l) => ({
               id: l.id, name: l.name, type: l.type,
+              // Catálogo: tratoType (Poda/Amarre/...) y tratoUnit (Planta/
+              // Metro/...) son índices de catalogo. Para cosecha la unidad
+              // se deriva de containerY del workday → cosechaUnit(catalogs).
+              tratoType: l.tratoType ?? null,
+              tratoUnit: l.tratoUnit ?? null,
               cosechaMode: l.cosechaMode || null,
               cosechaPrices: l.cosechaPrices || null,
               tratoMode: l.tratoMode || null,
@@ -800,6 +805,14 @@ export default function Payroll() {
   };
   const onDelete = async () => {
     if (!confirmDelete) return;
+    // Safeguard: no permitir eliminar nóminas pagadas. El UI desactiva el
+    // botón, pero si alguien dispara la acción desde otro path (DevTools,
+    // race con una reverter en otra pestaña) cortamos acá igual.
+    if (confirmDelete.status === "paid") {
+      setConfirmDelete(null);
+      toast.error("No se puede eliminar una nómina pagada. Revertí primero a No pagado.");
+      return;
+    }
     const id = confirmDelete.id;
     const workdayIds = confirmDelete.workdayIds || [];
     const advanceIds = confirmDelete.advanceIds || [];
@@ -1786,27 +1799,6 @@ function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedow
                 </div>
               </div>
               <div className="flex flex-wrap gap-1 pt-1">
-                <button
-                  onClick={() => onDownloadNominaOnly(p)}
-                  title="Solo la hoja de Nómina BChile"
-                  className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
-                >
-                  🏦 Nómina
-                </button>
-                <button
-                  onClick={() => onRedownload(p)}
-                  title="XLSX completo (Nómina + Resumen + Transferencias + Efectivo)"
-                  className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
-                >
-                  📥 Completo
-                </button>
-                <button
-                  onClick={() => onDownloadSnapshot(p)}
-                  title="Descargar el JSON estático con toda la info para reconstruir esta nómina"
-                  className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
-                >
-                  📄 JSON
-                </button>
                 {p.status === "paid" ? (
                   <button
                     onClick={() => onMarkPending(p)}
@@ -1826,13 +1818,17 @@ function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedow
                 <button
                   onClick={() => onChangeClassification(p)}
                   title={classify(p) === "diferencia" ? "Mover a Nóminas" : "Mover a Diferencias"}
-                  className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-1 py-0.5 text-[10px] leading-none hover:bg-[var(--color-accent-soft)]"
+                  className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
                 >
-                  🏷️
+                  {classify(p) === "diferencia" ? "→ Nómina" : "→ Diferencia"}
                 </button>
                 <button
                   onClick={() => onAskDelete(p)}
-                  className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs text-[var(--color-danger)] hover:bg-[var(--color-danger-soft)]"
+                  disabled={p.status === "paid"}
+                  title={p.status === "paid"
+                    ? "No se puede eliminar una nómina pagada. Revertí primero a No pagado."
+                    : "Eliminar esta nómina"}
+                  className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs text-[var(--color-danger)] hover:bg-[var(--color-danger-soft)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-[var(--color-surface-2)]"
                 >
                   Eliminar
                 </button>
@@ -1896,27 +1892,6 @@ function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedow
               <td className="px-3 py-2 text-xs text-[var(--color-muted)]">{fmtDate(p.createdAt)}</td>
               <td className="px-3 py-2">
                 <div className="flex justify-end gap-1">
-                  <button
-                    onClick={() => onDownloadNominaOnly(p)}
-                    title="Solo la hoja de Nómina BChile"
-                    className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
-                  >
-                    🏦 Nómina
-                  </button>
-                  <button
-                    onClick={() => onRedownload(p)}
-                    title="XLSX completo (Nómina + Resumen + Transferencias + Efectivo)"
-                    className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
-                  >
-                    📥 Completo
-                  </button>
-                  <button
-                    onClick={() => onDownloadSnapshot(p)}
-                    title="Descargar el JSON estático con toda la info para reconstruir esta nómina"
-                    className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
-                  >
-                    📄 JSON
-                  </button>
                   {p.status === "paid" ? (
                     <button
                       onClick={() => onMarkPending(p)}
@@ -1936,13 +1911,17 @@ function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedow
                   <button
                     onClick={() => onChangeClassification(p)}
                     title={classify(p) === "diferencia" ? "Mover a Nóminas" : "Mover a Diferencias"}
-                    className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-1 py-0.5 text-[10px] leading-none hover:bg-[var(--color-accent-soft)]"
+                    className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
                   >
-                    🏷️
+                    {classify(p) === "diferencia" ? "→ Nómina" : "→ Diferencia"}
                   </button>
                   <button
                     onClick={() => onAskDelete(p)}
-                    className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs text-[var(--color-danger)] hover:bg-[var(--color-danger-soft)]"
+                    disabled={p.status === "paid"}
+                    title={p.status === "paid"
+                      ? "No se puede eliminar una nómina pagada. Revertí primero a No pagado."
+                      : "Eliminar esta nómina"}
+                    className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs text-[var(--color-danger)] hover:bg-[var(--color-danger-soft)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-[var(--color-surface-2)]"
                   >
                     Eliminar
                   </button>
@@ -3217,6 +3196,38 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
   const [printingDetail, setPrintingDetail] = useState(false);
   const [showCashEstimation, setShowCashEstimation] = useState(false);
 
+  // Snapshot lazy-loaded para alimentar el detalle por trabajador (días
+  // pagados por ciclo, estilo módulo Trabajadores). Si la nómina no tiene
+  // snapshot (creada antes del feature) caemos al display básico de 4
+  // métricas — el detalle por días no se puede reconstruir sin re-fetch.
+  const [snapshot, setSnapshot] = useState(null);
+  const [snapshotLoading, setSnapshotLoading] = useState(false);
+  useEffect(() => {
+    if (!payroll?.id) return;
+    let cancelled = false;
+    setSnapshotLoading(true);
+    payrollSnapshotsService.getById(payroll.id)
+      .then((doc) => {
+        if (cancelled) return;
+        if (doc) {
+          const { id: _omit, ...rest } = doc;
+          setSnapshot(rest);
+        } else if (payroll.snapshot) {
+          setSnapshot(payroll.snapshot);
+        } else {
+          setSnapshot(null);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          console.warn("No se pudo cargar snapshot:", err);
+          setSnapshot(payroll.snapshot || null);
+        }
+      })
+      .finally(() => { if (!cancelled) setSnapshotLoading(false); });
+    return () => { cancelled = true; };
+  }, [payroll?.id]);
+
   const setCycleTitle = (cid, val) => {
     setCycleTitleOverrides((prev) => {
       const next = { ...prev };
@@ -3293,14 +3304,50 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
         className="flex max-h-[94vh] w-full max-w-4xl flex-col rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-2xl sm:max-h-[90vh]"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex shrink-0 items-center justify-between border-b border-[var(--color-border)] px-3 py-3 sm:px-5">
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
-              <h2 className="font-semibold">{payroll.name}</h2>
+        <div className="shrink-0 border-b border-[var(--color-border)] px-3 py-3 sm:px-5">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="truncate text-base font-semibold sm:text-lg">{payroll.name}</h2>
+                <span
+                  className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                    payroll.status === "paid"
+                      ? "bg-[var(--color-success-soft)] text-[var(--color-success)]"
+                      : "bg-[var(--color-warning-soft)] text-[var(--color-warning)]"
+                  }`}
+                >
+                  {payroll.status === "paid" ? "✓ Pagada" : "⏳ Pendiente"}
+                </span>
+                {payroll.classification === "diferencia" && (
+                  <span className="shrink-0 rounded-full bg-[var(--color-surface-2)] px-2 py-0.5 text-[10px] text-[var(--color-muted)]">
+                    Diferencia
+                  </span>
+                )}
+              </div>
+              <p className="mt-0.5 truncate text-xs text-[var(--color-muted)]">
+                {cycleDetails.length > 0
+                  ? cycleDetails.map((c) => displayCycleLabel(c)).join(" · ")
+                  : (payroll.cycleLabels || []).join(" · ") || "—"}
+              </p>
+            </div>
+            <button
+              onClick={onClose}
+              className="shrink-0 rounded p-1 text-[var(--color-muted)] hover:bg-[var(--color-surface-2)] hover:text-[var(--color-text)]"
+              aria-label="Cerrar"
+            >
+              ✕
+            </button>
+          </div>
+          {(cycleDetails.length > 0 || isPending) && (
+            <div className="mt-2 flex flex-wrap gap-1">
               {cycleDetails.length > 0 && (
                 <button
                   onClick={() => setShowTitleEditor((v) => !v)}
-                  className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-0.5 text-[10px] hover:bg-[var(--color-accent-soft)]"
+                  className={`rounded-md border px-2 py-1 text-xs ${
+                    showTitleEditor
+                      ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+                      : "border-[var(--color-border)] bg-[var(--color-surface-2)] hover:bg-[var(--color-accent-soft)]"
+                  }`}
                   title="Cambiar el nombre con el que cada ciclo aparece en XLSX, comprobantes y PDF"
                 >
                   📝 Editar encabezados
@@ -3309,7 +3356,7 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
               {isPending && (
                 <button
                   onClick={() => setEditMode((v) => !v)}
-                  className={`rounded border px-2 py-0.5 text-[10px] ${
+                  className={`rounded-md border px-2 py-1 text-xs ${
                     editMode
                       ? "border-[var(--color-danger)] bg-[var(--color-danger-soft)] text-[var(--color-danger)]"
                       : "border-[var(--color-border)] bg-[var(--color-surface-2)] hover:bg-[var(--color-accent-soft)]"
@@ -3320,14 +3367,100 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
                 </button>
               )}
             </div>
-            <p className="text-xs text-[var(--color-muted)]">
-              {cycleDetails.length > 0
-                ? cycleDetails.map((c) => displayCycleLabel(c)).join(" · ")
-                : (payroll.cycleLabels || []).join(" · ") || "—"}
-            </p>
-          </div>
-          <button onClick={onClose} className="ml-3 text-[var(--color-muted)] hover:text-[var(--color-text)]">✕</button>
+          )}
         </div>
+        {/* Barra de filtros fija — afuera del scroll para que no quede flotando
+            con gaps transparentes arriba. Edge-to-edge entre header y body. */}
+        <div className="shrink-0 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 sm:px-5 sm:py-2.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="🔍 Buscar por RUT, nombre o líder…"
+              className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2.5 py-1.5 text-sm outline-none focus:border-[var(--color-accent)] sm:w-auto sm:min-w-[200px] sm:flex-1"
+            />
+            <div className="inline-flex overflow-hidden rounded-md border border-[var(--color-border)] text-xs">
+              {[
+                { v: "all", l: "Todos" },
+                { v: "bank", l: "🏦 Banco" },
+                { v: "cash", l: "💵 Efectivo" },
+              ].map((o) => (
+                <button
+                  key={o.v}
+                  onClick={() => setPaymentMethod(o.v)}
+                  className={`border-l border-[var(--color-border)] px-2 py-1 first:border-l-0 ${
+                    paymentMethod === o.v ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]" : "bg-[var(--color-surface-2)] hover:bg-[var(--color-accent-soft)]"
+                  }`}
+                >
+                  {o.l}
+                </button>
+              ))}
+            </div>
+            {hasActiveFilter && (
+              <button
+                onClick={clearFilters}
+                className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs text-[var(--color-muted)] hover:text-[var(--color-danger)]"
+              >
+                ✕ Limpiar
+              </button>
+            )}
+            <span className="ml-auto text-[10px] text-[var(--color-muted)] tabular-nums">
+              {hasActiveFilter ? `${filteredItems.length}/${items.length}` : items.length} trabajador{items.length === 1 ? "" : "es"}
+              {hasActiveFilter && ` · ${fmtCurrency(filteredItems.reduce((s, x) => s + (Number(x.amount) || 0), 0))}`}
+            </span>
+          </div>
+          {allLeaders.length > 1 && (
+            <div className="mt-1.5 flex flex-wrap items-center gap-1 text-[11px]">
+              <span className="text-[var(--color-muted)] mr-1">Grupo:</span>
+              {allLeaders.map((g) => {
+                const active = leaderFilter.has(g.leader);
+                return (
+                  <button
+                    key={g.leader}
+                    onClick={() => toggleSetItem(setLeaderFilter, g.leader)}
+                    className={`rounded-full px-2 py-0.5 ${
+                      active
+                        ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
+                        : "bg-[var(--color-surface-2)] border border-[var(--color-border)] hover:bg-[var(--color-accent-soft)]"
+                    }`}
+                  >
+                    {g.leader} <span className="opacity-60">({g.count})</span>
+                  </button>
+                );
+              })}
+              {leaderFilter.size > 0 && (
+                <button onClick={() => setLeaderFilter(new Set())} className="text-[var(--color-muted)] hover:text-[var(--color-danger)]">✕</button>
+              )}
+            </div>
+          )}
+          {cycleDetails.length > 1 && (
+            <div className="mt-1.5 flex flex-wrap items-center gap-1 text-[11px]">
+              <span className="text-[var(--color-muted)] mr-1">Ciclo:</span>
+              {cycleDetails.map((c) => {
+                const active = cycleFilter.has(c.id);
+                return (
+                  <button
+                    key={c.id}
+                    onClick={() => toggleSetItem(setCycleFilter, c.id)}
+                    className={`rounded-full px-2 py-0.5 ${
+                      active
+                        ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
+                        : "bg-[var(--color-surface-2)] border border-[var(--color-border)] hover:bg-[var(--color-accent-soft)]"
+                    }`}
+                    title={c.faenaName ? `${c.faenaName}${c.subfaenaName ? " / " + c.subfaenaName : ""}` : c.label}
+                  >
+                    {displayCycleLabel(c)}
+                  </button>
+                );
+              })}
+              {cycleFilter.size > 0 && (
+                <button onClick={() => setCycleFilter(new Set())} className="text-[var(--color-muted)] hover:text-[var(--color-danger)]">✕</button>
+              )}
+            </div>
+          )}
+        </div>
+
         <div className="flex-1 space-y-4 overflow-y-auto px-3 py-3 sm:space-y-5 sm:px-5 sm:py-4">
           {showTitleEditor && cycleDetails.length > 0 && (
             <section className="rounded-lg border border-[var(--color-accent)]/50 bg-[var(--color-accent-soft)]/40 p-4">
@@ -3378,100 +3511,6 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
             </section>
           )}
 
-          {/* Barra de filtros: búsqueda + forma de pago + grupo + ciclo.
-              Edge-to-edge sticky (negativos -mx/-mt anulan el padding del padre
-              para que el fondo opaco cubra todo el ancho cuando se scrollea —
-              sino quedan gaps transparentes a los costados). */}
-          <section className="sticky top-0 z-20 -mx-3 -mt-3 mb-1 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3 pb-2 pt-2 shadow-sm sm:-mx-5 sm:-mt-4 sm:px-5 sm:pt-3">
-            <div className="flex flex-wrap items-center gap-2">
-              <input
-                type="text"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="🔍 Buscar por RUT, nombre o líder…"
-                className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2.5 py-1.5 text-sm outline-none focus:border-[var(--color-accent)] sm:w-auto sm:min-w-[200px] sm:flex-1"
-              />
-              <div className="inline-flex overflow-hidden rounded-md border border-[var(--color-border)] text-xs">
-                {[
-                  { v: "all", l: "Todos" },
-                  { v: "bank", l: "🏦 Banco" },
-                  { v: "cash", l: "💵 Efectivo" },
-                ].map((o) => (
-                  <button
-                    key={o.v}
-                    onClick={() => setPaymentMethod(o.v)}
-                    className={`border-l border-[var(--color-border)] px-2 py-1 first:border-l-0 ${
-                      paymentMethod === o.v ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]" : "bg-[var(--color-surface-2)] hover:bg-[var(--color-accent-soft)]"
-                    }`}
-                  >
-                    {o.l}
-                  </button>
-                ))}
-              </div>
-              {hasActiveFilter && (
-                <button
-                  onClick={clearFilters}
-                  className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs text-[var(--color-muted)] hover:text-[var(--color-danger)]"
-                >
-                  ✕ Limpiar
-                </button>
-              )}
-              <span className="ml-auto text-[10px] text-[var(--color-muted)] tabular-nums">
-                {hasActiveFilter ? `${filteredItems.length}/${items.length}` : items.length} trabajador{items.length === 1 ? "" : "es"}
-                {hasActiveFilter && ` · ${fmtCurrency(filteredItems.reduce((s, x) => s + (Number(x.amount) || 0), 0))}`}
-              </span>
-            </div>
-            {allLeaders.length > 1 && (
-              <div className="mt-1.5 flex flex-wrap items-center gap-1 text-[11px]">
-                <span className="text-[var(--color-muted)] mr-1">Grupo:</span>
-                {allLeaders.map((g) => {
-                  const active = leaderFilter.has(g.leader);
-                  return (
-                    <button
-                      key={g.leader}
-                      onClick={() => toggleSetItem(setLeaderFilter, g.leader)}
-                      className={`rounded-full px-2 py-0.5 ${
-                        active
-                          ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
-                          : "bg-[var(--color-surface-2)] border border-[var(--color-border)] hover:bg-[var(--color-accent-soft)]"
-                      }`}
-                    >
-                      {g.leader} <span className="opacity-60">({g.count})</span>
-                    </button>
-                  );
-                })}
-                {leaderFilter.size > 0 && (
-                  <button onClick={() => setLeaderFilter(new Set())} className="text-[var(--color-muted)] hover:text-[var(--color-danger)]">✕</button>
-                )}
-              </div>
-            )}
-            {cycleDetails.length > 1 && (
-              <div className="mt-1.5 flex flex-wrap items-center gap-1 text-[11px]">
-                <span className="text-[var(--color-muted)] mr-1">Ciclo:</span>
-                {cycleDetails.map((c) => {
-                  const active = cycleFilter.has(c.id);
-                  return (
-                    <button
-                      key={c.id}
-                      onClick={() => toggleSetItem(setCycleFilter, c.id)}
-                      className={`rounded-full px-2 py-0.5 ${
-                        active
-                          ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
-                          : "bg-[var(--color-surface-2)] border border-[var(--color-border)] hover:bg-[var(--color-accent-soft)]"
-                      }`}
-                      title={c.faenaName ? `${c.faenaName}${c.subfaenaName ? " / " + c.subfaenaName : ""}` : c.label}
-                    >
-                      {displayCycleLabel(c)}
-                    </button>
-                  );
-                })}
-                {cycleFilter.size > 0 && (
-                  <button onClick={() => setCycleFilter(new Set())} className="text-[var(--color-muted)] hover:text-[var(--color-danger)]">✕</button>
-                )}
-              </div>
-            )}
-          </section>
-
           {/* Resumen — desglose general */}
           <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)] p-4">
             <h3 className="mb-3 text-sm font-semibold">Resumen</h3>
@@ -3482,7 +3521,19 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
                 <div className="text-[10px] text-[var(--color-muted)]">{bank.length} persona(s)</div>
               </div>
               <div>
-                <div className="text-xs text-[var(--color-muted)]">💵 Efectivo</div>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-xs text-[var(--color-muted)]">💵 Efectivo</div>
+                  {cash.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setShowCashEstimation(true)}
+                      title="Estimar cuántos billetes y monedas se necesitan para pagar el efectivo de esta nómina"
+                      className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 py-0.5 text-[10px] hover:bg-[var(--color-accent-soft)]"
+                    >
+                      💵 Estimar
+                    </button>
+                  )}
+                </div>
                 <div className="text-lg font-semibold">{fmtCurrency(cashTotal)}</div>
                 <div className="text-[10px] text-[var(--color-muted)]">{cash.length} persona(s) · {cashGroups.length} grupo(s)</div>
               </div>
@@ -3656,6 +3707,9 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
                                 editBusy={editBusy}
                                 onRemoveWorker={handleRemoveWorker}
                                 cols="bank"
+                                snapshot={snapshot}
+                                snapshotLoading={snapshotLoading}
+                                catalogs={catalogs}
                               />
                             ))}
                           </tbody>
@@ -3721,6 +3775,9 @@ function PayrollDetailModal({ payroll, onClose, onRedownload, onDownloadNominaOn
                                 editBusy={editBusy}
                                 onRemoveWorker={handleRemoveWorker}
                                 cols="cash"
+                                snapshot={snapshot}
+                                snapshotLoading={snapshotLoading}
+                                catalogs={catalogs}
                               />
                             ))}
                           </tbody>
@@ -4030,16 +4087,10 @@ function CashEstimationModal({ cashItems, payrollName, onClose }) {
 // descuentos/neto). Botón "📅 Ver días" abre el WorkerSummaryModal completo.
 function WorkerDetailRow({
   item, expanded, onToggle, onShowSummary, cycleDetails, displayCycleLabel,
-  editMode, editBusy, onRemoveWorker, cols,
+  editMode, editBusy, onRemoveWorker, cols, snapshot, snapshotLoading, catalogs,
 }) {
   const isBank = cols === "bank";
   const colSpan = isBank ? (editMode ? 8 : 7) : (editMode ? 4 : 3);
-  const byCycleEntries = Object.entries(item.byCycle || {})
-    .filter(([, v]) => Number(v) > 0)
-    .map(([cid, amt]) => {
-      const c = cycleDetails.find((x) => x.id === cid);
-      return { id: cid, label: c ? displayCycleLabel(c) : cid, faena: c?.faenaName, subfaena: c?.subfaenaName, amount: Number(amt) };
-    });
   return (
     <>
       <tr
@@ -4079,49 +4130,43 @@ function WorkerDetailRow({
         )}
       </tr>
       {expanded && (
-        <tr className="border-t border-[var(--color-border)] bg-[var(--color-surface-2)]/60">
-          <td colSpan={colSpan} className="px-3 py-2.5">
-            <div className="flex flex-col gap-2 text-xs">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="font-semibold text-[var(--color-text)]">Detalle del pago en esta nómina</span>
+        <tr className="border-t border-[var(--color-border)] bg-[var(--color-surface-2)]/40">
+          <td colSpan={colSpan} className="px-3 py-3">
+            <div className="space-y-3">
+              {/* Header chico con líder/email + atajo al detalle completo */}
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                <div className="flex flex-wrap items-center gap-2">
+                  {item.groupLeader && (
+                    <span className="rounded bg-[var(--color-surface)] px-1.5 py-0.5 text-[10px]">
+                      👥 <b>{item.groupLeader}</b>
+                    </span>
+                  )}
+                  {item.email && (
+                    <span className="text-[10px] text-[var(--color-muted)]">✉ {item.email}</span>
+                  )}
+                </div>
                 <button
                   type="button"
                   onClick={onShowSummary}
                   className="rounded-md border border-[var(--color-accent)] bg-[var(--color-accent-soft)] px-2 py-0.5 text-[10px] font-medium text-[var(--color-accent)] hover:bg-[var(--color-accent)] hover:text-[var(--color-accent-fg)]"
+                  title="Abrir el detalle completo del trabajador con todos sus ciclos"
                 >
-                  📅 Ver días completos
+                  📅 Ver historial completo
                 </button>
-                {item.groupLeader && (
-                  <span className="rounded bg-[var(--color-surface)] px-1.5 py-0.5 text-[10px]">
-                    👥 Líder: <b>{item.groupLeader}</b>
-                  </span>
-                )}
-                {item.email && (
-                  <span className="text-[10px] text-[var(--color-muted)]">✉ {item.email}</span>
-                )}
               </div>
 
-              {byCycleEntries.length > 0 && (
-                <div>
-                  <div className="mb-0.5 text-[10px] uppercase tracking-wide text-[var(--color-muted)]">Por ciclo</div>
-                  <div className="grid gap-1 sm:grid-cols-2">
-                    {byCycleEntries.map((e) => (
-                      <div key={e.id} className="flex items-center justify-between gap-2 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1">
-                        <div className="min-w-0">
-                          <div className="truncate font-medium">{e.label}</div>
-                          {(e.faena || e.subfaena) && (
-                            <div className="truncate text-[10px] text-[var(--color-muted)]">
-                              {e.faena}{e.subfaena ? ` / ${e.subfaena}` : ""}
-                            </div>
-                          )}
-                        </div>
-                        <span className="shrink-0 font-semibold tabular-nums">{fmtCurrency(e.amount)}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
+              {/* Detalle por ciclo estilo Workers: tabla por ciclo con
+                  encabezado faena · subfaena · ciclo y filas labor × día. */}
+              <WorkerPaidDetailTables
+                item={item}
+                snapshot={snapshot}
+                snapshotLoading={snapshotLoading}
+                cycleDetails={cycleDetails}
+                displayCycleLabel={displayCycleLabel}
+                catalogs={catalogs}
+              />
 
+              {/* Resumen de pago — bruto/anticipos/bonos/neto */}
               <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
                 <div className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] p-1.5">
                   <div className="text-[9px] uppercase text-[var(--color-muted)]">Bruto</div>
@@ -4160,6 +4205,385 @@ function WorkerDetailRow({
       )}
     </>
   );
+}
+
+// Renderiza una tabla por ciclo con el detalle pagado en la nómina,
+// imitando el formato del módulo Trabajadores (faena · subfaena · ciclo
+// como header, filas por labor × día ordenadas cronológicamente). Si el
+// snapshot no está cargado todavía, muestra el fallback "Por ciclo"
+// agregado por monto. Si la nómina es vieja y no tiene snapshot, lo mismo.
+function WorkerPaidDetailTables({ item, snapshot, snapshotLoading, cycleDetails, displayCycleLabel, catalogs }) {
+  const toast = useToast();
+  const [busy, setBusy] = useState("");
+  const captureRef = useRef(null);
+
+  // Fallback "Por ciclo" simple (montos sin detalle día×labor).
+  const byCycleEntries = Object.entries(item.byCycle || {})
+    .filter(([, v]) => Number(v) > 0)
+    .map(([cid, amt]) => {
+      const c = cycleDetails.find((x) => x.id === cid);
+      return { id: cid, label: c ? displayCycleLabel(c) : cid, faena: c?.faenaName, subfaena: c?.subfaenaName, amount: Number(amt) };
+    });
+
+  if (snapshotLoading) {
+    return <div className="rounded-md border border-dashed border-[var(--color-border)] px-3 py-2 text-[11px] text-[var(--color-muted)]">Cargando detalle…</div>;
+  }
+
+  // Sin snapshot: mostramos la grilla básica de Por ciclo (legacy).
+  const wds = snapshot ? (snapshot.workdays || []).filter((w) => w.workerRut === item.rut) : [];
+  if (!snapshot || wds.length === 0) {
+    if (byCycleEntries.length === 0) return null;
+    return (
+      <div>
+        <div className="mb-0.5 text-[10px] uppercase tracking-wide text-[var(--color-muted)]">Por ciclo</div>
+        <div className="grid gap-1 sm:grid-cols-2">
+          {byCycleEntries.map((e) => (
+            <div key={e.id} className="flex items-center justify-between gap-2 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-xs">
+              <div className="min-w-0">
+                <div className="truncate font-medium">{e.label}</div>
+                {(e.faena || e.subfaena) && (
+                  <div className="truncate text-[10px] text-[var(--color-muted)]">
+                    {e.faena}{e.subfaena ? ` / ${e.subfaena}` : ""}
+                  </div>
+                )}
+              </div>
+              <span className="shrink-0 font-semibold tabular-nums">{fmtCurrency(e.amount)}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  // Con snapshot: agrupar workdays por ciclo, luego por (labor, fecha).
+  const cyclesById = new Map((snapshot.cycles || []).map((c) => [c.id, c]));
+  const wdsByCycle = new Map();
+  for (const wd of wds) {
+    if (!wdsByCycle.has(wd.cycleId)) wdsByCycle.set(wd.cycleId, []);
+    wdsByCycle.get(wd.cycleId).push(wd);
+  }
+
+  // Para cada ciclo, agrupar workdays por (laborId, date) y producir una
+  // fila con qty + amount. Lo que se muestra en la columna "Producción"
+  // depende del tipo de labor (cosecha → kg/unidad, trato → unidad del
+  // catálogo, etc.).
+  const cycleSections = [...wdsByCycle.entries()].map(([cycleId, list]) => {
+    const cycle = cyclesById.get(cycleId);
+    const detail = cycleDetails.find((c) => c.id === cycleId);
+    const laborsById = new Map((cycle?.labors || []).map((l) => [l.id, l]));
+    const groups = new Map();
+    for (const wd of list) {
+      const key = `${wd.laborId}__${wd.date}`;
+      if (!groups.has(key)) {
+        groups.set(key, {
+          laborId: wd.laborId,
+          labor: laborsById.get(wd.laborId),
+          date: wd.date || "",
+          kilos: 0,
+          jornadas: 0,
+          tratoQty: 0,
+          tratoUnits: new Set(), // unidades de catálogo recolectadas de los tiers
+          overtimeHours: 0,
+          amount: 0,
+          containers: new Set(),
+        });
+      }
+      const g = groups.get(key);
+      const labor = g.labor;
+      const wdAmount = Number(wd.amount) || 0;
+      const wdQty = Number(wd.qty) || 0;
+      g.amount += wdAmount;
+      if (labor?.type === "cosecha") {
+        g.kilos += wdQty;
+        if (wd.containerY != null) g.containers.add(Number(wd.containerY));
+      } else if (labor?.type === "trato") {
+        // Para trato, la unidad del catálogo (Planta/Metro/...) NO está en
+        // wd.tiers — está configurada por día en cycle.dayPrices (siempre
+        // presente en el snapshot, viejo o nuevo). Resolvemos consultando
+        // getTratoTiers para ese (labor, fecha) y mapeamos índice → unit.
+        const dayTiers = getTratoTiers(cycle?.dayPrices || {}, wd.laborId, wd.date);
+        const unitByIdx = new Map();
+        for (const t of dayTiers) {
+          if (t.unit != null) unitByIdx.set(t.index, Number(t.unit));
+        }
+        if (wd.tiers && typeof wd.tiers === "object") {
+          for (const k in wd.tiers) {
+            const t = wd.tiers[k];
+            g.tratoQty += Number(t?.qty) || 0;
+            // Tier key "t0", "t1", ... → índice numérico para mapear a unit
+            const raw = String(k);
+            const idx = raw.startsWith("t") ? Number(raw.slice(1)) : Number(raw);
+            if (Number.isFinite(idx) && unitByIdx.has(idx)) {
+              g.tratoUnits.add(unitByIdx.get(idx));
+            } else if (t?.unit != null) {
+              // Algunos snapshots viejos pueden traer unit directo en el tier.
+              g.tratoUnits.add(Number(t.unit));
+            }
+          }
+        } else {
+          g.tratoQty += wdQty;
+          // Single-tier legacy: usar primer tier configurado con unidad.
+          if (unitByIdx.size > 0) {
+            g.tratoUnits.add([...unitByIdx.values()][0]);
+          }
+        }
+        // Fallback final: labor.tratoUnit (snapshots nuevos lo persisten).
+        if (g.tratoUnits.size === 0 && labor?.tratoUnit != null) {
+          g.tratoUnits.add(Number(labor.tratoUnit));
+        }
+      } else if (labor?.type === "tratoHE") {
+        g.jornadas += wdQty;
+        g.overtimeHours += Number(wd.overtimeHours) || 0;
+      } else {
+        // main / supervision / extra: 1 jornada por wd
+        g.jornadas += 1;
+      }
+    }
+    const rows = [...groups.values()].sort((a, b) => {
+      if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+      return (a.labor?.name || "").localeCompare(b.labor?.name || "", "es");
+    });
+    const totalAmount = rows.reduce((s, r) => s + r.amount, 0);
+    const header = [detail?.faenaName, detail?.subfaenaName, cycle?.label || cycleId]
+      .filter(Boolean)
+      .join(" · ");
+    return { cycleId, header, rows, totalAmount };
+  })
+  .sort((a, b) => a.header.localeCompare(b.header, "es"));
+
+  if (cycleSections.length === 0) return null;
+
+  const totalAllCycles = cycleSections.reduce((s, sec) => s + sec.totalAmount, 0);
+
+  // Texto plano: misma estructura visible que las tablas, alineado para
+  // que se vea bien en WhatsApp / nota (monospace).
+  const buildPlainText = () => {
+    const lines = [];
+    lines.push(`📅 ${item.name} (${formatRutForDisplay(item.rut)})`);
+    lines.push(`Total: ${fmtCurrency(totalAllCycles)}`);
+    lines.push("");
+    for (const sec of cycleSections) {
+      lines.push(sec.header);
+      lines.push("─".repeat(Math.min(sec.header.length, 60)));
+      lines.push("Detalle Jornada          | Fecha   | Producción            | Monto");
+      for (const r of sec.rows) {
+        const det = laborDisplayLabel(r.labor, catalogs);
+        const fecha = workerDetailDateLabel(r.date);
+        const prod = formatWorkerDetailProd(r, catalogs);
+        const monto = fmtCurrency(r.amount);
+        lines.push(
+          `${det.padEnd(24, " ").slice(0, 24)} | ${fecha.padEnd(7, " ")} | ${prod.padEnd(21, " ").slice(0, 21)} | ${monto}`,
+        );
+      }
+      lines.push(`Subtotal ciclo: ${fmtCurrency(sec.totalAmount)}`);
+      lines.push("");
+    }
+    return lines.join("\n");
+  };
+
+  const handleCopyText = async () => {
+    setBusy("text");
+    try {
+      await navigator.clipboard.writeText(buildPlainText());
+      toast.success("Texto copiado");
+    } catch (err) {
+      toast.error("Error al copiar: " + (err.message || err));
+    } finally { setBusy(""); }
+  };
+
+  const handleCopyImage = async () => {
+    if (!captureRef.current) return;
+    setBusy("image");
+    try {
+      const blob = await captureFullWidth(captureRef.current);
+      if (!blob) throw new Error("No se pudo generar la imagen");
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+      toast.success("Imagen copiada");
+    } catch (err) {
+      toast.error("Error al copiar: " + (err.message || err));
+    } finally { setBusy(""); }
+  };
+
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="text-[10px] uppercase tracking-wide text-[var(--color-muted)]">
+          Detalle pagado por ciclo
+        </div>
+        <div className="flex gap-1">
+          <button
+            type="button"
+            onClick={handleCopyText}
+            disabled={busy === "text"}
+            title="Copiar el detalle como texto plano"
+            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-0.5 text-[10px] hover:bg-[var(--color-accent-soft)] disabled:opacity-50"
+          >
+            {busy === "text" ? "..." : "📋 Texto"}
+          </button>
+          <button
+            type="button"
+            onClick={handleCopyImage}
+            disabled={busy === "image"}
+            title="Copiar el detalle como imagen (PNG)"
+            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-0.5 text-[10px] hover:bg-[var(--color-accent-soft)] disabled:opacity-50"
+          >
+            {busy === "image" ? "..." : "📋 Imagen"}
+          </button>
+        </div>
+      </div>
+      <div ref={captureRef} style={{ background: "#fff", padding: 8 }} className="space-y-2 rounded-md">
+        <div style={{ fontSize: 11, color: "#444", borderBottom: "1px solid #ddd", paddingBottom: 4 }}>
+          <b style={{ color: "#000" }}>{item.name}</b>
+          <span style={{ marginLeft: 6, fontFamily: "ui-monospace, monospace" }}>{formatRutForDisplay(item.rut)}</span>
+          <span style={{ marginLeft: 8, color: "#666" }}>Total: <b style={{ color: "#000" }}>{fmtCurrency(totalAllCycles)}</b></span>
+        </div>
+        {cycleSections.map((sec) => (
+          <div key={sec.cycleId} className="overflow-x-auto">
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#000", marginBottom: 4 }}>{sec.header}</div>
+            <table style={{ borderCollapse: "collapse", width: "100%" }}>
+              <thead>
+                <tr style={{ background: "#9dc3e6" }}>
+                  <th style={WORKER_DETAIL_CELL_H}>Detalle Jornada</th>
+                  <th style={WORKER_DETAIL_CELL_H}>Fecha</th>
+                  <th style={{ ...WORKER_DETAIL_CELL_H, textAlign: "right" }}>Producción</th>
+                  <th style={{ ...WORKER_DETAIL_CELL_H, textAlign: "right" }}>Monto</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sec.rows.map((r, i) => (
+                  <tr key={i}>
+                    <td style={WORKER_DETAIL_CELL}>
+                      <div>{r.labor?.name || r.laborId}</div>
+                      <div style={{ fontSize: 9, color: "#777", marginTop: 1 }}>
+                        {laborSubtypeLabel(r.labor, catalogs)}
+                      </div>
+                    </td>
+                    <td style={{ ...WORKER_DETAIL_CELL, fontFamily: "ui-monospace, monospace" }}>{workerDetailDateLabel(r.date)}</td>
+                    <td style={{ ...WORKER_DETAIL_CELL, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                      {formatWorkerDetailProd(r, catalogs)}
+                    </td>
+                    <td style={{ ...WORKER_DETAIL_CELL, textAlign: "right", fontVariantNumeric: "tabular-nums", fontWeight: 600 }}>
+                      {fmtCurrency(r.amount)}
+                    </td>
+                  </tr>
+                ))}
+                <tr style={{ background: "#c6efce", fontWeight: 700 }}>
+                  <td style={WORKER_DETAIL_CELL} colSpan={3}>Subtotal ciclo</td>
+                  <td style={{ ...WORKER_DETAIL_CELL, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                    {fmtCurrency(sec.totalAmount)}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+const WORKER_DETAIL_CELL_H = { border: "1px solid #555", padding: "5px 7px", fontSize: 11, fontWeight: 700, textAlign: "left", color: "#000" };
+const WORKER_DETAIL_CELL = { border: "1px solid #999", padding: "4px 7px", fontSize: 11, color: "#000" };
+
+// Captura un nodo a PNG SIN que el resultado quede cortado por el scroll
+// horizontal del contenedor actual. Estrategia: clonar el nodo a un wrapper
+// off-screen, sacarle el overflow a los hijos para que las tablas se
+// extiendan a su ancho natural, capturar el clon, removerlo. El nodo
+// original queda intacto — no hay flicker visual.
+async function captureFullWidth(node) {
+  const clone = node.cloneNode(true);
+  const wrapper = document.createElement("div");
+  // off-screen pero renderizado: html-to-image necesita layout real.
+  wrapper.style.cssText = "position: fixed; left: -99999px; top: 0; pointer-events: none; background: #ffffff;";
+  // Background del clon explícito por las dudas.
+  clone.style.background = "#ffffff";
+  clone.style.maxWidth = "none";
+  clone.style.width = "max-content";
+  wrapper.appendChild(clone);
+  document.body.appendChild(wrapper);
+  try {
+    // Desactivar overflow en TODO el subárbol (incluye divs con
+    // overflow-x-auto envolviendo las tablas).
+    const all = clone.querySelectorAll("*");
+    all.forEach((el) => {
+      el.style.overflow = "visible";
+      el.style.overflowX = "visible";
+      el.style.overflowY = "visible";
+      el.style.maxWidth = "none";
+    });
+    // Reflow.
+    await new Promise((r) => requestAnimationFrame(r));
+    const w = clone.scrollWidth;
+    const h = clone.scrollHeight;
+    return await toBlob(clone, {
+      backgroundColor: "#ffffff",
+      pixelRatio: 2,
+      width: w,
+      height: h,
+    });
+  } finally {
+    document.body.removeChild(wrapper);
+  }
+}
+
+const WD_MONTHS = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
+function workerDetailDateLabel(d) {
+  if (!d) return "";
+  const m = String(d).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return d;
+  return `${m[3]}-${WD_MONTHS[Number(m[2]) - 1] || m[2]}`;
+}
+
+// Etiqueta secundaria (debajo del nombre) con el tipo del catálogo:
+// trato → tratoTypeLabel (Poda, Amarre, ...) + unidad si está
+// tratoHE → "Tratos HE (Manejo/Supervisión/...)"
+// cosecha → "Cosecha"
+// main / supervision / extra → labels legibles.
+function laborSubtypeLabel(labor, catalogs) {
+  if (!labor) return "";
+  const t = labor.type;
+  if (t === "cosecha") return "Cosecha";
+  if (t === "trato") {
+    const typeLbl = labor.tratoType != null ? tratoTypeLabel(catalogs, labor.tratoType) : "Trato";
+    const unitLbl = labor.tratoUnit != null ? tratoUnitLabel(catalogs, labor.tratoUnit) : null;
+    return unitLbl ? `${typeLbl} · ${unitLbl}` : typeLbl;
+  }
+  if (t === "tratoHE") return "Tratos HE / Jornadas";
+  if (t === "main") return "Jornada principal";
+  if (t === "supervision") return "Supervisión";
+  if (t === "extra") return "Extra";
+  return t || "";
+}
+
+// Etiqueta corta para el texto plano: nombre + subtype entre paréntesis.
+function laborDisplayLabel(labor, catalogs) {
+  const name = labor?.name || "";
+  const sub = laborSubtypeLabel(labor, catalogs);
+  return sub ? `${name} (${sub})` : name;
+}
+
+function formatWorkerDetailProd(r, catalogs) {
+  const num = (v) => new Intl.NumberFormat("es-CL", { maximumFractionDigits: 2 }).format(Number(v) || 0);
+  if (r.labor?.type === "cosecha") {
+    const unit = r.containers.size > 0 ? cosechaUnit(catalogs, r.containers).toLowerCase() : "kg";
+    return r.kilos > 0 ? `${num(r.kilos)} ${unit}` : "—";
+  }
+  if (r.labor?.type === "trato") {
+    if (r.tratoQty === 0) return "—";
+    // Usar la(s) unidad(es) del catálogo si están disponibles. Si hay varias
+    // (multi-tier con unidades distintas) las juntamos con "/".
+    const unitNames = [...r.tratoUnits]
+      .map((u) => tratoUnitLabel(catalogs, u))
+      .filter(Boolean);
+    const unitStr = unitNames.length > 0 ? " " + unitNames.join("/").toLowerCase() : "";
+    return `${num(r.tratoQty)}${unitStr}`;
+  }
+  if (r.labor?.type === "tratoHE") {
+    const base = r.jornadas > 0 ? `${num(r.jornadas)} jornadas` : "";
+    const ot = r.overtimeHours > 0 ? `${num(r.overtimeHours)}h HE` : "";
+    return [base, ot].filter(Boolean).join(" · ") || "—";
+  }
+  return r.jornadas > 0 ? `${num(r.jornadas)} jornadas` : "—";
 }
 
 // ─────────────────────────── Workers History ───────────────────────────
