@@ -57,6 +57,78 @@ import { tripsService } from "../services/transportsService";
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
+// Cell editor custom para inputs numéricos del grid. Cuando el usuario abre
+// una celda que ya tiene un valor, arrancamos con `=<valor>` para que le
+// baste tipear `+50` (o `-10`, `*2`, `/3`) al final y aprovechar el parser
+// de fórmulas de parseAmount(). Si el usuario disparó la edición tipeando
+// un carácter (dígito u operador), respetamos ese input crudo — es el
+// comportamiento estándar de AG-Grid, sería confuso perderlo.
+//
+// AG-Grid v33+ usa un proxy para React cell editors: los props `initialValue`
+// + `onValueChange` son el canal oficial para propagar el valor editado. El
+// proxy expone `getValue()` que devuelve internamente lo que reportamos via
+// onValueChange — NO lo que exponemos con useImperativeHandle o
+// useGridCellEditor (esos hooks aplican a filter/menu, no cell editor
+// stateless). Por eso el value se leía como si nada hubiera cambiado.
+function FormulaCellEditor({ initialValue, onValueChange, eventKey }) {
+  const startFromKey = eventKey && /^[\d+\-*/(.]$/.test(eventKey);
+  const initial = startFromKey
+    ? String(eventKey)
+    : (initialValue != null && initialValue !== "" && Number(initialValue) !== 0)
+      ? `=${initialValue}`
+      : String(initialValue == null ? "" : initialValue);
+  const [text, setText] = useState(initial);
+  const inputRef = useRef(null);
+
+  // Sincronizar el valor inicial (ya sea `=100` cuando el user solo abrió, o
+  // el char tipeado) con el proxy de AG-Grid — sino, si el usuario hace
+  // Enter sin tocar, quedaría con el value original numérico sin el prefix
+  // (que casualmente parseAmount evalúa igual). Es más limpio propagarlo.
+  useEffect(() => {
+    onValueChange?.(parseAmount(initial));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!inputRef.current) return;
+    inputRef.current.focus();
+    // Cursor al final para que sea instantáneo agregar +/-/*/÷ al valor.
+    const len = inputRef.current.value.length;
+    inputRef.current.setSelectionRange(len, len);
+  }, []);
+
+  const handleChange = (e) => {
+    const v = e.target.value;
+    setText(v);
+    // Propagar cada tecla al proxy — evaluamos la fórmula acá para que
+    // AG-Grid vea el número resuelto. Si la expresión es inválida a mitad
+    // de tipeo (ej "=100+"), parseAmount devuelve 0; no importa porque el
+    // usuario sigue tipeando y en el siguiente onChange queda bien.
+    onValueChange?.(parseAmount(v));
+  };
+
+  return (
+    <input
+      ref={inputRef}
+      type="text"
+      value={text}
+      onChange={handleChange}
+      style={{
+        width: "100%",
+        height: "100%",
+        border: "none",
+        outline: "none",
+        padding: "0 4px",
+        fontFamily: "inherit",
+        fontSize: "inherit",
+        textAlign: "right",
+        background: "transparent",
+        color: "#000",
+      }}
+    />
+  );
+}
+
 const todayStr = () => new Date().toISOString().slice(0, 10);
 const newId = () => (crypto?.randomUUID?.() || `id_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`);
 
@@ -2357,6 +2429,7 @@ export default function CycleDetail() {
           width: isMobile ? 78 : 120,
           type: "numericColumn",
           valueParser: (p) => parseAmount(p.newValue),
+          cellEditor: FormulaCellEditor,
           cellRenderer: (p) => {
             const qty = Number(p.value) || 0;
             const amt = Number(p.data?.[`${d}__${c.key}__amt`]) || 0;
@@ -2414,6 +2487,7 @@ export default function CycleDetail() {
           width: isMobile ? 78 : 120,
           type: "numericColumn",
           valueParser: (p) => parseAmount(p.newValue),
+          cellEditor: FormulaCellEditor,
           cellRenderer: (p) => {
             const qty = Number(p.value) || 0;
             const amt = Number(p.data?.[`${d}__${t.key}__amt`]) || 0;
@@ -2528,6 +2602,7 @@ export default function CycleDetail() {
               width: isMobile ? 70 : 110,
               type: "numericColumn",
               valueParser: (p) => parseAmount(p.newValue),
+              cellEditor: FormulaCellEditor,
               valueFormatter: (p) => (p.value ? fmtCurrency(p.value) : ""),
               headerTooltip: `Base del día (monto). Sugerido: ${fmtCurrency(effectiveDayPrice(labor, cfg))}. Click para usar el sugerido si está vacío.`,
               cellStyle: { textAlign: "right" },
@@ -2569,6 +2644,7 @@ export default function CycleDetail() {
               width: 60,
               type: "numericColumn",
               valueParser: (p) => parseAmount(p.newValue),
+              cellEditor: FormulaCellEditor,
               valueFormatter: (p) => (p.value ? `${p.value}h` : ""),
               headerTooltip: "Horas extras",
             },
@@ -2626,6 +2702,7 @@ export default function CycleDetail() {
         width: isMobile ? 70 : 110,
         type: "numericColumn",
         valueParser: (p) => parseAmount(p.newValue),
+        cellEditor: FormulaCellEditor,
         valueFormatter: (p) => fmtCurrency(p.value),
         headerTooltip: `${d} · Sugerido: ${fmtCurrency(suggested)}. Click en celda vacía para usarlo, doble click para editar.`,
         cellRenderer: (p) => {
