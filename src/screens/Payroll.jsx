@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { toBlob } from "html-to-image";
+import { captureFullWidthBlob } from "../utils/imageCapture";
 import {
   faenasService,
   subfaenasService,
@@ -3918,10 +3918,7 @@ function CashEstimationModal({ cashItems, payrollName, onClose }) {
     if (!captureRef.current) return;
     setBusy("image");
     try {
-      const blob = await toBlob(captureRef.current, {
-        backgroundColor: "#ffffff",
-        pixelRatio: 2,
-      });
+      const blob = await captureFullWidthBlob(captureRef.current);
       if (!blob) throw new Error("No se pudo generar la imagen");
       await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
       toast.success("Imagen copiada");
@@ -4395,7 +4392,7 @@ function WorkerPaidDetailTables({ item, snapshot, snapshotLoading, cycleDetails,
     if (!captureRef.current) return;
     setBusy("image");
     try {
-      const blob = await captureFullWidth(captureRef.current);
+      const blob = await captureFullWidthBlob(captureRef.current);
       if (!blob) throw new Error("No se pudo generar la imagen");
       await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
       toast.success("Imagen copiada");
@@ -4484,47 +4481,6 @@ function WorkerPaidDetailTables({ item, snapshot, snapshotLoading, cycleDetails,
 
 const WORKER_DETAIL_CELL_H = { border: "1px solid #555", padding: "5px 7px", fontSize: 11, fontWeight: 700, textAlign: "left", color: "#000" };
 const WORKER_DETAIL_CELL = { border: "1px solid #999", padding: "4px 7px", fontSize: 11, color: "#000" };
-
-// Captura un nodo a PNG SIN que el resultado quede cortado por el scroll
-// horizontal del contenedor actual. Estrategia: clonar el nodo a un wrapper
-// off-screen, sacarle el overflow a los hijos para que las tablas se
-// extiendan a su ancho natural, capturar el clon, removerlo. El nodo
-// original queda intacto — no hay flicker visual.
-async function captureFullWidth(node) {
-  const clone = node.cloneNode(true);
-  const wrapper = document.createElement("div");
-  // off-screen pero renderizado: html-to-image necesita layout real.
-  wrapper.style.cssText = "position: fixed; left: -99999px; top: 0; pointer-events: none; background: #ffffff;";
-  // Background del clon explícito por las dudas.
-  clone.style.background = "#ffffff";
-  clone.style.maxWidth = "none";
-  clone.style.width = "max-content";
-  wrapper.appendChild(clone);
-  document.body.appendChild(wrapper);
-  try {
-    // Desactivar overflow en TODO el subárbol (incluye divs con
-    // overflow-x-auto envolviendo las tablas).
-    const all = clone.querySelectorAll("*");
-    all.forEach((el) => {
-      el.style.overflow = "visible";
-      el.style.overflowX = "visible";
-      el.style.overflowY = "visible";
-      el.style.maxWidth = "none";
-    });
-    // Reflow.
-    await new Promise((r) => requestAnimationFrame(r));
-    const w = clone.scrollWidth;
-    const h = clone.scrollHeight;
-    return await toBlob(clone, {
-      backgroundColor: "#ffffff",
-      pixelRatio: 2,
-      width: w,
-      height: h,
-    });
-  } finally {
-    document.body.removeChild(wrapper);
-  }
-}
 
 const WD_MONTHS = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
 function workerDetailDateLabel(d) {

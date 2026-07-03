@@ -1,5 +1,5 @@
 import { forwardRef, useEffect, useMemo, useRef, useState } from "react";
-import { toPng, toBlob } from "html-to-image";
+import { captureFullWidthBlob, captureFullWidthDataUrl } from "../utils/imageCapture";
 import Modal from "../components/Modal";
 import TextField from "../components/TextField";
 import Select from "../components/Select";
@@ -1776,7 +1776,7 @@ function PrintMultipleModal({
         const node = itemRefs.current[i];
         if (!node) continue;
         // eslint-disable-next-line no-await-in-loop
-        const blob = await toBlob(node, { backgroundColor: "#ffffff", pixelRatio: 2 });
+        const blob = await captureFullWidthBlob(node);
         if (!blob) continue;
         const it = items[i];
         const base = (it.carrier?.alias || it.payment.carrierId || "resumen")
@@ -2226,10 +2226,7 @@ function BalanceSummary({ carriers, reloadVersion }) {
     if (!printRef.current) return;
     setBusy("copy");
     try {
-      const blob = await toBlob(printRef.current, {
-        backgroundColor: "#ffffff",
-        pixelRatio: 2,
-      });
+      const blob = await captureFullWidthBlob(printRef.current);
       if (!blob) throw new Error("No se pudo generar la imagen");
       await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
       toast.success("Imagen copiada");
@@ -2244,10 +2241,7 @@ function BalanceSummary({ carriers, reloadVersion }) {
     if (!printRef.current) return;
     setBusy("download");
     try {
-      const dataUrl = await toPng(printRef.current, {
-        backgroundColor: "#ffffff",
-        pixelRatio: 2,
-      });
+      const dataUrl = await captureFullWidthDataUrl(printRef.current);
       const link = document.createElement("a");
       link.download = "balance-transportes.png";
       link.href = dataUrl;
@@ -2877,7 +2871,7 @@ function PaymentDetailModal({ open, onClose, payment, carrier, carriers = [], fa
     if (!printRef.current) return;
     setBusy("download");
     try {
-      const dataUrl = await toPng(printRef.current, { backgroundColor: "#ffffff", pixelRatio: 2 });
+      const dataUrl = await captureFullWidthDataUrl(printRef.current);
       const link = document.createElement("a");
       link.download = `transporte_${carrier?.alias || "resumen"}_${payment.id}.png`;
       link.href = dataUrl;
@@ -2893,7 +2887,7 @@ function PaymentDetailModal({ open, onClose, payment, carrier, carriers = [], fa
     if (!printRef.current) return;
     setBusy("copy");
     try {
-      const blob = await toBlob(printRef.current, { backgroundColor: "#ffffff", pixelRatio: 2 });
+      const blob = await captureFullWidthBlob(printRef.current);
       if (!blob) throw new Error("No se pudo generar la imagen");
       await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
       toast.success("Imagen copiada al portapapeles");
@@ -3947,10 +3941,7 @@ function QuincenasBalanceSummary({ carriers, payrolls, payments }) {
     if (!printRef.current) return;
     setBusy("copy");
     try {
-      const blob = await toBlob(printRef.current, {
-        backgroundColor: "#ffffff",
-        pixelRatio: 2,
-      });
+      const blob = await captureFullWidthBlob(printRef.current);
       if (!blob) throw new Error("No se pudo generar la imagen");
       await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
       toast.success("Imagen copiada");
@@ -3965,10 +3956,7 @@ function QuincenasBalanceSummary({ carriers, payrolls, payments }) {
     if (!printRef.current) return;
     setBusy("download");
     try {
-      const dataUrl = await toPng(printRef.current, {
-        backgroundColor: "#ffffff",
-        pixelRatio: 2,
-      });
+      const dataUrl = await captureFullWidthDataUrl(printRef.current);
       const link = document.createElement("a");
       link.download = "balance-quincenas.png";
       link.href = dataUrl;
@@ -5108,7 +5096,7 @@ function PayrollDetailModal({
     if (!printRef.current) return;
     setBusy("download");
     try {
-      const dataUrl = await toPng(printRef.current, { backgroundColor: "#ffffff", pixelRatio: 2 });
+      const dataUrl = await captureFullWidthDataUrl(printRef.current);
       const link = document.createElement("a");
       link.download = `quincena_${payroll.name.replace(/[^\w-]+/g, "_")}.png`;
       link.href = dataUrl;
@@ -5124,7 +5112,7 @@ function PayrollDetailModal({
     if (!printRef.current) return;
     setBusy("copy");
     try {
-      const blob = await toBlob(printRef.current, { backgroundColor: "#ffffff", pixelRatio: 2 });
+      const blob = await captureFullWidthBlob(printRef.current);
       if (!blob) throw new Error("No se pudo generar la imagen");
       await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
       toast.success("Imagen copiada al portapapeles");
