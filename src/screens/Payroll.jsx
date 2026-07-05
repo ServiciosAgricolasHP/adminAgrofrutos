@@ -23,6 +23,7 @@ import {
   restoreAdvancesFromPayroll,
   advanceRemaining,
   advanceSign,
+  advanceTypeMeta,
 } from "../services/advancesService";
 import { formatRutForDisplay } from "../utils/rutUtils";
 import { bankName, ACCOUNT_TYPES, isCashBank, CASH_BANK_CODE } from "../utils/banks";
@@ -4212,6 +4213,10 @@ function WorkerDetailRow({
 function WorkerPaidDetailTables({ item, snapshot, snapshotLoading, cycleDetails, displayCycleLabel, catalogs }) {
   const toast = useToast();
   const [busy, setBusy] = useState("");
+  // porCiclo (default): una tabla por ciclo con subtotales, más un bloque
+  // final de ajustes. cronologico: todo en una sola tabla ordenada por
+  // fecha, con los anticipos/bonos interleaved en su fecha real.
+  const [viewMode, setViewMode] = useState("porCiclo");
   const captureRef = useRef(null);
 
   // Fallback "Por ciclo" simple (montos sin detalle día×labor).
@@ -4352,29 +4357,115 @@ function WorkerPaidDetailTables({ item, snapshot, snapshotLoading, cycleDetails,
 
   const totalAllCycles = cycleSections.reduce((s, sec) => s + sec.totalAmount, 0);
 
-  // Texto plano: misma estructura visible que las tablas, alineado para
-  // que se vea bien en WhatsApp / nota (monospace).
+  // Anticipos y bonos aplicados en esta nómina — con fecha resuelta del
+  // snapshot.advances. Sin snapshot.advances (nóminas viejas) la date queda
+  // vacía y esos ajustes van al final en cronológico.
+  const advancesById = new Map((snapshot?.advances || []).map((a) => [a.id, a]));
+  const anticipoRows = (item.anticipoApplications || [])
+    .map((app) => {
+      const adv = advancesById.get(app.advanceId);
+      return {
+        kind: "anticipo",
+        date: adv?.date || "",
+        amount: Number(app.amount) || 0,
+        note: adv?.note || "",
+        typeMeta: advanceTypeMeta(adv?.type || "anticipo"),
+      };
+    })
+    .filter((r) => r.amount > 0);
+  const bonoRows = (item.bonoApplications || [])
+    .map((app) => {
+      const adv = advancesById.get(app.advanceId);
+      return {
+        kind: "bono",
+        date: adv?.date || "",
+        amount: Number(app.amount) || 0,
+        note: adv?.note || "",
+        typeMeta: advanceTypeMeta(adv?.type || "bono"),
+      };
+    })
+    .filter((r) => r.amount > 0);
+
+  // Vista cronológica: mezcla jornadas + ajustes en una sola tabla ordenada
+  // por fecha. Ajustes sin fecha (snapshots viejos) quedan al final.
+  const KIND_ORDER = { work: 0, anticipo: 1, bono: 2 };
+  const chronoRows = [];
+  for (const sec of cycleSections) {
+    for (const r of sec.rows) {
+      chronoRows.push({ kind: "work", date: r.date, cycleHeader: sec.header, row: r });
+    }
+  }
+  for (const a of anticipoRows) chronoRows.push(a);
+  for (const b of bonoRows) chronoRows.push(b);
+  chronoRows.sort((a, b) => {
+    const da = a.date || "9999-12-31";
+    const db = b.date || "9999-12-31";
+    if (da !== db) return da < db ? -1 : 1;
+    return (KIND_ORDER[a.kind] ?? 9) - (KIND_ORDER[b.kind] ?? 9);
+  });
+
+  // Resumen para incluir en la imagen — item ya trae los totales calculados.
+  const bruto = Number(item.grossAmount || item.amount || 0);
+  const anticiposTotal = Number(item.advance) || 0;
+  const bonosTotal = Number(item.bonus) || 0;
+  const neto = Number(item.amount) || 0;
+
+  // Texto plano — cambia según viewMode.
   const buildPlainText = () => {
     const lines = [];
     lines.push(`📅 ${item.name} (${formatRutForDisplay(item.rut)})`);
-    lines.push(`Total: ${fmtCurrency(totalAllCycles)}`);
+    lines.push(`Bruto: ${fmtCurrency(bruto)} · Anticipos: -${fmtCurrency(anticiposTotal)} · Bonos: +${fmtCurrency(bonosTotal)} · Neto: ${fmtCurrency(neto)}`);
     lines.push("");
-    for (const sec of cycleSections) {
-      lines.push(sec.header);
-      lines.push("─".repeat(Math.min(sec.header.length, 60)));
-      lines.push("Detalle Jornada          | Fecha   | Producción            | Monto");
-      for (const r of sec.rows) {
-        const det = laborDisplayLabel(r.labor, catalogs);
-        const fecha = workerDetailDateLabel(r.date);
-        const prod = formatWorkerDetailProd(r, catalogs);
-        const monto = fmtCurrency(r.amount);
-        lines.push(
-          `${det.padEnd(24, " ").slice(0, 24)} | ${fecha.padEnd(7, " ")} | ${prod.padEnd(21, " ").slice(0, 21)} | ${monto}`,
-        );
+    if (viewMode === "cronologico") {
+      lines.push("Fecha   | Detalle                    | Contexto                       | Monto");
+      for (const r of chronoRows) {
+        const fecha = r.date ? workerDetailDateLabel(r.date) : "s/f";
+        if (r.kind === "work") {
+          const det = laborDisplayLabel(r.row.labor, catalogs);
+          const prod = formatWorkerDetailProd(r.row, catalogs);
+          const monto = fmtCurrency(r.row.amount);
+          lines.push(
+            `${fecha.padEnd(7, " ")} | ${det.padEnd(27, " ").slice(0, 27)} | ${(r.cycleHeader || "").padEnd(30, " ").slice(0, 30)} | ${monto}`,
+          );
+        } else {
+          const label = r.kind === "anticipo" ? `${r.typeMeta.icon} ${r.typeMeta.label}` : `${r.typeMeta.icon} ${r.typeMeta.label}`;
+          const sign = r.kind === "anticipo" ? "-" : "+";
+          lines.push(
+            `${fecha.padEnd(7, " ")} | ${label.padEnd(27, " ").slice(0, 27)} | ${(r.note || "").padEnd(30, " ").slice(0, 30)} | ${sign}${fmtCurrency(r.amount)}`,
+          );
+        }
       }
-      lines.push(`Subtotal ciclo: ${fmtCurrency(sec.totalAmount)}`);
-      lines.push("");
+    } else {
+      for (const sec of cycleSections) {
+        lines.push(sec.header);
+        lines.push("─".repeat(Math.min(sec.header.length, 60)));
+        lines.push("Detalle Jornada          | Fecha   | Producción            | Monto");
+        for (const r of sec.rows) {
+          const det = laborDisplayLabel(r.labor, catalogs);
+          const fecha = workerDetailDateLabel(r.date);
+          const prod = formatWorkerDetailProd(r, catalogs);
+          const monto = fmtCurrency(r.amount);
+          lines.push(
+            `${det.padEnd(24, " ").slice(0, 24)} | ${fecha.padEnd(7, " ")} | ${prod.padEnd(21, " ").slice(0, 21)} | ${monto}`,
+          );
+        }
+        lines.push(`Subtotal ciclo: ${fmtCurrency(sec.totalAmount)}`);
+        lines.push("");
+      }
+      if (anticipoRows.length > 0 || bonoRows.length > 0) {
+        lines.push("Ajustes aplicados:");
+        for (const r of anticipoRows) {
+          const fecha = r.date ? workerDetailDateLabel(r.date) : "s/f";
+          lines.push(`  ${r.typeMeta.icon} ${r.typeMeta.label.padEnd(10, " ")} ${fecha.padEnd(7, " ")} ${(r.note || "").padEnd(25, " ").slice(0, 25)} -${fmtCurrency(r.amount)}`);
+        }
+        for (const r of bonoRows) {
+          const fecha = r.date ? workerDetailDateLabel(r.date) : "s/f";
+          lines.push(`  ${r.typeMeta.icon} ${r.typeMeta.label.padEnd(10, " ")} ${fecha.padEnd(7, " ")} ${(r.note || "").padEnd(25, " ").slice(0, 25)} +${fmtCurrency(r.amount)}`);
+        }
+        lines.push("");
+      }
     }
+    lines.push(`NETO A PAGAR: ${fmtCurrency(neto)}`);
     return lines.join("\n");
   };
 
@@ -4401,18 +4492,31 @@ function WorkerPaidDetailTables({ item, snapshot, snapshotLoading, cycleDetails,
     } finally { setBusy(""); }
   };
 
+  const tabBtn = (active) =>
+    `rounded-md border px-2 py-0.5 text-[10px] ${
+      active
+        ? "border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
+        : "border-[var(--color-border)] bg-[var(--color-surface-2)] hover:bg-[var(--color-accent-soft)]"
+    }`;
+
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="text-[10px] uppercase tracking-wide text-[var(--color-muted)]">
-          Detalle pagado por ciclo
+        <div className="flex items-center gap-1">
+          <span className="text-[10px] uppercase tracking-wide text-[var(--color-muted)] mr-1">Vista:</span>
+          <button type="button" onClick={() => setViewMode("porCiclo")} className={tabBtn(viewMode === "porCiclo")}>
+            Por ciclo
+          </button>
+          <button type="button" onClick={() => setViewMode("cronologico")} className={tabBtn(viewMode === "cronologico")}>
+            Cronológico
+          </button>
         </div>
         <div className="flex gap-1">
           <button
             type="button"
             onClick={handleCopyText}
             disabled={busy === "text"}
-            title="Copiar el detalle como texto plano"
+            title="Copiar como texto plano"
             className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-0.5 text-[10px] hover:bg-[var(--color-accent-soft)] disabled:opacity-50"
           >
             {busy === "text" ? "..." : "📋 Texto"}
@@ -4421,7 +4525,7 @@ function WorkerPaidDetailTables({ item, snapshot, snapshotLoading, cycleDetails,
             type="button"
             onClick={handleCopyImage}
             disabled={busy === "image"}
-            title="Copiar el detalle como imagen (PNG)"
+            title="Copiar como imagen (PNG)"
             className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-0.5 text-[10px] hover:bg-[var(--color-accent-soft)] disabled:opacity-50"
           >
             {busy === "image" ? "..." : "📋 Imagen"}
@@ -4429,51 +4533,189 @@ function WorkerPaidDetailTables({ item, snapshot, snapshotLoading, cycleDetails,
         </div>
       </div>
       <div ref={captureRef} style={{ background: "#fff", padding: 8 }} className="space-y-2 rounded-md">
+        {/* Header trabajador */}
         <div style={{ fontSize: 11, color: "#444", borderBottom: "1px solid #ddd", paddingBottom: 4 }}>
           <b style={{ color: "#000" }}>{item.name}</b>
           <span style={{ marginLeft: 6, fontFamily: "ui-monospace, monospace" }}>{formatRutForDisplay(item.rut)}</span>
-          <span style={{ marginLeft: 8, color: "#666" }}>Total: <b style={{ color: "#000" }}>{fmtCurrency(totalAllCycles)}</b></span>
+          <span style={{ marginLeft: 8, color: "#666" }}>Producción: <b style={{ color: "#000" }}>{fmtCurrency(totalAllCycles)}</b></span>
         </div>
-        {cycleSections.map((sec) => (
-          <div key={sec.cycleId} className="overflow-x-auto">
-            <div style={{ fontSize: 12, fontWeight: 700, color: "#000", marginBottom: 4 }}>{sec.header}</div>
+
+        {/* Resumen de pago dentro de la imagen: bruto, anticipos, bonos, neto */}
+        <table style={{ borderCollapse: "collapse", width: "100%" }}>
+          <thead>
+            <tr style={{ background: "#f8cbad" }}>
+              <th style={WORKER_DETAIL_CELL_H}>Bruto</th>
+              <th style={WORKER_DETAIL_CELL_H}>Anticipos</th>
+              <th style={WORKER_DETAIL_CELL_H}>Bonos</th>
+              <th style={{ ...WORKER_DETAIL_CELL_H, background: "#c6efce" }}>Neto a pagar</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td style={{ ...WORKER_DETAIL_CELL, fontWeight: 600 }}>{fmtCurrency(bruto)}</td>
+              <td style={{ ...WORKER_DETAIL_CELL, color: anticiposTotal > 0 ? "#b45309" : "#999" }}>
+                {anticiposTotal > 0 ? `− ${fmtCurrency(anticiposTotal)}` : "—"}
+              </td>
+              <td style={{ ...WORKER_DETAIL_CELL, color: bonosTotal > 0 ? "#166534" : "#999" }}>
+                {bonosTotal > 0 ? `+ ${fmtCurrency(bonosTotal)}` : "—"}
+              </td>
+              <td style={{ ...WORKER_DETAIL_CELL, background: "#c6efce", fontWeight: 700 }}>{fmtCurrency(neto)}</td>
+            </tr>
+          </tbody>
+        </table>
+
+        {viewMode === "cronologico" ? (
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#000", marginBottom: 4 }}>Detalle cronológico</div>
             <table style={{ borderCollapse: "collapse", width: "100%" }}>
               <thead>
                 <tr style={{ background: "#9dc3e6" }}>
-                  <th style={WORKER_DETAIL_CELL_H}>Detalle Jornada</th>
                   <th style={WORKER_DETAIL_CELL_H}>Fecha</th>
+                  <th style={WORKER_DETAIL_CELL_H}>Detalle</th>
+                  <th style={WORKER_DETAIL_CELL_H}>Contexto</th>
                   <th style={{ ...WORKER_DETAIL_CELL_H, textAlign: "right" }}>Producción</th>
                   <th style={{ ...WORKER_DETAIL_CELL_H, textAlign: "right" }}>Monto</th>
                 </tr>
               </thead>
               <tbody>
-                {sec.rows.map((r, i) => (
-                  <tr key={i}>
-                    <td style={WORKER_DETAIL_CELL}>
-                      <div>{r.labor?.name || r.laborId}</div>
-                      <div style={{ fontSize: 9, color: "#777", marginTop: 1 }}>
-                        {laborSubtypeLabel(r.labor, catalogs)}
-                      </div>
-                    </td>
-                    <td style={{ ...WORKER_DETAIL_CELL, fontFamily: "ui-monospace, monospace" }}>{workerDetailDateLabel(r.date)}</td>
-                    <td style={{ ...WORKER_DETAIL_CELL, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
-                      {formatWorkerDetailProd(r, catalogs)}
-                    </td>
-                    <td style={{ ...WORKER_DETAIL_CELL, textAlign: "right", fontVariantNumeric: "tabular-nums", fontWeight: 600 }}>
-                      {fmtCurrency(r.amount)}
-                    </td>
-                  </tr>
-                ))}
+                {chronoRows.map((r, i) => {
+                  const fecha = r.date ? workerDetailDateLabel(r.date) : "s/f";
+                  if (r.kind === "work") {
+                    return (
+                      <tr key={i}>
+                        <td style={{ ...WORKER_DETAIL_CELL, fontFamily: "ui-monospace, monospace" }}>{fecha}</td>
+                        <td style={WORKER_DETAIL_CELL}>
+                          <div>{r.row.labor?.name || r.row.laborId}</div>
+                          <div style={{ fontSize: 9, color: "#777", marginTop: 1 }}>{laborSubtypeLabel(r.row.labor, catalogs)}</div>
+                        </td>
+                        <td style={{ ...WORKER_DETAIL_CELL, fontSize: 10, color: "#555" }}>{r.cycleHeader}</td>
+                        <td style={{ ...WORKER_DETAIL_CELL, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                          {formatWorkerDetailProd(r.row, catalogs)}
+                        </td>
+                        <td style={{ ...WORKER_DETAIL_CELL, textAlign: "right", fontVariantNumeric: "tabular-nums", fontWeight: 600 }}>
+                          {fmtCurrency(r.row.amount)}
+                        </td>
+                      </tr>
+                    );
+                  }
+                  const isAnticipo = r.kind === "anticipo";
+                  const bg = isAnticipo ? "#fce4d6" : "#dcfce7";
+                  const color = isAnticipo ? "#b45309" : "#166534";
+                  const sign = isAnticipo ? "−" : "+";
+                  return (
+                    <tr key={i} style={{ background: bg }}>
+                      <td style={{ ...WORKER_DETAIL_CELL, fontFamily: "ui-monospace, monospace" }}>{fecha}</td>
+                      <td style={WORKER_DETAIL_CELL}>
+                        <div style={{ fontWeight: 600 }}>{r.typeMeta.icon} {r.typeMeta.label}</div>
+                      </td>
+                      <td style={{ ...WORKER_DETAIL_CELL, fontSize: 10, color: "#555" }}>{r.note || "—"}</td>
+                      <td style={{ ...WORKER_DETAIL_CELL, textAlign: "right", color: "#999" }}>—</td>
+                      <td style={{ ...WORKER_DETAIL_CELL, textAlign: "right", fontVariantNumeric: "tabular-nums", fontWeight: 700, color }}>
+                        {sign} {fmtCurrency(r.amount)}
+                      </td>
+                    </tr>
+                  );
+                })}
                 <tr style={{ background: "#c6efce", fontWeight: 700 }}>
-                  <td style={WORKER_DETAIL_CELL} colSpan={3}>Subtotal ciclo</td>
+                  <td style={WORKER_DETAIL_CELL} colSpan={4}>NETO A PAGAR</td>
                   <td style={{ ...WORKER_DETAIL_CELL, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
-                    {fmtCurrency(sec.totalAmount)}
+                    {fmtCurrency(neto)}
                   </td>
                 </tr>
               </tbody>
             </table>
           </div>
-        ))}
+        ) : (
+          <>
+            {cycleSections.map((sec) => (
+              <div key={sec.cycleId} className="overflow-x-auto">
+                <div style={{ fontSize: 12, fontWeight: 700, color: "#000", marginBottom: 4 }}>{sec.header}</div>
+                <table style={{ borderCollapse: "collapse", width: "100%" }}>
+                  <thead>
+                    <tr style={{ background: "#9dc3e6" }}>
+                      <th style={WORKER_DETAIL_CELL_H}>Detalle Jornada</th>
+                      <th style={WORKER_DETAIL_CELL_H}>Fecha</th>
+                      <th style={{ ...WORKER_DETAIL_CELL_H, textAlign: "right" }}>Producción</th>
+                      <th style={{ ...WORKER_DETAIL_CELL_H, textAlign: "right" }}>Monto</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sec.rows.map((r, i) => (
+                      <tr key={i}>
+                        <td style={WORKER_DETAIL_CELL}>
+                          <div>{r.labor?.name || r.laborId}</div>
+                          <div style={{ fontSize: 9, color: "#777", marginTop: 1 }}>
+                            {laborSubtypeLabel(r.labor, catalogs)}
+                          </div>
+                        </td>
+                        <td style={{ ...WORKER_DETAIL_CELL, fontFamily: "ui-monospace, monospace" }}>{workerDetailDateLabel(r.date)}</td>
+                        <td style={{ ...WORKER_DETAIL_CELL, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                          {formatWorkerDetailProd(r, catalogs)}
+                        </td>
+                        <td style={{ ...WORKER_DETAIL_CELL, textAlign: "right", fontVariantNumeric: "tabular-nums", fontWeight: 600 }}>
+                          {fmtCurrency(r.amount)}
+                        </td>
+                      </tr>
+                    ))}
+                    <tr style={{ background: "#c6efce", fontWeight: 700 }}>
+                      <td style={WORKER_DETAIL_CELL} colSpan={3}>Subtotal ciclo</td>
+                      <td style={{ ...WORKER_DETAIL_CELL, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                        {fmtCurrency(sec.totalAmount)}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            ))}
+
+            {/* Ajustes: anticipos + bonos aplicados. Se incluye en la imagen
+                para que el detalle sea autocontenido — el operativo suele
+                mandar la foto por WhatsApp y el trabajador debe entender de
+                dónde salió el neto. */}
+            {(anticipoRows.length > 0 || bonoRows.length > 0) && (
+              <div>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "#000", marginBottom: 4 }}>Ajustes aplicados</div>
+                <table style={{ borderCollapse: "collapse", width: "100%" }}>
+                  <thead>
+                    <tr style={{ background: "#f8cbad" }}>
+                      <th style={WORKER_DETAIL_CELL_H}>Tipo</th>
+                      <th style={WORKER_DETAIL_CELL_H}>Fecha</th>
+                      <th style={WORKER_DETAIL_CELL_H}>Nota</th>
+                      <th style={{ ...WORKER_DETAIL_CELL_H, textAlign: "right" }}>Monto</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {[...anticipoRows, ...bonoRows].map((r, i) => {
+                      const isAnticipo = r.kind === "anticipo";
+                      const color = isAnticipo ? "#b45309" : "#166534";
+                      const sign = isAnticipo ? "−" : "+";
+                      return (
+                        <tr key={i}>
+                          <td style={{ ...WORKER_DETAIL_CELL, fontWeight: 600 }}>
+                            {r.typeMeta.icon} {r.typeMeta.label}
+                          </td>
+                          <td style={{ ...WORKER_DETAIL_CELL, fontFamily: "ui-monospace, monospace" }}>
+                            {r.date ? workerDetailDateLabel(r.date) : "s/f"}
+                          </td>
+                          <td style={{ ...WORKER_DETAIL_CELL, fontSize: 10, color: "#555" }}>{r.note || "—"}</td>
+                          <td style={{ ...WORKER_DETAIL_CELL, textAlign: "right", fontVariantNumeric: "tabular-nums", fontWeight: 700, color }}>
+                            {sign} {fmtCurrency(r.amount)}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    <tr style={{ background: "#c6efce", fontWeight: 700 }}>
+                      <td style={WORKER_DETAIL_CELL} colSpan={3}>NETO A PAGAR</td>
+                      <td style={{ ...WORKER_DETAIL_CELL, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                        {fmtCurrency(neto)}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
+        )}
       </div>
     </div>
   );

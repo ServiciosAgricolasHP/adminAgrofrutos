@@ -65,6 +65,30 @@ if (typeof window !== "undefined") {
   });
 }
 
+// Lock a landscape en runtime. El manifest ya declara `orientation: landscape`,
+// pero eso solo lo respeta el browser cuando la PWA está INSTALADA en pantalla
+// completa. En tab normal + iOS Safari el manifest se ignora — este lock lo
+// intenta desde JS. También falla silenciosamente si el usuario no está en
+// fullscreen (política de Chrome/Firefox), pero al menos cubre el caso de la
+// PWA instalada en Android.
+if (typeof window !== "undefined" && typeof screen !== "undefined" && screen.orientation) {
+  const tryLock = () => {
+    try {
+      const p = screen.orientation.lock?.("landscape");
+      // Puede devolver Promise o undefined; ignoramos el error.
+      if (p && typeof p.then === "function") p.catch(() => { /* noop */ });
+    } catch { /* noop */ }
+  };
+  tryLock();
+  // Reintentar si el usuario entra en fullscreen manualmente después.
+  document.addEventListener("fullscreenchange", tryLock);
+  // Reintentar cuando la pestaña vuelve a foreground (ej. tras cambiar de app
+  // en mobile y volver — el lock se puede haber liberado).
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) tryLock();
+  });
+}
+
 createRoot(document.getElementById("root")).render(
   <StrictMode>
     <App />

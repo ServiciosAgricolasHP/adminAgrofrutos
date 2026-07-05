@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { toBlob } from "html-to-image";
+import { captureFullWidthBlob } from "../utils/imageCapture";
 import Modal from "./Modal";
 import { workdaysService } from "../services";
 import { useCatalogs } from "../contexts/CatalogsContext";
@@ -369,7 +369,7 @@ function CombinedSummaryCard({ dataByColumn, days }) {
     if (!captureRef.current) return;
     setBusy("image");
     try {
-      const blob = await toBlob(captureRef.current, { backgroundColor: "#ffffff", pixelRatio: 2 });
+      const blob = await captureFullWidthBlob(captureRef.current);
       if (!blob) throw new Error("No se pudo generar la imagen");
       await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
       toast.success("Imagen copiada");
@@ -554,10 +554,7 @@ function LaborSummaryCard({ data, catalogs }) {
     if (!captureRef.current) return;
     setBusy("image");
     try {
-      const blob = await toBlob(captureRef.current, {
-        backgroundColor: "#ffffff",
-        pixelRatio: 2,
-      });
+      const blob = await captureFullWidthBlob(captureRef.current);
       if (!blob) throw new Error("No se pudo generar la imagen");
       await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
       toast.success("Imagen copiada");

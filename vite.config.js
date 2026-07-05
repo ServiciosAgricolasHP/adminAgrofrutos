@@ -42,7 +42,12 @@ export default defineConfig({
         theme_color: '#16a34a',
         background_color: '#ffffff',
         display: 'standalone',
-        orientation: 'any',
+        // landscape (no landscape-primary): permite rotar 180° pero fuerza
+        // horizontal en la PWA instalada. Solo tiene efecto real cuando el
+        // usuario abre la PWA instalada — en tab de browser normal el sistema
+        // lo ignora. iOS Safari ignora esto siempre; ver el lock en runtime
+        // (src/main.jsx) que apunta al mismo objetivo con screen.orientation.
+        orientation: 'landscape',
         scope: '/adminAgrofrutos/',
         start_url: '/adminAgrofrutos/',
         icons: [
