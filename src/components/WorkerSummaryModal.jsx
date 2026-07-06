@@ -4,6 +4,7 @@ import Modal from "./Modal";
 import { workdayMapKey, getTratoTierTotals, getTratoTiers, containerLabel, tratoTypeLabel, tratoUnitLabel, cosechaUnit } from "../utils/cosechaCombos";
 import { DEFAULT_OVERTIME_RATE } from "../utils/tratoHE";
 import { cyclesService, faenasService, subfaenasService, workdaysService } from "../services";
+import { payrollsService } from "../services/payrollsService";
 import {
   listPendingForWorkers,
   advanceRemaining,
@@ -65,7 +66,15 @@ const defaultCycleTitle = ({ faena, subfaena, cycle }) =>
 
 // Mapea cada tipo de labor a los acumuladores que tiene sentido reportar.
 // El resto se deja en 0 y la tabla esconde la columna si nadie aportó.
-function buildCycleRows(workerRut, cycle, workdaysByLabor, catalogs) {
+//
+// `payrollById` es un Map opcional { payrollId → { name, status } } — si
+// está definido computamos `paymentStatus` por fila. Valores posibles:
+//   - "unpaid"     → ningún wd de la fila tiene payrollId
+//   - "in_pending" → todos con payrollId apuntan a nóminas con status !== "paid"
+//                    (o mezcla de con-payrollId y sin-payrollId — se comporta
+//                    como pendiente conservadoramente)
+//   - "paid"       → todos los wds tienen payrollId y todos con status "paid"
+function buildCycleRows(workerRut, cycle, workdaysByLabor, catalogs, payrollById) {
   const rows = [];
   const cosechaContainers = new Set();
   for (const labor of cycle.labors || []) {
@@ -151,8 +160,30 @@ function buildCycleRows(workerRut, cycle, workdaysByLabor, catalogs) {
         // tiers[0]. Sirve para el label de la columna cuando solo hay 1 tier.
         tratoUnit = entries[0]?.unit ?? tiers[0]?.unit ?? null;
       }
+      // Payment status por fila: revisamos los payrollIds de los wds del día.
+      // Si no hay payrollById (caller no pasó info) → status "unknown".
+      let paymentStatus = "unpaid";
+      const payrollNames = [];
+      if (payrollById) {
+        const withPayroll = wds.filter((w) => !!w.payrollId);
+        if (withPayroll.length === 0) {
+          paymentStatus = "unpaid";
+        } else {
+          const uniquePayrollIds = [...new Set(withPayroll.map((w) => w.payrollId))];
+          const statuses = uniquePayrollIds.map((pid) => payrollById.get(pid)?.status || "pending");
+          for (const pid of uniquePayrollIds) {
+            const p = payrollById.get(pid);
+            if (p?.name) payrollNames.push(p.name);
+          }
+          const allPaid = statuses.every((s) => s === "paid");
+          const someUnpaid = withPayroll.length < wds.length;
+          if (allPaid && !someUnpaid) paymentStatus = "paid";
+          else paymentStatus = "in_pending";
+        }
+      }
       rows.push({
         laborName: labor.name,
+        laborId: labor.id,
         laborType: labor.type,
         tratoType: labor.tratoType ?? 0,
         tratoUnit,
@@ -166,6 +197,9 @@ function buildCycleRows(workerRut, cycle, workdaysByLabor, catalogs) {
         heAmount,
         piso,
         amount,
+        paymentStatus,
+        payrollNames,
+        rowKey: `${cycle.id}__${labor.id}__${d}`,
       });
     }
   }
@@ -203,6 +237,30 @@ export default function WorkerSummaryModal({ open, onClose, worker }) {
   // El modo lineal es útil cuando el trabajador anduvo en varios ciclos chicos
   // y querés ver la secuencia cronológica completa.
   const [viewMode, setViewMode] = useState("por-ciclo");
+  // Filtro por status de pago. Default: mostrar todos. El toggle deja al
+  // usuario esconder pagados / en nómina / sin pagar. Los ocultos NO cuentan
+  // en los totales de las tablas.
+  const [statusFilter, setStatusFilter] = useState(() => new Set(["paid", "in_pending", "unpaid"]));
+  const toggleStatus = (s) => setStatusFilter((prev) => {
+    const next = new Set(prev);
+    if (next.has(s)) next.delete(s); else next.add(s);
+    return next;
+  });
+  // Filtro visual manual: filas ocultas por click en el ojito. Session-only,
+  // no persistido — al cerrar el modal se limpian. Tampoco entran en totales.
+  const [hiddenRowKeys, setHiddenRowKeys] = useState(() => new Set());
+  const toggleHidden = (rowKey) => setHiddenRowKeys((prev) => {
+    const next = new Set(prev);
+    if (next.has(rowKey)) next.delete(rowKey); else next.add(rowKey);
+    return next;
+  });
+  const clearHidden = () => setHiddenRowKeys(new Set());
+  // Toggle master de los ojitos: cuando está en false NO se renderiza la
+  // columna de botones, así la foto sale limpia. La lista de ocultos se
+  // preserva — el usuario esconde primero lo que quiere, apaga los ojos, y
+  // recién ahí toma la screenshot.
+  const [showEyeButtons, setShowEyeButtons] = useState(true);
+  const isRowVisible = (r) => statusFilter.has(r.paymentStatus) && !hiddenRowKeys.has(r.rowKey);
   const printRef = useRef(null);
 
   useEffect(() => {
@@ -227,9 +285,37 @@ export default function WorkerSummaryModal({ open, onClose, worker }) {
     })();
   }, [open, worker?.id, catalogs, includeClosed, closedFrom, closedTo]);
 
+  // Datos filtrados: aplica statusFilter + hiddenRowKeys y recomputa totals
+  // por ciclo así los subtotales reflejan solo lo visible. Además calcula
+  // `totalsByStatus` para el desglose "Pagado / En nómina / Sin pagar" que
+  // se agrega debajo del subtotal cuando hay mezcla de status en el ciclo.
+  const filteredData = useMemo(() => {
+    return data.map((d) => {
+      const filteredRows = d.rows.filter((r) => statusFilter.has(r.paymentStatus) && !hiddenRowKeys.has(r.rowKey));
+      const totals = filteredRows.reduce(
+        (acc, r) => ({
+          kilos: acc.kilos + (r.kilos || 0),
+          jornadas: acc.jornadas + (r.jornadas || 0),
+          tratoQty: acc.tratoQty + (r.tratoQty || 0),
+          overtimeHours: acc.overtimeHours + (r.overtimeHours || 0),
+          heAmount: acc.heAmount + (r.heAmount || 0),
+          amount: acc.amount + (r.amount || 0),
+          piso: acc.piso + (r.piso || 0),
+        }),
+        { kilos: 0, jornadas: 0, tratoQty: 0, overtimeHours: 0, heAmount: 0, amount: 0, piso: 0 },
+      );
+      const totalsByStatus = { paid: 0, in_pending: 0, unpaid: 0 };
+      for (const r of filteredRows) {
+        const s = r.paymentStatus || "unpaid";
+        totalsByStatus[s] = (totalsByStatus[s] || 0) + (r.amount || 0) + (r.piso || 0);
+      }
+      return { ...d, rows: filteredRows, totals, totalsByStatus };
+    });
+  }, [data, statusFilter, hiddenRowKeys]);
+
   const grandTotal = useMemo(
-    () => data.reduce((s, d) => s + (d.totals.amount || 0) + (d.totals.piso || 0), 0),
-    [data],
+    () => filteredData.reduce((s, d) => s + (d.totals.amount || 0) + (d.totals.piso || 0), 0),
+    [filteredData],
   );
   const { anticiposSaldo, bonosSaldo, advancesSaldo } = useMemo(() => {
     let a = 0, b = 0;
@@ -392,6 +478,45 @@ export default function WorkerSummaryModal({ open, onClose, worker }) {
         )}
       </div>
 
+      {/* Filtro por status de pago + indicador de filas ocultas manualmente.
+          Los ocultos NO cuentan en los totales de las tablas — se recomputan
+          en base a filas visibles. */}
+      {!loading && data.length > 0 && (
+        <div className="mb-3 flex flex-wrap items-center gap-2 text-xs">
+          <span className="text-[var(--color-muted)]">Mostrar:</span>
+          <StatusFilterPill status="paid" label="✓ Pagados" active={statusFilter.has("paid")} onToggle={() => toggleStatus("paid")} />
+          <StatusFilterPill status="in_pending" label="⏳ En nómina" active={statusFilter.has("in_pending")} onToggle={() => toggleStatus("in_pending")} />
+          <StatusFilterPill status="unpaid" label="○ Sin pagar" active={statusFilter.has("unpaid")} onToggle={() => toggleStatus("unpaid")} />
+          <span className="ml-2 text-[var(--color-muted)]">·</span>
+          <button
+            onClick={() => setShowEyeButtons((v) => !v)}
+            className={`rounded-md border px-2 py-0.5 transition-colors ${
+              showEyeButtons
+                ? "border-[var(--color-border)] bg-[var(--color-surface-2)] hover:bg-[var(--color-accent-soft)]"
+                : "border-[var(--color-accent)] bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+            }`}
+            title={showEyeButtons
+              ? "Ocultar los botones de ojo (para tomar la foto sin ellos)"
+              : "Mostrar los botones de ojo para poder ocultar días"}
+          >
+            {showEyeButtons ? "👁 Ojos: ON" : "👁‍🗨 Ojos: OFF (foto limpia)"}
+          </button>
+          {hiddenRowKeys.size > 0 && (
+            <>
+              <span className="rounded-full bg-[var(--color-surface-2)] px-2 py-0.5 text-[var(--color-muted)]">
+                {hiddenRowKeys.size} día{hiddenRowKeys.size === 1 ? "" : "s"} oculto{hiddenRowKeys.size === 1 ? "" : "s"}
+              </span>
+              <button
+                onClick={clearHidden}
+                className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-0.5 text-[var(--color-accent)] hover:bg-[var(--color-accent-soft)]"
+              >
+                Mostrar todos
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
       {showTitleEditor && (
         <div className="mb-3 space-y-2 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] p-3">
           <div className="grid gap-2 md:grid-cols-2">
@@ -455,7 +580,7 @@ export default function WorkerSummaryModal({ open, onClose, worker }) {
       <PrintableWorkerSummary
         ref={printRef}
         worker={worker}
-        data={data}
+        data={filteredData}
         grandTotal={grandTotal}
         advances={advances}
         advancesSaldo={advancesSaldo}
@@ -465,6 +590,7 @@ export default function WorkerSummaryModal({ open, onClose, worker }) {
         viewMode={viewMode}
         onUpdateTitles={updateTitles}
         catalogs={catalogs}
+        onToggleHidden={showEyeButtons ? toggleHidden : undefined}
       />
     </Modal>
   );
@@ -500,6 +626,18 @@ export async function loadWorkerSummaryData(workerId, catalogs, options = {}) {
     String(a.date || "").localeCompare(String(b.date || "")),
   );
   const cycleIds = [...new Set(wds.map((w) => w.cycleId).filter(Boolean))];
+  // Payrolls: cargamos los referenciados por los wds para poder colorear
+  // cada fila según status (pagado / en nómina pendiente / sin pagar).
+  // getById es una query por payroll — con typical volume de docenas es OK;
+  // si escala mucho podemos migrar a `list({ wheres: [[__name__, in, chunk]] })`.
+  const payrollIds = [...new Set(wds.map((w) => w.payrollId).filter(Boolean))];
+  const payrollsRaw = await Promise.all(
+    payrollIds.map((id) => payrollsService.getById(id).catch(() => null)),
+  );
+  const payrollById = new Map();
+  for (const p of payrollsRaw) {
+    if (p?.id) payrollById.set(p.id, { name: p.name || p.id, status: p.status || "pending" });
+  }
   const cycles = (await Promise.all(cycleIds.map((id) => cyclesService.getById(id)))).filter(Boolean);
   const cyclesToShow = cycles.filter((c) => {
     if (c.status !== "closed") return true;
@@ -553,7 +691,7 @@ export async function loadWorkerSummaryData(workerId, catalogs, options = {}) {
     // Saltamos ciclos cerrados sin workdays dentro del rango para no
     // mostrar secciones vacías.
     if (isClosed && Object.keys(wdMap).length === 0) return null;
-    const { rows, cosechaContainers } = buildCycleRows(workerId, c, wdMap, catalogs);
+    const { rows, cosechaContainers } = buildCycleRows(workerId, c, wdMap, catalogs, payrollById);
     const totals = rows.reduce(
       (acc, r) => ({
         kilos: acc.kilos + r.kilos,
@@ -618,7 +756,7 @@ export async function loadWorkerSummaryData(workerId, catalogs, options = {}) {
 }
 
 export const PrintableWorkerSummary = forwardRef(function PrintableWorkerSummary(
-  { worker, data, grandTotal, advances = [], advancesSaldo = 0, anticiposSaldo, bonosSaldo, titles, viewMode = "por-ciclo", onUpdateTitles, catalogs = {} },
+  { worker, data, grandTotal, advances = [], advancesSaldo = 0, anticiposSaldo, bonosSaldo, titles, viewMode = "por-ciclo", onUpdateTitles, catalogs = {}, onToggleHidden },
   ref,
 ) {
   // Soporte legacy: si solo viene advancesSaldo, lo tratamos como saldo de anticipos.
@@ -651,11 +789,19 @@ export const PrintableWorkerSummary = forwardRef(function PrintableWorkerSummary
           catalogs={catalogs}
           titles={titles?.linear}
           onUpdateLinearTitles={(patch) => onUpdateTitles && onUpdateTitles({ linear: { ...(titles?.linear || {}), ...patch } })}
+          onToggleHidden={onToggleHidden}
         />
       )}
-      {!isLinear && data.map(({ cycle, faena, subfaena, rows, totals, cols, tratoLabel, kilosLabel, isClosed }) => {
+      {!isLinear && data.map(({ cycle, faena, subfaena, rows, totals, totalsByStatus, cols, tratoLabel, kilosLabel, isClosed }) => {
         // Helper local para que los totales caigan en la columna correcta.
         // valueCol = "kilos" | "jornadas" | "he" | "trato" | "piso" | "amount"
+        // Extra trailing cells: Estado + (eye button si toggle disponible).
+        const trailingEmpty = (
+          <>
+            <td style={cell}></td>
+            {onToggleHidden && <td style={cell}></td>}
+          </>
+        );
         const renderTotalRow = (label, value, valueCol, bg) => (
           <tr style={bg ? { background: bg } : undefined}>
             <td style={cell}></td>
@@ -688,10 +834,15 @@ export const PrintableWorkerSummary = forwardRef(function PrintableWorkerSummary
             <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
               {valueCol === "amount" ? value : ""}
             </td>
+            {trailingEmpty}
           </tr>
         );
         const totalColSpan =
-          2 + (cols.kilos ? 1 : 0) + (cols.jornadas ? 1 : 0) + (cols.he ? 1 : 0) + (cols.trato ? 1 : 0) + (cols.piso ? 1 : 0) + 1;
+          2 + (cols.kilos ? 1 : 0) + (cols.jornadas ? 1 : 0) + (cols.he ? 1 : 0) + (cols.trato ? 1 : 0) + (cols.piso ? 1 : 0) + 1 + 1 + (onToggleHidden ? 1 : 0);
+        // Split de subtotal por status. Solo lo renderizamos si hay MIX de
+        // status en el ciclo — sino sería redundante con el subtotal único.
+        const statusesPresent = ["paid", "in_pending", "unpaid"].filter((s) => (totalsByStatus?.[s] || 0) > 0);
+        const showStatusSplit = statusesPresent.length > 1;
 
         const cycleTitle =
           (titles?.cycles && titles.cycles[cycle.id]) ||
@@ -717,6 +868,8 @@ export const PrintableWorkerSummary = forwardRef(function PrintableWorkerSummary
                   {cols.trato && <th style={{ ...cellH, textAlign: "right" }}>{tratoLabel}</th>}
                   {cols.piso && <th style={{ ...cellH, textAlign: "right" }}>Piso</th>}
                   <th style={{ ...cellH, textAlign: "right" }}>Total</th>
+                  <th style={{ ...cellH, textAlign: "center" }}>Estado</th>
+                  {onToggleHidden && <th style={{ ...cellH, width: 30 }}></th>}
                 </tr>
               </thead>
               <tbody>
@@ -799,6 +952,21 @@ export const PrintableWorkerSummary = forwardRef(function PrintableWorkerSummary
                       <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
                         {fmtCurrency(r.amount + (r.piso || 0))}
                       </td>
+                      <td style={{ ...cell, textAlign: "center" }}>
+                        <StatusPill status={r.paymentStatus} payrollNames={r.payrollNames} />
+                      </td>
+                      {onToggleHidden && (
+                        <td style={{ ...cell, textAlign: "center", padding: 2 }}>
+                          <button
+                            type="button"
+                            onClick={() => onToggleHidden(r.rowKey)}
+                            title="Ocultar este día del resumen (no afecta datos, solo visual)"
+                            style={{ background: "transparent", border: "none", cursor: "pointer", fontSize: 14, padding: 2, color: "#6b7280", lineHeight: 1 }}
+                          >
+                            👁
+                          </button>
+                        </td>
+                      )}
                     </tr>
                   ))
                 )}
@@ -815,6 +983,21 @@ export const PrintableWorkerSummary = forwardRef(function PrintableWorkerSummary
                     {cols.trato && renderTotalRow(`Total ${tratoLabel}`, fmtNumber(totals.tratoQty), "trato")}
                     {cols.piso && renderTotalRow("Total Pisos", fmtCurrency(totals.piso), "piso")}
                     {renderTotalRow("Subtotal ciclo", fmtCurrency(totals.amount + (totals.piso || 0)), "amount", "#c6efce")}
+                    {/* Desglose por status — solo si hay mezcla (evita ruido) */}
+                    {showStatusSplit && (
+                      <tr style={{ background: "#f9fafb" }}>
+                        <td style={cell}></td>
+                        <td style={{ ...cell, fontSize: 10, color: "#666" }} colSpan={totalColSpan - 1}>
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: 12, justifyContent: "flex-end" }}>
+                            {statusesPresent.map((s) => (
+                              <span key={s} style={{ color: STATUS_STYLES[s].color, fontWeight: 600 }}>
+                                {STATUS_STYLES[s].label}: {fmtCurrency(totalsByStatus[s])}
+                              </span>
+                            ))}
+                          </div>
+                        </td>
+                      </tr>
+                    )}
                   </>
                 )}
               </tbody>
@@ -948,6 +1131,55 @@ export const PrintableWorkerSummary = forwardRef(function PrintableWorkerSummary
 const cellH = { border: "1px solid #555", padding: "6px 8px", fontSize: 12, fontWeight: 700, textAlign: "left" };
 const cell = { border: "1px solid #999", padding: "5px 8px", fontSize: 12 };
 
+// Estilos por status de pago — pill compacto para la columna Estado. Los
+// mismos colores se reutilizan en el filtro superior para que el usuario
+// asocie rápidamente el chip del filtro con el badge de la fila.
+const STATUS_STYLES = {
+  paid:       { bg: "#dcfce7", color: "#166534", label: "✓ Pagado" },
+  in_pending: { bg: "#fef3c7", color: "#92400e", label: "⏳ En nómina" },
+  unpaid:     { bg: "#f3f4f6", color: "#6b7280", label: "○ Sin pagar" },
+};
+
+function StatusPill({ status, payrollNames }) {
+  const s = STATUS_STYLES[status] || STATUS_STYLES.unpaid;
+  const tooltip = payrollNames && payrollNames.length > 0
+    ? (status === "paid" ? "Pagado en " : "Incluido en ") + payrollNames.join(", ")
+    : (status === "unpaid" ? "Sin nómina asignada" : "");
+  return (
+    <span
+      title={tooltip}
+      style={{
+        display: "inline-block",
+        padding: "1px 6px",
+        fontSize: 10,
+        fontWeight: 600,
+        borderRadius: 4,
+        background: s.bg,
+        color: s.color,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {s.label}
+    </span>
+  );
+}
+
+function StatusFilterPill({ status, label, active, onToggle }) {
+  const s = STATUS_STYLES[status];
+  return (
+    <button
+      onClick={onToggle}
+      className={`rounded-full border px-2 py-0.5 transition-opacity ${
+        active ? "" : "opacity-40 line-through"
+      }`}
+      style={{ background: s.bg, color: s.color, borderColor: s.color }}
+      title={active ? `Ocultar filas: ${label}` : `Mostrar filas: ${label}`}
+    >
+      {label}
+    </button>
+  );
+}
+
 // ============================================================
 // LinearTable — vista lineal del resumen del trabajador
 // ============================================================
@@ -960,7 +1192,7 @@ const cell = { border: "1px solid #999", padding: "5px 8px", fontSize: 12 };
 // menos una fila las tiene. Los labels de unidad caen al primero que se
 // vea — si los ciclos usan unidades distintas, la columna mostraría las
 // dos juntas indistintamente (caso raro y aceptado).
-function LinearTable({ data, catalogs, titles, onUpdateLinearTitles }) {
+function LinearTable({ data, catalogs, titles, onUpdateLinearTitles, onToggleHidden }) {
   const toast = useToast();
   const localRef = useRef(null);
   const [busy, setBusy] = useState("");
@@ -1012,6 +1244,17 @@ function LinearTable({ data, catalogs, titles, onUpdateLinearTitles }) {
     }),
     { kilos: 0, jornadas: 0, overtimeHours: 0, heAmount: 0, tratoQty: 0, piso: 0, amount: 0 },
   ), [flat]);
+  // Desglose por status para el footer — mismo criterio que por-ciclo.
+  const totalsByStatus = useMemo(() => {
+    const acc = { paid: 0, in_pending: 0, unpaid: 0 };
+    for (const r of flat) {
+      const s = r.paymentStatus || "unpaid";
+      acc[s] = (acc[s] || 0) + (r.amount || 0) + (r.piso || 0);
+    }
+    return acc;
+  }, [flat]);
+  const statusesPresent = ["paid", "in_pending", "unpaid"].filter((s) => (totalsByStatus[s] || 0) > 0);
+  const showStatusSplit = statusesPresent.length > 1;
 
   // Captura local solo del bloque (sin el resto del modal). Usa el mismo
   // truco que `LaborWorkerGrid`: la ref envuelve el contenedor visible,
@@ -1127,6 +1370,8 @@ function LinearTable({ data, catalogs, titles, onUpdateLinearTitles }) {
               {cols.trato && <th style={{ ...cellH, textAlign: "right" }}>{tratoLabel}</th>}
               {cols.piso && <th style={{ ...cellH, textAlign: "right" }}>Piso</th>}
               <th style={{ ...cellH, textAlign: "right" }}>Total</th>
+              <th style={{ ...cellH, textAlign: "center" }}>Estado</th>
+              {onToggleHidden && <th style={{ ...cellH, width: 30 }}></th>}
             </tr>
           </thead>
           <tbody>
@@ -1202,6 +1447,21 @@ function LinearTable({ data, catalogs, titles, onUpdateLinearTitles }) {
                 <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
                   {fmtCurrency((r.amount || 0) + (r.piso || 0))}
                 </td>
+                <td style={{ ...cell, textAlign: "center" }}>
+                  <StatusPill status={r.paymentStatus} payrollNames={r.payrollNames} />
+                </td>
+                {onToggleHidden && (
+                  <td style={{ ...cell, textAlign: "center", padding: 2 }}>
+                    <button
+                      type="button"
+                      onClick={() => onToggleHidden(r.rowKey)}
+                      title="Ocultar este día del resumen (no afecta datos, solo visual)"
+                      style={{ background: "transparent", border: "none", cursor: "pointer", fontSize: 14, padding: 2, color: "#6b7280", lineHeight: 1 }}
+                    >
+                      👁
+                    </button>
+                  </td>
+                )}
               </tr>
             ))}
             <tr style={{ background: "#c6efce" }}>
@@ -1236,7 +1496,22 @@ function LinearTable({ data, catalogs, titles, onUpdateLinearTitles }) {
               <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
                 {fmtCurrency(totals.amount + totals.piso)}
               </td>
+              <td style={cell}></td>
+              {onToggleHidden && <td style={cell}></td>}
             </tr>
+            {showStatusSplit && (
+              <tr style={{ background: "#f9fafb" }}>
+                <td style={cell} colSpan={3 + (cols.kilos ? 1 : 0) + (cols.jornadas ? 1 : 0) + (cols.he ? 1 : 0) + (cols.trato ? 1 : 0) + (cols.piso ? 1 : 0) + 1 + 1 + (onToggleHidden ? 1 : 0)}>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 12, justifyContent: "flex-end", fontSize: 10 }}>
+                    {statusesPresent.map((s) => (
+                      <span key={s} style={{ color: STATUS_STYLES[s].color, fontWeight: 600 }}>
+                        {STATUS_STYLES[s].label}: {fmtCurrency(totalsByStatus[s])}
+                      </span>
+                    ))}
+                  </div>
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
