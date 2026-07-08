@@ -19,6 +19,7 @@ import MigrateWorkers from "./screens/MigrateWorkers";
 import CleanupPaidWorkdays from "./screens/CleanupPaidWorkdays";
 import InterestLinks from "./screens/InterestLinks";
 import AdminConsole from "./screens/AdminConsole";
+import Audit from "./screens/Audit";
 import Calendar from "./screens/Calendar";
 import Facturacion from "./screens/Facturacion";
 
@@ -53,7 +54,7 @@ export default function App() {
                   path="audit"
                   element={
                     <ProtectedRoute adminOnly>
-                      <Placeholder title="Auditoría" />
+                      <Audit />
                     </ProtectedRoute>
                   }
                 />

@@ -84,6 +84,15 @@ export default function Layout() {
   useEffect(() => {
     try { localStorage.setItem("layout.sidebarOpen", String(sidebarOpen)); } catch { /* noop */ }
   }, [sidebarOpen]);
+  // Sección Admin colapsable — persistida entre sesiones. Default cerrada
+  // porque el admin la usa esporádicamente y evita que el sidebar quede
+  // largo. Solo aplica cuando el usuario es admin.
+  const [adminExpanded, setAdminExpanded] = useState(() => {
+    try { return localStorage.getItem("layout.adminExpanded") === "true"; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("layout.adminExpanded", String(adminExpanded)); } catch { /* noop */ }
+  }, [adminExpanded]);
 
   // Auto-close drawer on route change
   useEffect(() => {
@@ -126,26 +135,40 @@ export default function Layout() {
           </NavLink>
         ))}
         {isAdmin && (
-          <NavLink to="/audit" className={linkClass}>
-            <span>🛡️</span>
-            <span>Auditoría</span>
-          </NavLink>
-        )}
-        {isAdmin && (
-          <>
-            <NavLink to="/admin/migrate-workers" className={linkClass}>
-              <span>📥</span>
-              <span>Migrar CSV</span>
-            </NavLink>
-            <NavLink to="/admin/cleanup-paid-workdays" className={linkClass}>
-              <span>🧹</span>
-              <span>Limpiar pagados</span>
-            </NavLink>
-            <NavLink to="/admin/console" className={linkClass}>
-              <span>📟</span>
-              <span>Consola</span>
-            </NavLink>
-          </>
+          <div className="mt-3 border-t border-[var(--color-border)] pt-2">
+            <button
+              type="button"
+              onClick={() => setAdminExpanded((v) => !v)}
+              className="flex w-full items-center justify-between rounded-md px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted)] hover:bg-[var(--color-surface-2)] hover:text-[var(--color-text)]"
+              aria-expanded={adminExpanded}
+            >
+              <span className="flex items-center gap-2">
+                <span>🛡️</span>
+                <span>Admin</span>
+              </span>
+              <span>{adminExpanded ? "▾" : "▸"}</span>
+            </button>
+            {adminExpanded && (
+              <div className="mt-1 space-y-1">
+                <NavLink to="/audit" className={linkClass}>
+                  <span>🛡️</span>
+                  <span>Auditoría</span>
+                </NavLink>
+                <NavLink to="/admin/migrate-workers" className={linkClass}>
+                  <span>📥</span>
+                  <span>Migrar CSV</span>
+                </NavLink>
+                <NavLink to="/admin/cleanup-paid-workdays" className={linkClass}>
+                  <span>🧹</span>
+                  <span>Limpiar pagados</span>
+                </NavLink>
+                <NavLink to="/admin/console" className={linkClass}>
+                  <span>📟</span>
+                  <span>Consola</span>
+                </NavLink>
+              </div>
+            )}
+          </div>
         )}
       </nav>
     </>

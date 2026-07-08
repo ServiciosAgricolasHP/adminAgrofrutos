@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import { collection, query, where, getCountFromServer } from "firebase/firestore";
+import { collection, query, where, getCountFromServer, doc, getDoc } from "firebase/firestore";
 import { db } from "../firebase";
-import { faenasService, cyclesService } from "../services";
+import { faenasService, cyclesService, workersService } from "../services";
+import { toProperName } from "../utils/nameUtils";
+import { useAuth } from "../contexts/AuthContext";
 
 // Módulo de consola admin. Sirve para inspeccionar la escala de los datos
 // antes de tomar decisiones de costo (snapshots, paginación, etc.). Todas
@@ -69,11 +71,161 @@ export default function AdminConsole() {
         </p>
       </div>
 
+      <AuthDebugSection />
       <CollectionCountsSection />
       <WorkdaysByMonthSection />
       <WorkdaysByRangeSection />
       <WorkdaysByCycleSection />
+      <NormalizeWorkerNamesSection />
     </div>
+  );
+}
+
+// ============================================================
+// Sección Debug: por qué no soy admin
+// ============================================================
+// Muestra qué le llega al AuthContext (uid, email, role calculado) y qué
+// contiene realmente el doc `users/{uid}` en Firestore. Sirve para diagnosticar
+// por qué `isAdmin === false` cuando el usuario cree que debería ser true.
+//
+// Casos típicos:
+//   1. El doc `users/{uid}` NO existe → AuthContext cae a role: "supervisor".
+//      Fix: crear el doc en Firestore Console con { role: "admin" }.
+//   2. El doc existe pero `role !== "admin"` (ej: "ADMIN" en mayúsculas,
+//      "administrador", o el campo se llama `rol` en vez de `role`).
+//   3. La security rule bloquea el read → error visible acá, y el AuthContext
+//      cae al catch → role: "supervisor". Fix: rule tipo
+//      `match /users/{uid} { allow read: if request.auth.uid == uid; }`.
+function AuthDebugSection() {
+  const { user, isAdmin } = useAuth();
+  const [docState, setDocState] = useState({ loading: true });
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (!user?.uid) return;
+    (async () => {
+      setDocState({ loading: true });
+      try {
+        const snap = await getDoc(doc(db, "users", user.uid));
+        if (!snap.exists()) {
+          setDocState({ loading: false, exists: false });
+        } else {
+          setDocState({ loading: false, exists: true, data: snap.data() });
+        }
+      } catch (err) {
+        setDocState({ loading: false, error: err.message || String(err), code: err.code });
+      }
+    })();
+  }, [user?.uid]);
+
+  const copyUid = async () => {
+    if (!user?.uid) return;
+    try {
+      await navigator.clipboard.writeText(user.uid);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* noop */
+    }
+  };
+
+  return (
+    <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
+      <h2 className="mb-2 text-sm font-semibold">🕵️ Debug de rol admin</h2>
+      <p className="mb-3 text-xs text-[var(--color-muted)]">
+        El AuthContext lee <code>users/{"{uid}"}</code> y toma el campo <code>role</code>.
+        Si dice <code>"admin"</code> exactamente, activa el flag.
+      </p>
+
+      <div className="space-y-3 text-sm">
+        <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] p-3">
+          <div className="mb-1 text-[10px] uppercase tracking-wide text-[var(--color-muted)]">
+            Sesión actual
+          </div>
+          <div className="grid gap-1 text-xs sm:grid-cols-[80px_1fr]">
+            <div className="text-[var(--color-muted)]">Email:</div>
+            <div className="font-mono">{user?.email || "(sin sesión)"}</div>
+            <div className="text-[var(--color-muted)]">UID:</div>
+            <div className="flex items-center gap-2">
+              <code className="break-all font-mono text-xs">{user?.uid || "—"}</code>
+              {user?.uid && (
+                <button
+                  type="button"
+                  onClick={copyUid}
+                  className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 py-0.5 text-[10px] hover:bg-[var(--color-accent-soft)]"
+                >
+                  {copied ? "✓ Copiado" : "📋 Copiar"}
+                </button>
+              )}
+            </div>
+            <div className="text-[var(--color-muted)]">Role visto por AuthContext:</div>
+            <div>
+              <code className="font-mono">{user?.role || "(ninguno)"}</code>
+            </div>
+            <div className="text-[var(--color-muted)]">isAdmin:</div>
+            <div>
+              <span className={isAdmin ? "font-semibold text-[var(--color-success)]" : "font-semibold text-[var(--color-danger)]"}>
+                {isAdmin ? "✓ TRUE" : "✗ FALSE"}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] p-3">
+          <div className="mb-1 text-[10px] uppercase tracking-wide text-[var(--color-muted)]">
+            Firestore <code>users/{user?.uid || "—"}</code>
+          </div>
+          {docState.loading ? (
+            <div className="text-xs text-[var(--color-muted)]">Consultando…</div>
+          ) : docState.error ? (
+            <>
+              <div className="text-xs text-[var(--color-danger)]">
+                ✖ Error al leer: <code>{docState.code || "?"}</code>
+              </div>
+              <div className="mt-1 text-[10px] text-[var(--color-muted)]">
+                {docState.error}
+              </div>
+              <div className="mt-2 rounded bg-[var(--color-surface)] p-2 text-[10px]">
+                <strong>Probable causa:</strong> las security rules de Firestore
+                bloquean el read. Necesitás una rule tipo:
+                <pre className="mt-1 overflow-auto text-[10px]">{`match /users/{uid} {
+  allow read: if request.auth.uid == uid;
+}`}</pre>
+              </div>
+            </>
+          ) : !docState.exists ? (
+            <>
+              <div className="text-xs text-[var(--color-danger)]">
+                ✖ El doc <code>users/{user?.uid}</code> NO existe.
+              </div>
+              <div className="mt-2 rounded bg-[var(--color-surface)] p-2 text-[10px]">
+                <strong>Fix</strong>: en Firestore Console, crear el doc con id{" "}
+                <code>{user?.uid}</code> en la colección <code>users</code> y
+                agregar el campo <code>role</code> (string) con valor{" "}
+                <code>"admin"</code> exactamente en minúscula. Después
+                relogueate en la app.
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="text-xs text-[var(--color-success)]">
+                ✓ Existe. Contenido:
+              </div>
+              <pre className="mt-1 overflow-auto rounded bg-[var(--color-surface)] p-2 text-[10px]">
+                {JSON.stringify(docState.data, null, 2)}
+              </pre>
+              {docState.data?.role !== "admin" && (
+                <div className="mt-2 rounded bg-[var(--color-surface)] p-2 text-[10px] text-[var(--color-danger)]">
+                  El campo <code>role</code> es <code>{JSON.stringify(docState.data?.role)}</code>,
+                  no <code>"admin"</code>. Corregí a exactamente{" "}
+                  <code>"admin"</code> en minúsculas y relogueate.
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -510,6 +662,186 @@ function WorkdaysByCycleSection() {
           </span>{" "}
           workdays
         </p>
+      )}
+    </section>
+  );
+}
+
+// ============================================================
+// Sección 5: normalizar nombres de trabajadores a Proper Case
+// ============================================================
+// Aplica `toProperName` a todos los `worker.name` que difieran del formato
+// esperado ("Juan Pérez", "Juan de la Cruz"). Flujo en 2 pasos: primero un
+// preview que lista los cambios propuestos (leer no escribe), y después el
+// botón de aplicar corre updates uno-a-uno con progreso.
+//
+// El costo es 1 read por worker (list completo — no cacheado) + 1 write por
+// nombre cambiado. Los que ya están bien no se tocan.
+function NormalizeWorkerNamesSection() {
+  const [loading, setLoading] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [scanned, setScanned] = useState(0);
+  const [diffs, setDiffs] = useState([]); // [{ id, oldName, newName }]
+  const [progress, setProgress] = useState({ done: 0, total: 0 });
+  const [result, setResult] = useState(null); // { updated, errors }
+  const [showAll, setShowAll] = useState(false);
+
+  const preview = async () => {
+    setLoading(true);
+    setResult(null);
+    setDiffs([]);
+    setShowAll(false);
+    try {
+      // No caché — queremos datos frescos antes de escribir.
+      const list = await workersService.list();
+      setScanned(list.length);
+      const changes = [];
+      for (const w of list) {
+        const oldName = String(w.name || "");
+        const newName = toProperName(oldName);
+        if (newName && newName !== oldName) {
+          changes.push({ id: w.id, oldName, newName });
+        }
+      }
+      // Orden alfabético por nombre nuevo para revisar cómodo.
+      changes.sort((a, b) => a.newName.localeCompare(b.newName));
+      setDiffs(changes);
+    } catch (err) {
+      alert("Error al leer trabajadores: " + (err.message || String(err)));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const apply = async () => {
+    if (diffs.length === 0) return;
+    if (!confirm(
+      `¿Aplicar ${diffs.length} cambio(s) de nombre?\n\n` +
+      `Esta operación no se puede deshacer automáticamente. ` +
+      `Revisá el preview antes de continuar.`,
+    )) return;
+    setRunning(true);
+    setProgress({ done: 0, total: diffs.length });
+    let updated = 0;
+    const errors = [];
+    for (let i = 0; i < diffs.length; i++) {
+      const d = diffs[i];
+      try {
+        await workersService.update(d.id, { name: d.newName });
+        updated++;
+      } catch (err) {
+        errors.push({ id: d.id, oldName: d.oldName, error: err.message || String(err) });
+      }
+      setProgress({ done: i + 1, total: diffs.length });
+    }
+    setResult({ updated, errors });
+    setDiffs([]); // limpia el preview — para re-verificar, pedir preview de nuevo
+    setRunning(false);
+  };
+
+  const displayDiffs = showAll ? diffs : diffs.slice(0, 20);
+
+  return (
+    <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
+      <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+        <div>
+          <h2 className="text-sm font-semibold">Normalizar nombres de trabajadores</h2>
+          <p className="text-xs text-[var(--color-muted)]">
+            Convierte los <code>name</code> al formato "Juan Pérez" (primera letra
+            mayúscula, resto minúscula, conectores en minúscula).
+            Preview primero, después aplicar.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={preview}
+            disabled={loading || running}
+            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)] disabled:opacity-50"
+          >
+            {loading ? "Analizando…" : "🔎 Preview cambios"}
+          </button>
+          <button
+            type="button"
+            onClick={apply}
+            disabled={running || diffs.length === 0}
+            className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-[var(--color-accent-fg)] hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+          >
+            {running
+              ? `Aplicando… ${progress.done}/${progress.total}`
+              : `✔ Aplicar ${diffs.length || ""} cambio${diffs.length === 1 ? "" : "s"}`}
+          </button>
+        </div>
+      </div>
+
+      {scanned > 0 && !loading && (
+        <p className="mb-3 text-xs text-[var(--color-muted)]">
+          Escaneados: <span className="font-semibold tabular-nums text-[var(--color-text)]">{fmtNumber(scanned)}</span>{" "}
+          trabajadores · A cambiar:{" "}
+          <span className={`font-semibold tabular-nums ${diffs.length > 0 ? "text-[var(--color-accent)]" : "text-[var(--color-muted)]"}`}>
+            {fmtNumber(diffs.length)}
+          </span>
+        </p>
+      )}
+
+      {diffs.length > 0 && (
+        <div className="overflow-hidden rounded-md border border-[var(--color-border)]">
+          <table className="w-full text-xs">
+            <thead className="bg-[var(--color-surface-2)] text-left text-[var(--color-muted)]">
+              <tr>
+                <th className="px-3 py-1.5">RUT</th>
+                <th className="px-3 py-1.5">Antes</th>
+                <th className="px-3 py-1.5">Después</th>
+              </tr>
+            </thead>
+            <tbody>
+              {displayDiffs.map((d) => (
+                <tr key={d.id} className="border-t border-[var(--color-border)]">
+                  <td className="px-3 py-1 font-mono text-[10px] text-[var(--color-muted)]">{d.id}</td>
+                  <td className="px-3 py-1 text-[var(--color-muted)] line-through">{d.oldName}</td>
+                  <td className="px-3 py-1 font-medium">{d.newName}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {diffs.length > 20 && !showAll && (
+            <div className="border-t border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-center">
+              <button
+                type="button"
+                onClick={() => setShowAll(true)}
+                className="text-xs text-[var(--color-accent)] hover:underline"
+              >
+                Ver los {diffs.length - 20} restantes…
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {result && (
+        <div className="mt-3 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] p-3 text-sm">
+          <div>
+            ✔ Actualizados:{" "}
+            <span className="font-semibold tabular-nums text-[var(--color-success)]">
+              {result.updated}
+            </span>
+          </div>
+          {result.errors.length > 0 && (
+            <>
+              <div className="mt-1 text-[var(--color-danger)]">
+                ✖ Errores: {result.errors.length}
+              </div>
+              <ul className="mt-1 max-h-40 overflow-y-auto text-xs text-[var(--color-muted)]">
+                {result.errors.slice(0, 20).map((e, i) => (
+                  <li key={i}>
+                    <span className="font-mono">{e.id}</span> ({e.oldName}): {e.error}
+                  </li>
+                ))}
+                {result.errors.length > 20 && <li>… y {result.errors.length - 20} más</li>}
+              </ul>
+            </>
+          )}
+        </div>
       )}
     </section>
   );

@@ -2,6 +2,7 @@ import { collection, query, where, orderBy, limit, getDocs, documentId } from "f
 import { db } from "../firebase";
 import { workersService, workdaysService } from "./index";
 import { normalizeRut, validateRut } from "../utils/rutUtils";
+import { toProperName } from "../utils/nameUtils";
 
 // Auto-detect: starts with digit → RUT search; else name search.
 export function detectQueryKind(q) {
@@ -66,7 +67,7 @@ export async function createWorker({ rut, name }) {
   const existing = await findWorkerByRut(normalized);
   if (existing) return existing;
   return workersService.create(
-    { name: String(name || "").trim().toUpperCase() },
+    { name: toProperName(name) },
     { id: normalized },
   );
 }

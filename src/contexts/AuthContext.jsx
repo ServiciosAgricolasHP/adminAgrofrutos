@@ -10,7 +10,15 @@ const ROLES = { ADMIN: "admin", SUPERVISOR: "supervisor" };
 async function loadProfile(user) {
   const ref = doc(db, "users", user.uid);
   const snap = await getDoc(ref);
-  if (snap.exists()) return { uid: user.uid, email: user.email, ...snap.data() };
+  if (snap.exists()) {
+    const data = snap.data();
+    // Normalizamos `role` a minúsculas — históricamente algunos docs quedaron
+    // con "ADMIN"/"Admin" y la comparación contra ROLES.ADMIN ("admin") fallaba
+    // silenciosamente. `toLowerCase` acá lo resuelve para todos los usuarios
+    // sin tener que reescribir los docs.
+    const role = String(data.role || ROLES.SUPERVISOR).toLowerCase();
+    return { uid: user.uid, email: user.email, ...data, role };
+  }
   return { uid: user.uid, email: user.email, role: ROLES.SUPERVISOR };
 }
 

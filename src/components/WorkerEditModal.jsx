@@ -5,6 +5,7 @@ import Select from "./Select";
 import { workersService } from "../services";
 import { createWorker, findWorkerByRut } from "../services/workersService";
 import { formatRutForDisplay, normalizeRut, validateRut, isForeignRut } from "../utils/rutUtils";
+import { toProperName } from "../utils/nameUtils";
 import { findSimilarWorkers } from "../utils/similarity";
 import {
   BANKS,
@@ -209,7 +210,7 @@ export default function WorkerEditModal({ open, mode, worker, allWorkers = [], o
         await workersService.update(rut, { groupLeader, idQr, bankDetails });
       } else {
         await workersService.update(worker.id, {
-          name: form.name.trim().toUpperCase(),
+          name: toProperName(form.name),
           groupLeader,
           idQr,
           bankDetails,
