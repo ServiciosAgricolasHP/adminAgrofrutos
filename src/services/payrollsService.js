@@ -1,4 +1,4 @@
-import { doc, serverTimestamp, updateDoc } from "firebase/firestore";
+import { doc, serverTimestamp, updateDoc, writeBatch } from "firebase/firestore";
 import { db, auth } from "../firebase";
 import { createService } from "./firestoreBase";
 import { workdaysService } from "./index";
@@ -39,26 +39,25 @@ export async function unmarkWorkdaysPaid(workdayIds, onProgress) {
   await batchUpdateWorkdays(workdayIds, { paidAt: null, paidBy: null }, onProgress);
 }
 
-// Aplica un patch a una lista de workdays. Usa `updateDoc` individual con
-// concurrencia controlada en vez de `writeBatch.update`. Motivo: si algún
-// workday ya no existe (caso típico: un admin eliminó el ciclo en cascada y
-// los workdays se borraron, pero la nómina sigue refernciándolos en
-// `workdayIds`), `batch.update` falla atómicamente con "No document to
-// update". Con `updateDoc` por doc podemos tragar el `not-found` puntual y
-// seguir limpiando el resto, permitiendo borrar/revertir la nómina sin
-// dejarla huérfana. Para los survivors, esto sigue siendo rápido por la
-// concurrencia (Promise.all en chunks).
-async function batchUpdateWorkdays(ids, patch, onProgress) {
-  if (!ids || ids.length === 0) return;
-  // Concurrency 50: cada updateDoc cuesta ~80-150ms de round-trip. Con 50 en
-  // paralelo Firestore aguanta sin problema (no es bulk-write con rate limit)
-  // y bajamos 2.5x el tiempo total vs concurrency=20. 500 workdays pasan de
-  // ~2.5s a ~1s.
+// Aplica un patch a una lista de workdays. Estrategia en 2 niveles:
+//
+// FAST PATH — `writeBatch` de hasta 500 updates, comiteados EN PARALELO.
+// Cada batch es 1 solo round-trip contra Firestore, así 1000 workdays son
+// 2 commits concurrentes (~0.5-1s total) en vez de 20 tandas de updateDoc
+// individuales (~2-4s, mucho más en conexión móvil).
+//
+// SLOW PATH (fallback por batch) — `batch.update` es atómico: si UN workday
+// del batch ya no existe (caso típico: un admin eliminó el ciclo en cascada
+// y los workdays se borraron, pero la nómina sigue referenciándolos en
+// `workdayIds`), el batch entero falla con "No document to update". En ese
+// caso reintentamos SOLO ese batch con `updateDoc` individual (concurrencia
+// 50) tragando los `not-found` puntuales. La data limpia nunca paga este
+// costo — solo los batches con referencias muertas.
+const BATCH_LIMIT = 500;
+
+async function updateWorkdaysIndividually(ids, patch) {
   const concurrency = 50;
   let skipped = 0;
-  let done = 0;
-  const total = ids.length;
-  if (onProgress) onProgress(0, total);
   for (let i = 0; i < ids.length; i += concurrency) {
     const chunk = ids.slice(i, i + concurrency);
     await Promise.all(
@@ -75,9 +74,40 @@ async function batchUpdateWorkdays(ids, patch, onProgress) {
         }
       }),
     );
-    done += chunk.length;
-    if (onProgress) onProgress(done, total);
   }
+  return skipped;
+}
+
+async function batchUpdateWorkdays(ids, patch, onProgress) {
+  if (!ids || ids.length === 0) return;
+  const total = ids.length;
+  let done = 0;
+  let skipped = 0;
+  if (onProgress) onProgress(0, total);
+
+  const chunks = [];
+  for (let i = 0; i < ids.length; i += BATCH_LIMIT) {
+    chunks.push(ids.slice(i, i + BATCH_LIMIT));
+  }
+
+  await Promise.all(
+    chunks.map(async (chunk) => {
+      try {
+        const batch = writeBatch(db);
+        for (const id of chunk) batch.update(doc(db, "workdays", id), patch);
+        await batch.commit();
+      } catch (err) {
+        const msg = String(err?.message || "");
+        const notFound = err?.code === "not-found" || /No document to update/.test(msg);
+        if (!notFound) throw err;
+        // Batch con referencias muertas — reintento individual solo acá.
+        skipped += await updateWorkdaysIndividually(chunk, patch);
+      }
+      done += chunk.length;
+      if (onProgress) onProgress(done, total);
+    }),
+  );
+
   if (skipped > 0) {
     console.warn(
       `batchUpdateWorkdays: ${skipped}/${ids.length} workdays ya no existen (probablemente borrados con su ciclo). Continuando con los demás.`,
