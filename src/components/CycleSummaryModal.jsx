@@ -1115,6 +1115,15 @@ export default function CycleSummaryModal({
         const rowRate = ov.rate != null && ov.rate !== "" ? Number(ov.rate) : baseRate;
         const computedAmount = computeAmount(qty, overtimeHours, rowRate);
         const amount = ov.amount != null && ov.amount !== "" ? Number(ov.amount) : computedAmount;
+        // Transporte por fila: monto manual que SUMA al total de la fila y al
+        // total a cobrar (decisión de diseño — si se usa, conviene excluir la
+        // tabla del transportista para no cobrar doble). Default 0.
+        const transport = ov.transport != null && ov.transport !== "" ? Number(ov.transport) : 0;
+        // Personas: informativa — editable pero no afecta montos. Default: el
+        // conteo real de trabajadores del día.
+        const workerCount = ov.workerCount != null && ov.workerCount !== ""
+          ? Number(ov.workerCount)
+          : Number(r.workerCount) || 0;
         const hasOverride = Object.keys(ov).length > 0;
         return {
           ...r,
@@ -1122,6 +1131,8 @@ export default function CycleSummaryModal({
           chargedOvertimeHours: overtimeHours,
           chargedRate: rowRate,
           chargedAmount: amount,
+          chargedTransport: transport,
+          chargedWorkerCount: workerCount,
           rowKey: newKey,
           isExtra: false,
           hasOverride,
@@ -1148,6 +1159,8 @@ export default function CycleSummaryModal({
           chargedOvertimeHours: overtimeHours,
           chargedRate: rowRate,
           chargedAmount: amount,
+          chargedTransport: Number(ex.transport) || 0,
+          chargedWorkerCount: ex.workerCount != null && ex.workerCount !== "" ? Number(ex.workerCount) : 0,
           rowKey: `extra:${ex.id}`,
           isExtra: true,
           extraId: ex.id,
@@ -1160,20 +1173,27 @@ export default function CycleSummaryModal({
         if (!b.date) return -1;
         return a.date < b.date ? -1 : a.date > b.date ? 1 : 0;
       });
-      let chargedTotalAmount = 0, chargedTotalQty = 0, chargedTotalOvertimeHours = 0;
+      let chargedTotalAmount = 0, chargedTotalQty = 0, chargedTotalOvertimeHours = 0,
+        chargedTotalTransport = 0, chargedTotalWorkerCount = 0;
       for (const r of chargedRows) {
         chargedTotalAmount += r.chargedAmount;
         chargedTotalQty += r.chargedQty;
         chargedTotalOvertimeHours += r.chargedOvertimeHours;
+        chargedTotalTransport += r.chargedTransport || 0;
+        chargedTotalWorkerCount += r.chargedWorkerCount || 0;
       }
       const chargedTotals = {
         amount: chargedTotalAmount,
         qty: chargedTotalQty,
         overtimeHours: chargedTotalOvertimeHours,
+        // Transporte manual por fila — suma aparte del amount para que el
+        // subtotal de producción no se contamine, pero el Total sí lo incluye.
+        transport: chargedTotalTransport,
         pisoAmount: ld.totals.pisoAmount || 0,
         pisoCount: ld.totals.pisoCount || 0,
-        // Stats informativas: vienen del dato real (no se modifican con overrides).
-        workerDays: ld.totals.workerDays || 0,
+        // Personas: suma de los conteos por fila (con overrides aplicados —
+        // sin ediciones coincide con el dato real).
+        workerDays: chargedTotalWorkerCount,
         heTotal: ld.totals.heTotal || 0,
         bonosTotal: ld.totals.bonosTotal || 0,
       };
@@ -1254,7 +1274,9 @@ export default function CycleSummaryModal({
   // Se usa como fila "Subtotal" en el desglose cuando hay descuento aplicado.
   const subtotalCobrar = useMemo(() => {
     let sum = 0;
-    for (const cl of cobrarLabors) if (cl.include) sum += cl.chargedTotals?.amount || 0;
+    // El transporte manual por fila (chargedTotals.transport) suma al cobro
+    // junto con la producción del labor.
+    for (const cl of cobrarLabors) if (cl.include) sum += (cl.chargedTotals?.amount || 0) + (cl.chargedTotals?.transport || 0);
     for (const cc of cobrarCarriers) if (cc.include) sum += cc.chargedTotalAmount || 0;
     return sum;
   }, [cobrarLabors, cobrarCarriers]);
@@ -1772,6 +1794,19 @@ export default function CycleSummaryModal({
       }
 
       // ============ HOJA TOTAL GENERAL ============
+      // Transporte manual por fila (cobrar): las hojas por labor no tienen esa
+      // columna, así que lo agregamos como una línea propia en el Total para
+      // que el XLSX cierre igual que la pantalla (subtotalCobrar lo incluye).
+      if (mode === "cobrar") {
+        let laborTransportSum = 0;
+        for (const ld of laborsForMode) {
+          if (!ld.include) continue;
+          laborTransportSum += Number(ld.chargedTotals?.transport) || 0;
+        }
+        if (laborTransportSum > 0) {
+          sheetTotals.push({ displayName: "Transporte (ajustes en labores)", totalRef: null, fallback: laborTransportSum });
+        }
+      }
       const wsTotal = wb.addWorksheet(safeName("Total"));
       wsTotal.getColumn(1).width = 6;
       wsTotal.getCell("B2").value = mode === "cobrar"
@@ -1794,7 +1829,8 @@ export default function CycleSummaryModal({
       for (const st of sheetTotals) {
         wsTotal.getCell(`B${totalRow}`).value = st.displayName;
         const ref = wsTotal.getCell(`C${totalRow}`);
-        ref.value = { formula: st.totalRef, result: st.fallback };
+        // Entradas sin hoja propia (ej. transporte manual) van como literal.
+        ref.value = st.totalRef ? { formula: st.totalRef, result: st.fallback } : st.fallback;
         ref.numFmt = moneyFmt;
         totalRow++;
       }
@@ -2890,7 +2926,7 @@ function LaborTable({
             {showCol("rate") && <th style={{ ...cellH, textAlign: "right" }}>{isHE ? "Total HE" : "Valor"}</th>}
             {showCol("valorTotal") && <th style={{ ...cellH, textAlign: "right" }}>Valor total</th>}
             {showPiso && showCol("piso") && <th style={{ ...cellH, textAlign: "right" }}>Piso</th>}
-            {showCol("transport") && <th style={cellH}>Transporte</th>}
+            {showCol("transport") && <th style={{ ...cellH, textAlign: "right" }}>Transporte</th>}
             {showCol("total") && <th style={{ ...cellH, textAlign: "right" }}>Total</th>}
             {showCol("personas") && <th style={{ ...cellH, textAlign: "right" }}>Personas</th>}
             {isHE && showCol("bonos") && <th style={{ ...cellH, textAlign: "right" }}>Bonos</th>}
@@ -2904,7 +2940,8 @@ function LaborTable({
             const heHrs = rowHE(r);
             const rate = rowRate(r);
             const valorTotal = rowValorTotal(r);
-            const totalCol = isCobrar ? valorTotal : valorTotal + piso;
+            const transport = isCobrar ? Number(r.chargedTransport) || 0 : 0;
+            const totalCol = isCobrar ? valorTotal + transport : valorTotal + piso;
             const dateIsRed = isHE && redDates && r.date && redDates.has(r.date);
             const dateCellStyle = dateIsRed ? { ...cell, color: "#c00", fontWeight: 700 } : cell;
             const rowKey = r.rowKey || r.date || `r${Math.random()}`;
@@ -3032,13 +3069,40 @@ function LaborTable({
                     {piso > 0 ? `${r.pisoCount > 1 ? `${r.pisoCount}× ` : ""}${fmtCurrency(piso)}` : "—"}
                   </td>
                 )}
-                {showCol("transport") && <td style={{ ...cell, textAlign: "right", color: "#999" }}>$ -</td>}
+                {showCol("transport") && (
+                  <td style={{ ...cell, textAlign: "right", padding: editable ? 3 : "5px 8px" }}>
+                    {editable ? (
+                      <input
+                        type="number"
+                        value={inputVal(transport)}
+                        onChange={(e) => handleField(r, "transport", e.target.value)}
+                        style={cobrarInputStyle}
+                        title="Monto de transporte del día — SUMA al Total de la fila y al total a cobrar"
+                      />
+                    ) : transport > 0 ? (
+                      fmtCurrency(transport)
+                    ) : (
+                      <span style={{ color: "#999" }}>$ -</span>
+                    )}
+                  </td>
+                )}
                 {showCol("total") && (
                   <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums", fontWeight: 600 }}>{fmtCurrency(totalCol)}</td>
                 )}
                 {showCol("personas") && (
-                  <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
-                    {(r.workerCount || 0) > 0 ? r.workerCount : (r.isExtra ? "—" : 0)}
+                  <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums", padding: editable ? 3 : "5px 8px" }}>
+                    {editable ? (
+                      <input
+                        type="number"
+                        value={inputVal(isCobrar ? r.chargedWorkerCount : r.workerCount)}
+                        onChange={(e) => handleField(r, "workerCount", e.target.value)}
+                        style={cobrarInputStyle}
+                        title="Cantidad de personas del día — informativo, no afecta montos"
+                      />
+                    ) : (() => {
+                      const wc = isCobrar ? Number(r.chargedWorkerCount) || 0 : Number(r.workerCount) || 0;
+                      return wc > 0 ? wc : (r.isExtra ? "—" : 0);
+                    })()}
                   </td>
                 )}
                 {isHE && showCol("bonos") && (
@@ -3125,10 +3189,14 @@ function LaborTable({
                 {fmtCurrency(totals.pisoAmount || 0)}
               </td>
             )}
-            {showCol("transport") && <td style={cell}></td>}
+            {showCol("transport") && (
+              <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
+                {isCobrar && (totals.transport || 0) > 0 ? fmtCurrency(totals.transport) : ""}
+              </td>
+            )}
             {showCol("total") && (
               <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
-                {fmtCurrency(isCobrar ? totals.amount : totals.amount + (totals.pisoAmount || 0))}
+                {fmtCurrency(isCobrar ? totals.amount + (totals.transport || 0) : totals.amount + (totals.pisoAmount || 0))}
               </td>
             )}
             {showCol("personas") && (

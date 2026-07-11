@@ -179,6 +179,10 @@ function findCancellingNcs(dteDoc, allDocs) {
 // empresa, no tiene sentido obligarlo a re-seleccionarla cada vez.
 const LS_SELECTED_COMPANY = "facturacion.selectedCompanyId";
 
+// Tamaño de página de la tabla principal. La tabla siempre pagina (aunque no
+// haya búsqueda activa) para que meses con cientos de docs no rendericen todo.
+const PAGE_SIZE = 20;
+
 export default function Facturacion() {
   const toast = useToast();
   const [companies, setCompanies] = useState([]);
@@ -287,7 +291,11 @@ export default function Facturacion() {
       arr = arr.filter((d) => d.kind === kindTab);
     }
     if (selectedCompanyId) arr = arr.filter((d) => d.companyId === selectedCompanyId);
-    if (periodoFilter) arr = arr.filter((d) => d.periodo === periodoFilter);
+    // Al buscar por texto (contraparte/RUT/folio) el período se ignora: la
+    // búsqueda responde "todas las facturas de esa empresa", no solo las del
+    // mes elegido. Al limpiar la búsqueda el filtro de período vuelve a regir.
+    const searching = !!search.trim();
+    if (periodoFilter && !searching) arr = arr.filter((d) => d.periodo === periodoFilter);
     if (tipoFilter) arr = arr.filter((d) => String(d.tipo) === String(tipoFilter));
     if (!isRetencionesView && paymentFilter) {
       arr = arr.filter((d) => (d.paymentStatus || "unpaid") === paymentFilter);
@@ -344,6 +352,37 @@ export default function Facturacion() {
   const toggleSort = (key) => {
     setSortBy((cur) => cur.key === key ? { key, dir: cur.dir === "asc" ? "desc" : "asc" } : { key, dir: key === "fechaEmision" ? "desc" : "asc" });
   };
+
+  // Paginación de la tabla plana (no aplica al modo "por centro de costo" ni
+  // a retenciones/resumen — esos son vistas de reporte con subtotales que se
+  // distorsionarían si cortamos filas). Cualquier cambio de filtro/orden
+  // vuelve a página 1.
+  const [page, setPage] = useState(1);
+  useEffect(() => {
+    setPage(1);
+  }, [kindTab, selectedCompanyId, periodoFilter, tipoFilter, paymentFilter, search, sortBy]);
+  const pageCount = Math.max(1, Math.ceil(sortedFiltered.length / PAGE_SIZE));
+  // Clamp defensivo: si los docs se achican (ej. cambio de empresa con menos
+  // páginas) y el effect de reset aún no corrió, no mostramos página vacía.
+  const currentPage = Math.min(page, pageCount);
+  const pagedDocs = useMemo(
+    () => sortedFiltered.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE),
+    [sortedFiltered, currentPage],
+  );
+  // Números de página con ventana: 1 … (cur−1) cur (cur+1) … último.
+  const pageNumbers = useMemo(() => {
+    if (pageCount <= 7) return Array.from({ length: pageCount }, (_, i) => i + 1);
+    const set = new Set([1, pageCount, currentPage - 1, currentPage, currentPage + 1]);
+    const nums = [...set].filter((n) => n >= 1 && n <= pageCount).sort((a, b) => a - b);
+    const out = [];
+    let prev = 0;
+    for (const n of nums) {
+      if (n - prev > 1) out.push("…");
+      out.push(n);
+      prev = n;
+    }
+    return out;
+  }, [pageCount, currentPage]);
 
   // Lista de contrapartes únicas (razón social) para el datalist del buscador.
   // Saca de los docs filtrados por empresa y kind (sin aplicar el resto de
@@ -1616,10 +1655,13 @@ export default function Facturacion() {
       {kindTab !== "resumen" && (
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <select
-          value={periodoFilter}
+          value={search.trim() ? "" : periodoFilter}
           onChange={(e) => setPeriodoFilter(e.target.value)}
-          title="Filtrar por período"
-          className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1.5 text-xs"
+          disabled={!!search.trim()}
+          title={search.trim()
+            ? "Ignorado mientras buscás — la búsqueda muestra todos los períodos de la empresa"
+            : "Filtrar por período"}
+          className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1.5 text-xs disabled:opacity-60"
         >
           <option value="">Todos los períodos</option>
           {periodoOptions.map((p) => (
@@ -2070,7 +2112,7 @@ export default function Facturacion() {
                 );
                 };
 
-                if (!groupByCostCenter) return sortedFiltered.map(renderDocRow);
+                if (!groupByCostCenter) return pagedDocs.map(renderDocRow);
 
                 const totalCols = kindTab === "venta" ? 11 : 10;
                 const groups = groupDocsByCostCenter(sortedFiltered, kindTab);
@@ -2099,6 +2141,54 @@ export default function Facturacion() {
             </tbody>
           </table>
         </div>
+
+        {/* Paginación — solo en la tabla plana. En modo "por centro de costo"
+            se muestra todo (los subtotales por grupo no se pueden cortar). */}
+        {!groupByCostCenter && sortedFiltered.length > 0 && (
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs">
+            <span className="text-[var(--color-muted)]">
+              Mostrando {(currentPage - 1) * PAGE_SIZE + 1}–{Math.min(currentPage * PAGE_SIZE, sortedFiltered.length)} de {fmtNumber(sortedFiltered.length)}
+            </span>
+            {pageCount > 1 && (
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => setPage(Math.max(1, currentPage - 1))}
+                  disabled={currentPage <= 1}
+                  className="min-h-[32px] rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2.5 py-1 hover:bg-[var(--color-accent-soft)] disabled:opacity-40"
+                >
+                  ‹ Anterior
+                </button>
+                {pageNumbers.map((n, i) =>
+                  n === "…" ? (
+                    <span key={`e_${i}`} className="px-1 text-[var(--color-muted)]">…</span>
+                  ) : (
+                    <button
+                      key={n}
+                      type="button"
+                      onClick={() => setPage(n)}
+                      className={`min-h-[32px] min-w-[32px] rounded-md border px-2 py-1 tabular-nums ${
+                        n === currentPage
+                          ? "border-[var(--color-accent)] bg-[var(--color-accent)] font-semibold text-[var(--color-accent-fg)]"
+                          : "border-[var(--color-border)] bg-[var(--color-surface-2)] hover:bg-[var(--color-accent-soft)]"
+                      }`}
+                    >
+                      {n}
+                    </button>
+                  ),
+                )}
+                <button
+                  type="button"
+                  onClick={() => setPage(Math.min(pageCount, currentPage + 1))}
+                  disabled={currentPage >= pageCount}
+                  className="min-h-[32px] rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2.5 py-1 hover:bg-[var(--color-accent-soft)] disabled:opacity-40"
+                >
+                  Siguiente ›
+                </button>
+              </div>
+            )}
+          </div>
+        )}
         </>
       )}
 
