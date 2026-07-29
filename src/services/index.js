@@ -38,4 +38,10 @@ export const dteDocumentsService = createService("dteDocument", "dteDocuments");
 export { tripsService as transportsService, paymentsService as transportPaymentsService } from "./transportsService";
 export const logsService = createService("log", "logs");
 
+// Fichas de "Información y Cuentas" — libreta compartida de contactos (persona
+// o empresa) con datos bancarios de fácil acceso para copiar/pegar. Modelo
+// independiente: no se vincula a `worker` ni `companies`; el usuario crea sus
+// propias fichas. Ver `src/screens/InfoAccounts.jsx`.
+export const contactCardsService = createService("contactCard", "contactCards");
+
 export { logAction } from "./logger";

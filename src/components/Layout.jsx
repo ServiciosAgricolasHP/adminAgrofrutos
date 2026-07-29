@@ -18,6 +18,7 @@ const navItems = [
   { to: "/advances", label: "Anticipos / Bonos", icon: "🪙" },
   { to: "/payroll", label: "Nómina", icon: "💰" },
   { to: "/facturacion", label: "Facturación", icon: "🧾" },
+  { to: "/info-cuentas", label: "Información y Cuentas", icon: "📇" },
   { to: "/links", label: "Links útiles", icon: "🔗" },
 ];
 

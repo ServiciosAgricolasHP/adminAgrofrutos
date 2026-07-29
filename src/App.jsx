@@ -18,6 +18,7 @@ import Advances from "./screens/Advances";
 import MigrateWorkers from "./screens/MigrateWorkers";
 import CleanupPaidWorkdays from "./screens/CleanupPaidWorkdays";
 import InterestLinks from "./screens/InterestLinks";
+import InfoAccounts from "./screens/InfoAccounts";
 import AdminConsole from "./screens/AdminConsole";
 import Audit from "./screens/Audit";
 import Calendar from "./screens/Calendar";
@@ -48,6 +49,7 @@ export default function App() {
                 <Route path="payroll" element={<Payroll />} />
                 <Route path="advances" element={<Advances />} />
                 <Route path="links" element={<InterestLinks />} />
+                <Route path="info-cuentas" element={<InfoAccounts />} />
                 <Route path="calendar" element={<Calendar />} />
                 <Route path="facturacion" element={<Facturacion />} />
                 <Route
