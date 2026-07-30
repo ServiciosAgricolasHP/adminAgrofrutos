@@ -162,6 +162,11 @@ export default function Payroll() {
 
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [detailPayroll, setDetailPayroll] = useState(null);
+  // Renombrar nómina: `renaming` = la nómina en edición (o null). El nombre es
+  // solo un label — no es clave de nada — así que se puede cambiar en cualquier
+  // estado (pendiente o pagada). Actualiza el doc y el snapshot embebido para
+  // que las re-descargas viejas también reflejen el nombre nuevo.
+  const [renaming, setRenaming] = useState(null);
 
   // Per-cycle aggregates: { [cycleId]: { unpaid, paid, total } }
   const [cycleStats, setCycleStats] = useState({});
@@ -790,6 +795,18 @@ export default function Payroll() {
     await payrollsService.update(p.id, { classification: next });
     await load();
   };
+  const onConfirmRename = async (newName) => {
+    if (!renaming) return;
+    const name = (newName || "").trim();
+    if (!name || name === renaming.name) { setRenaming(null); return; }
+    await payrollsService.update(renaming.id, { name });
+    // Snapshot embebido (para re-descargas). Puede no existir en nóminas viejas
+    // → toleramos el not-found sin romper el rename.
+    try { await payrollSnapshotsService.update(renaming.id, { name }); } catch { /* snapshot inexistente */ }
+    setRenaming(null);
+    await load();
+    toast.success("Nómina renombrada");
+  };
   const [payConfirm, setPayConfirm] = useState(null); // { payroll, mode: "pay" | "revert" }
   const onAskMarkPaid = (p) => setPayConfirm({ payroll: p, mode: "pay" });
   const onAskRevert = (p) => setPayConfirm({ payroll: p, mode: "revert" });
@@ -1032,6 +1049,7 @@ export default function Payroll() {
           onDownloadSnapshot={onDownloadSnapshot}
           onChangeClassification={onChangeClassification}
           onOpen={setDetailPayroll}
+          onRename={setRenaming}
         />
       ) : (
         <WorkersHistory
@@ -1049,6 +1067,14 @@ export default function Payroll() {
         onCancel={() => setConfirmDelete(null)}
         onConfirm={onDelete}
       />
+
+      {renaming && (
+        <RenamePayrollModal
+          payroll={renaming}
+          onCancel={() => setRenaming(null)}
+          onConfirm={onConfirmRename}
+        />
+      )}
 
       <PayConfirmModal
         info={payConfirm}
@@ -1633,7 +1659,54 @@ function PayConfirmModal({ info, onCancel, onConfirm }) {
   );
 }
 
-function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedownload, onDownloadNominaOnly, onDownloadSnapshot, onChangeClassification, onOpen }) {
+// Modal chico para renombrar una nómina. El nombre es solo un label, así que
+// no valida más que "no vacío". Enter confirma, Escape cancela (vía Modal).
+function RenamePayrollModal({ payroll, onCancel, onConfirm }) {
+  const [name, setName] = useState(payroll?.name || "");
+  const [busy, setBusy] = useState(false);
+  const submit = async () => {
+    if (!name.trim() || busy) return;
+    setBusy(true);
+    try {
+      await onConfirm(name);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Modal
+      open
+      onClose={onCancel}
+      size="sm"
+      title="Renombrar nómina"
+      footer={
+        <>
+          <button onClick={onCancel} className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm">
+            Cancelar
+          </button>
+          <button
+            onClick={submit}
+            disabled={busy || !name.trim()}
+            className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-[var(--color-accent-fg)] hover:bg-[var(--color-accent-hover)] disabled:opacity-60"
+          >
+            {busy ? "Guardando…" : "Guardar"}
+          </button>
+        </>
+      }
+    >
+      <label className="mb-1 block text-xs font-medium text-[var(--color-muted)]">Nombre</label>
+      <input
+        autoFocus
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && submit()}
+        className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)]"
+      />
+    </Modal>
+  );
+}
+
+function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedownload, onDownloadNominaOnly, onDownloadSnapshot, onChangeClassification, onOpen, onRename }) {
   const isMobile = useIsMobile();
   const [statusFilter, setStatusFilter] = useState("all"); // all | pending | paid
   const [monthFilter, setMonthFilter] = useState("all"); // all | YYYY-MM
@@ -1686,6 +1759,80 @@ function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedow
     }
     return { pending, paid, total: pending + paid };
   }, [filtered]);
+
+  // Paginación de a 15 para que el historial no crezca sin fin. Los totales y
+  // filtros siguen operando sobre TODO el set filtrado; solo se pagina lo que
+  // se renderiza. Cualquier cambio de filtro/tab/búsqueda vuelve a página 1.
+  const PAGE_SIZE = 15;
+  const [page, setPage] = useState(1);
+  useEffect(() => {
+    setPage(1);
+  }, [classificationTab, statusFilter, monthFilter, search]);
+  const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const currentPage = Math.min(page, pageCount);
+  const paged = useMemo(
+    () => filtered.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE),
+    [filtered, currentPage],
+  );
+  const pageNumbers = useMemo(() => {
+    if (pageCount <= 7) return Array.from({ length: pageCount }, (_, i) => i + 1);
+    const set = new Set([1, pageCount, currentPage - 1, currentPage, currentPage + 1]);
+    const nums = [...set].filter((n) => n >= 1 && n <= pageCount).sort((a, b) => a - b);
+    const out = [];
+    let prev = 0;
+    for (const n of nums) {
+      if (n - prev > 1) out.push("…");
+      out.push(n);
+      prev = n;
+    }
+    return out;
+  }, [pageCount, currentPage]);
+
+  const pager = filtered.length > 0 && (
+    <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 pt-1 text-xs">
+      <span className="text-[var(--color-muted)]">
+        Mostrando {(currentPage - 1) * PAGE_SIZE + 1}–{Math.min(currentPage * PAGE_SIZE, filtered.length)} de {filtered.length}
+      </span>
+      {pageCount > 1 && (
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => setPage(Math.max(1, currentPage - 1))}
+            disabled={currentPage <= 1}
+            className="min-h-[32px] rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2.5 py-1 hover:bg-[var(--color-accent-soft)] disabled:opacity-40"
+          >
+            ‹
+          </button>
+          {pageNumbers.map((n, i) =>
+            n === "…" ? (
+              <span key={`e_${i}`} className="px-1 text-[var(--color-muted)]">…</span>
+            ) : (
+              <button
+                key={n}
+                type="button"
+                onClick={() => setPage(n)}
+                className={`min-h-[32px] min-w-[32px] rounded-md border px-2 py-1 tabular-nums ${
+                  n === currentPage
+                    ? "border-[var(--color-accent)] bg-[var(--color-accent)] font-semibold text-[var(--color-accent-fg)]"
+                    : "border-[var(--color-border)] bg-[var(--color-surface-2)] hover:bg-[var(--color-accent-soft)]"
+                }`}
+              >
+                {n}
+              </button>
+            ),
+          )}
+          <button
+            type="button"
+            onClick={() => setPage(Math.min(pageCount, currentPage + 1))}
+            disabled={currentPage >= pageCount}
+            className="min-h-[32px] rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2.5 py-1 hover:bg-[var(--color-accent-soft)] disabled:opacity-40"
+          >
+            ›
+          </button>
+        </div>
+      )}
+    </div>
+  );
 
   if (payrolls.length === 0) {
     return (
@@ -1748,25 +1895,35 @@ function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedow
       </div>
 
     {isMobile ? (
+      <>
       <div className="flex-1 space-y-2 overflow-auto">
         {filtered.length === 0 ? (
           <div className="rounded-lg border border-dashed border-[var(--color-border)] py-8 text-center text-sm text-[var(--color-muted)]">
             Ninguna nómina coincide con el filtro.
           </div>
         ) : (
-          filtered.map((p) => (
+          paged.map((p) => (
             <div
               key={p.id}
               className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-3 space-y-2"
             >
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
-                  <button
-                    onClick={() => onOpen(p)}
-                    className="text-left text-base font-medium text-[var(--color-accent)] hover:underline"
-                  >
-                    {p.name}
-                  </button>
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => onOpen(p)}
+                      className="text-left text-base font-medium text-[var(--color-accent)] hover:underline"
+                    >
+                      {p.name}
+                    </button>
+                    <button
+                      onClick={() => onRename(p)}
+                      title="Renombrar nómina"
+                      className="shrink-0 rounded px-1 text-sm text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)] hover:text-[var(--color-accent)]"
+                    >
+                      ✎
+                    </button>
+                  </div>
                   <div className="text-xs text-[var(--color-muted)]">{fmtDate(p.createdAt)}</div>
                 </div>
                 <span
@@ -1838,7 +1995,10 @@ function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedow
           ))
         )}
       </div>
+      {pager}
+      </>
     ) : (
+    <>
     <ResizableArea storageKey="payroll-history" defaultHeight={440} minHeight={240}>
     <div className="h-full overflow-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">
       <table className="w-full text-sm">
@@ -1862,12 +2022,21 @@ function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedow
               </td>
             </tr>
           )}
-          {filtered.map((p) => (
+          {paged.map((p) => (
             <tr key={p.id} className="border-t border-[var(--color-border)]">
               <td className="px-3 py-2">
-                <button onClick={() => onOpen(p)} className="text-[var(--color-accent)] hover:underline">
-                  {p.name}
-                </button>
+                <div className="flex items-center gap-1">
+                  <button onClick={() => onOpen(p)} className="text-[var(--color-accent)] hover:underline">
+                    {p.name}
+                  </button>
+                  <button
+                    onClick={() => onRename(p)}
+                    title="Renombrar nómina"
+                    className="shrink-0 rounded px-1 text-xs text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)] hover:text-[var(--color-accent)]"
+                  >
+                    ✎
+                  </button>
+                </div>
               </td>
               <td className="px-3 py-2">
                 <span
@@ -1934,6 +2103,8 @@ function HistoryList({ payrolls, onMarkPaid, onMarkPending, onAskDelete, onRedow
       </table>
     </div>
     </ResizableArea>
+    {pager}
+    </>
     )}
     </div>
   );
