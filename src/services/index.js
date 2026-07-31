@@ -44,4 +44,9 @@ export const logsService = createService("log", "logs");
 // propias fichas. Ver `src/screens/InfoAccounts.jsx`.
 export const contactCardsService = createService("contactCard", "contactCards");
 
+// Indicadores del banner (sueldo base, valor día, valor hora extra). Se editan
+// manualmente desde el header y se muestran tipo ticker del dólar. Un único doc
+// `indicators/main` con los 3 valores — no hace falta más para valores fijos.
+export const indicatorsService = createService("indicator", "indicators");
+
 export { logAction } from "./logger";
