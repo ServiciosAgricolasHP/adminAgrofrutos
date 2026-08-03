@@ -14,6 +14,7 @@ import {
   qualityLabel,
   containerLabel,
 } from "../utils/cosechaCombos";
+import { countingStageIds, normalizeStages } from "../utils/tratoEtapas";
 
 const fmtCLP = (v) =>
   new Intl.NumberFormat("es-CL", { style: "currency", currency: "CLP", minimumFractionDigits: 0 })
@@ -57,7 +58,7 @@ export default function ProductionSummaryModal({
   // vista a nivel faena donde solo queremos los abiertos por default, pero
   // los cerrados igual deben aparecer como chip apagado por si el usuario
   // quiere verlos también.
-  const [typeFilter, setTypeFilter] = useState({ cosecha: true, trato: true });
+  const [typeFilter, setTypeFilter] = useState({ cosecha: true, trato: true, tratoEtapas: true });
   const [enabledCycles, setEnabledCycles] = useState(
     () => new Set(initialEnabledCycleIds || cycles.map((c) => c.id)),
   );
@@ -106,7 +107,7 @@ export default function ProductionSummaryModal({
     for (const c of cycles) {
       if (!enabledCycles.has(c.id)) continue;
       for (const l of c.labors || []) {
-        if (l.type !== "cosecha" && l.type !== "trato") continue;
+        if (l.type !== "cosecha" && l.type !== "trato" && l.type !== "tratoEtapas") continue;
         if (!typeFilter[l.type]) continue;
         cols.push({
           key: `${c.id}__${l.id}`,
@@ -179,10 +180,18 @@ export default function ProductionSummaryModal({
         const wds = (wdByCycle[col.cycleId] || []).filter(
           (w) => w.laborId === col.labor.id && w.workerRut,
         );
+        const countingForCol = col.labor.type === "tratoEtapas" ? countingStageIds(col.labor) : null;
         for (const wd of wds) {
-          const hasProd = col.labor.type === "cosecha"
-            ? Number(wd.qty) > 0 && !wd.pisoOnly
-            : Number(getTratoTierTotals(wd).qty) > 0 && !wd.pisoOnly;
+          let hasProd;
+          if (col.labor.type === "cosecha") {
+            hasProd = Number(wd.qty) > 0 && !wd.pisoOnly;
+          } else if (col.labor.type === "tratoEtapas") {
+            // Solo cuenta como "persona con producción" si aportó en una etapa
+            // que cuenta (misma regla que las unidades).
+            hasProd = countingForCol.has(String(wd.stageId)) && Number(wd.qty) > 0 && !wd.pisoOnly;
+          } else {
+            hasProd = Number(getTratoTierTotals(wd).qty) > 0 && !wd.pisoOnly;
+          }
           if (hasProd) personSet.add(wd.workerRut);
         }
         const unitStr = [...unitSet].join("/");
@@ -218,6 +227,14 @@ export default function ProductionSummaryModal({
             onChange={(e) => setTypeFilter((p) => ({ ...p, trato: e.target.checked }))}
           />
           <span>🛠 Trato</span>
+        </label>
+        <label className="flex items-center gap-1">
+          <input
+            type="checkbox"
+            checked={typeFilter.tratoEtapas}
+            onChange={(e) => setTypeFilter((p) => ({ ...p, tratoEtapas: e.target.checked }))}
+          />
+          <span>🏕 Por etapas</span>
         </label>
         {/* Filtro de ciclos — solo se muestra cuando hay más de uno */}
         {cycles.length > 1 && (
@@ -513,7 +530,9 @@ function LaborSummaryCard({ data, catalogs }) {
 
   const typeLabel = col.labor.type === "cosecha"
     ? "🌾 Cosecha"
-    : `🛠 ${tratoTypeLabel(catalogs, col.labor.tratoType ?? 0)}`;
+    : col.labor.type === "tratoEtapas"
+      ? "🏕 Por etapas"
+      : `🛠 ${tratoTypeLabel(catalogs, col.labor.tratoType ?? 0)}`;
 
   // Texto plano del desglose para pegar en chat / nota. Mantenemos columnas
   // alineadas con padStart sobre los strings finales — funciona en monospace
@@ -779,6 +798,37 @@ function buildCell(labor, date, workdays, dayPrices, catalogs) {
     const persons = ruts.size;
     const avg = persons > 0 ? qty / persons : 0;
     return { qty, amount, unit, priceLabel, persons, avg };
+  }
+  if (labor.type === "tratoEtapas") {
+    // Conteo del día (qty) = solo etapas que cuentan; pago (amount) = todas.
+    // Además armamos un desglose por etapa del día para que se vea qué se
+    // trabajó y cuál cuenta (✓).
+    const counting = countingStageIds(labor);
+    let qty = 0;
+    let amount = 0;
+    const ruts = new Set();
+    const byStage = new Map(); // stageId → qty del día
+    for (const wd of workdays) {
+      if (wd.pisoOnly) continue;
+      amount += Number(wd.amount) || 0;
+      const q = Number(wd.qty) || 0;
+      const sid = String(wd.stageId ?? "");
+      byStage.set(sid, (byStage.get(sid) || 0) + q);
+      if (counting.has(sid)) {
+        qty += q;
+        if (q > 0 && wd.workerRut) ruts.add(wd.workerRut);
+      }
+    }
+    if (qty === 0 && amount === 0) return null;
+    // Desglose "Prep 5 · Inst 5✓" en el orden de las etapas del labor.
+    const stages = normalizeStages(labor.stages);
+    const priceLabel = stages
+      .filter((s) => (byStage.get(String(s.id)) || 0) > 0)
+      .map((s) => `${s.name} ${fmtNum(byStage.get(String(s.id)))}${s.counts ? "✓" : ""}`)
+      .join(" · ");
+    const persons = ruts.size;
+    const avg = persons > 0 ? qty / persons : 0;
+    return { qty, amount, unit: "unid", priceLabel, persons, avg };
   }
   return null;
 }

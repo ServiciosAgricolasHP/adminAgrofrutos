@@ -17,6 +17,7 @@ import {
   formatLaborDayPrice,
 } from "../utils/cosechaCombos";
 import { isRedDay } from "../utils/tratoHE";
+import { stageById, countingStageIds } from "../utils/tratoEtapas";
 import { tripsService } from "../services/transportsService";
 import { cyclesService, workdaysService } from "../services";
 import { useCarriers } from "../contexts/CarriersContext";
@@ -76,6 +77,7 @@ function activityLabel(labor, catalogs, containers, tratoUnitsSet) {
     }
     return `Trato — ${tt}`;
   }
+  if (type === "tratoEtapas") return "Por etapas";
   if (type === "tratoHE") return "Jornada + HE";
   if (type === "main") return "Jornada simple";
   if (type === "supervision") return "Supervisión";
@@ -105,6 +107,7 @@ function laborQtyUnit(labor, catalogs, containers, tratoUnitsSet) {
     }
     return tratoTypeLabel(catalogs, labor?.tratoType ?? 0);
   }
+  if (type === "tratoEtapas") return "Unidades";
   // Para tratoHE el unit primario son jornadas. Las horas extras viven
   // adentro de la línea de monto ($amount + Xh), no en una columna aparte.
   if (type === "tratoHE") return "Jornadas";
@@ -122,6 +125,13 @@ function formatRowMetric(row, type, catalogs) {
     }
     return fmtNumber(row.qty);
   }
+  if (type === "tratoEtapas") {
+    // Cada fila es una etapa: mostramos su cantidad + nombre. Las etapas que
+    // no cuentan llevan un guioncito para que se lea que no suman unidades.
+    const name = row.stageName || "";
+    const tag = row.stageCounts === false ? " (no cuenta)" : "";
+    return `${fmtNumber(row.qty)}${name ? ` ${name}` : ""}${tag}`.trim();
+  }
   if (type === "tratoHE") {
     const parts = [];
     if (row.qty > 0) parts.push(`${fmtNumber(row.qty)} jornadas`);
@@ -135,6 +145,10 @@ function formatRowMetric(row, type, catalogs) {
 // misma unidad, devuelve "20 metros". Si hay mezcla, "12 metros + 8 polines".
 // Si nadie tiene unidad configurada, cae al qty plano.
 function formatTotalsMetric(totals, type, rows, catalogs) {
+  if (type === "tratoEtapas") {
+    // Unidades producidas = solo etapas que cuentan (countedQty).
+    return `${fmtNumber(totals.countedQty ?? totals.qty)} unid.`;
+  }
   if (type === "tratoHE") {
     const parts = [];
     if (totals.qty > 0) parts.push(`${fmtNumber(totals.qty)} jornadas`);
@@ -172,21 +186,22 @@ function buildDailyRows(labor, wdMap, dayPrices = {}) {
   const byKey = new Map();
   const containers = new Set();
   const isTrato = labor?.type === "trato";
-  // Para trato agrupamos por (date, tierKey). Sin tierKey usable caemos a
-  // "t0" (compatibilidad con docs viejos). El groupKey es lo que indexa
-  // `byKey`, pero el rowKey final que ve la UI también incluye el tier
-  // para distinguir filas del mismo día en el render y en los overrides.
+  const isEtapas = labor?.type === "tratoEtapas";
+  // Trato y tratoEtapas agrupan por (date, subKey): tierKey para trato,
+  // stageId para etapas. El groupKey indexa `byKey`; el rowKey final que ve la
+  // UI también incluye el sub-key para distinguir filas del mismo día.
+  const isSub = isTrato || isEtapas;
   for (const k in wdMap) {
     const wd = wdMap[k];
     const d = wd.date;
     let tierKey = null;
     let tierIdx = 0;
-    if (isTrato && !wd.pisoOnly) {
+    if (isSub && !wd.pisoOnly) {
       const parts = String(k).split("__");
-      tierKey = parts[2] || "t0";
+      tierKey = parts[2] || (isTrato ? "t0" : "");
       tierIdx = tierKey.startsWith("t") ? Number(tierKey.slice(1)) || 0 : 0;
     }
-    const groupKey = isTrato && tierKey ? `${d}|${tierKey}` : d;
+    const groupKey = isSub && tierKey ? `${d}|${tierKey}` : d;
     if (!byKey.has(groupKey)) {
       const row = {
         date: d,
@@ -211,6 +226,14 @@ function buildDailyRows(labor, wdMap, dayPrices = {}) {
           // wd.pisoOnly → cae acá; no es un tier real.
           row.unit = tiers[0]?.unit ?? null;
         }
+      } else if (isEtapas && tierKey) {
+        // Cada fila es una etapa del día. Guardamos nombre y si cuenta para
+        // que el conteo de unidades solo sume las etapas marcadas.
+        const st = stageById(labor, tierKey);
+        row.stageId = tierKey;
+        row.stageName = st?.name || "";
+        row.stageCounts = !!st?.counts;
+        row.rowKey = `${d}__${tierKey}`;
       }
       byKey.set(groupKey, row);
     }
@@ -227,6 +250,11 @@ function buildDailyRows(labor, wdMap, dayPrices = {}) {
       const t = getTratoTierTotals(wd);
       g.qty += t.qty;
       g.amount += t.amount;
+    } else if (labor.type === "tratoEtapas") {
+      // Pago = amount de todas las etapas. El qty se guarda por fila; el
+      // conteo de unidades filtra por `stageCounts` en laborTotals.
+      g.qty += Number(wd.qty) || 0;
+      g.amount += Number(wd.amount) || 0;
     } else if (labor.type === "tratoHE") {
       g.qty += Number(wd.qty) || 0;
       g.overtimeHours += Number(wd.overtimeHours) || 0;
@@ -273,9 +301,13 @@ function buildDailyRows(labor, wdMap, dayPrices = {}) {
 
 function laborTotals(rows) {
   let qty = 0, overtimeHours = 0, amount = 0, pisoAmount = 0, pisoCount = 0;
-  let workerDays = 0, heTotal = 0, bonosTotal = 0;
+  let workerDays = 0, heTotal = 0, bonosTotal = 0, countedQty = 0;
   for (const r of rows) {
     qty += r.qty;
+    // Unidades de producción (deduplicado): si la fila trae flag de etapa
+    // (tratoEtapas), solo cuenta cuando la etapa cuenta; para el resto de los
+    // tipos `stageCounts` es undefined y suma normal.
+    if (r.stageCounts === undefined || r.stageCounts) countedQty += r.qty;
     overtimeHours += r.overtimeHours || 0;
     amount += r.amount;
     pisoAmount += r.pisoAmount || 0;
@@ -284,7 +316,7 @@ function laborTotals(rows) {
     heTotal += r.heTotal || 0;
     bonosTotal += r.bonosTotal || 0;
   }
-  return { qty, overtimeHours, amount, pisoAmount, pisoCount, workerDays, heTotal, bonosTotal };
+  return { qty, countedQty, overtimeHours, amount, pisoAmount, pisoCount, workerDays, heTotal, bonosTotal };
 }
 
 // Convierte 1-based column index a letra excel ("A", "B", ..., "AA", ...).
@@ -425,6 +457,8 @@ function buildWorkerLaborGrid(labor, wdMap) {
   // Bonuses default a labor-level si el workday no trae override.
   const bonusManejoLabor = Number(labor?.bonusManejo) || 0;
   const bonusSupLabor = Number(labor?.bonusSupervision) || 0;
+  // tratoEtapas: set de etapas que cuentan para el conteo de unidades.
+  const countingSet = labor?.type === "tratoEtapas" ? countingStageIds(labor) : null;
 
   for (const k in wdMap) {
     const wd = wdMap[k];
@@ -514,6 +548,14 @@ function buildWorkerLaborGrid(labor, wdMap) {
       wEntry.totals.jornadas += 1;
       wEntry.totals.overtimeHours += oh;
       wEntry.totals.extras += extrasTotal;
+    } else if (labor?.type === "tratoEtapas") {
+      // Conteo de unidades (carpas): solo etapas que cuentan. El amount (pago)
+      // ya se sumó arriba con todas las etapas.
+      const q = Number(wd.qty) || 0;
+      if (countingSet.has(String(wd.stageId))) {
+        c.qty += q;
+        wEntry.totals.qty += q;
+      }
     } else {
       c.qty += 1;
       c.jornadas += 1;
@@ -1106,12 +1148,18 @@ export default function CycleSummaryModal({
           ? Number(ov.overtimeHours)
           : Number(r.overtimeHours) || 0;
         // Prioridad de tarifa: override del row → tarifa explícita del labor
-        // (cfg.chargeRate) → mediana del tier (solo trato multi-tier) →
-        // mediana global del labor.
+        // (cfg.chargeRate) → para tratoEtapas el precio real de la fila
+        // (amount/qty, que ya viene del precio del día) → mediana del tier
+        // (solo trato multi-tier) → mediana global del labor.
         const tierDefault = r.tierIdx != null ? tierRateMedians.get(r.tierIdx) : null;
+        const etapaRealRate = ld.labor.type === "tratoEtapas" && Number(r.qty) > 0
+          ? (Number(r.amount) || 0) / Number(r.qty)
+          : null;
         const baseRate = cfg.chargeRate != null
           ? Number(cfg.chargeRate)
-          : (tierDefault != null && tierDefault > 0 ? tierDefault : rate);
+          : etapaRealRate != null
+            ? etapaRealRate
+            : (tierDefault != null && tierDefault > 0 ? tierDefault : rate);
         const rowRate = ov.rate != null && ov.rate !== "" ? Number(ov.rate) : baseRate;
         const computedAmount = computeAmount(qty, overtimeHours, rowRate);
         const amount = ov.amount != null && ov.amount !== "" ? Number(ov.amount) : computedAmount;
@@ -1174,10 +1222,12 @@ export default function CycleSummaryModal({
         return a.date < b.date ? -1 : a.date > b.date ? 1 : 0;
       });
       let chargedTotalAmount = 0, chargedTotalQty = 0, chargedTotalOvertimeHours = 0,
-        chargedTotalTransport = 0, chargedTotalWorkerCount = 0;
+        chargedTotalTransport = 0, chargedTotalWorkerCount = 0, chargedCountedQty = 0;
       for (const r of chargedRows) {
         chargedTotalAmount += r.chargedAmount;
         chargedTotalQty += r.chargedQty;
+        // Unidades (tratoEtapas): solo etapas que cuentan; el resto suma normal.
+        if (r.stageCounts === undefined || r.stageCounts) chargedCountedQty += r.chargedQty;
         chargedTotalOvertimeHours += r.chargedOvertimeHours;
         chargedTotalTransport += r.chargedTransport || 0;
         chargedTotalWorkerCount += r.chargedWorkerCount || 0;
@@ -1185,6 +1235,7 @@ export default function CycleSummaryModal({
       const chargedTotals = {
         amount: chargedTotalAmount,
         qty: chargedTotalQty,
+        countedQty: chargedCountedQty,
         overtimeHours: chargedTotalOvertimeHours,
         // Transporte manual por fila — suma aparte del amount para que el
         // subtotal de producción no se contamine, pero el Total sí lo incluye.
@@ -3172,7 +3223,12 @@ function LaborTable({
             ) : (
               showCol("qty") && (
                 <td style={{ ...cell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
-                  {isCobrar ? fmtNumber(totals.qty || 0) : formatTotalsMetric(totals, laborType, rows, catalogs)}
+                  {isCobrar
+                    ? (laborType === "tratoEtapas"
+                        // Unidades deduplicadas (solo etapas que cuentan).
+                        ? `${fmtNumber(totals.countedQty ?? totals.qty ?? 0)} unid.`
+                        : fmtNumber(totals.qty || 0))
+                    : formatTotalsMetric(totals, laborType, rows, catalogs)}
                 </td>
               )
             )}
@@ -4158,11 +4214,11 @@ function LaborWorkerGrid({
                 const t = dayTotals.get(d);
                 const lt = labor?.type;
                 const isHE = lt === "tratoHE";
-                // Cosecha y trato muestran la métrica de producción arriba
-                // (kilos / cantidad). Para tratoHE, main, supervision, extra
-                // solo va el monto — el conteo de jornadas vive en la
-                // columna Total Jornadas a la derecha.
-                const showQty = lt === "cosecha" || lt === "trato";
+                // Cosecha, trato y tratoEtapas muestran la métrica de producción
+                // arriba (kilos / cantidad / carpas). Para tratoHE, main,
+                // supervision, extra solo va el monto — el conteo de jornadas
+                // vive en la columna Total Jornadas a la derecha.
+                const showQty = lt === "cosecha" || lt === "trato" || lt === "tratoEtapas";
                 const amtLine = isHE && t.overtimeHours > 0
                   ? `${fmtCurrency(t.amount)} (${fmtNumber(t.overtimeHours)} HE)`
                   : fmtCurrency(t.amount);

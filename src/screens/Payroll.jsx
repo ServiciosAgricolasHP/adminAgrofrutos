@@ -28,6 +28,7 @@ import {
 import { formatRutForDisplay } from "../utils/rutUtils";
 import { bankName, ACCOUNT_TYPES, isCashBank, CASH_BANK_CODE } from "../utils/banks";
 import { getTratoTierTotals, getDayCombos, getDaySingle, getTratoTiers, tratoTypeLabel, tratoUnitLabel, cosechaUnit, comboLabel, containerLabel, formatLaborDayPrice } from "../utils/cosechaCombos";
+import { countingStageIds } from "../utils/tratoEtapas";
 import { useCatalogs } from "../contexts/CatalogsContext";
 import { useToast } from "../contexts/ToastContext";
 import {
@@ -653,6 +654,8 @@ export default function Payroll() {
               tratoHEManejoAmount: l.tratoHEManejoAmount ?? null,
               tratoHESupervisionAmount: l.tratoHESupervisionAmount ?? null,
               normalDailyAmount: l.normalDailyAmount ?? null,
+              // tratoEtapas: etapas del labor (nombre + tarifa por día + counts).
+              stages: l.stages ?? null,
             })),
           };
         }),
@@ -666,6 +669,7 @@ export default function Payroll() {
             qty: wd.qty ?? null, amount: wd.amount ?? 0,
             qualityX: wd.qualityX ?? null, containerY: wd.containerY ?? null,
             tierKey: wd.tierKey ?? null, tiers: wd.tiers ?? null,
+            stageId: wd.stageId ?? null,
             overtimeHours: wd.overtimeHours ?? null,
             hasManejo: !!wd.hasManejo, hasSupervision: !!wd.hasSupervision,
             extras: wd.extras ?? null, isHoliday: !!wd.isHoliday,
@@ -2125,6 +2129,8 @@ function buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut, catalogs
   for (const labor of labors) {
     const wdsLabor = wdsCycle.filter((w) => w.laborId === labor.id);
     if (wdsLabor.length === 0) continue;
+    // tratoEtapas: etapas que cuentan para el conteo de unidades.
+    const countingSet = labor.type === "tratoEtapas" ? countingStageIds(labor) : null;
 
     // Aggregate per (worker, date) into a cell payload.
     // Multiple workdays for same (worker, date) are summed (e.g. trato tiers
@@ -2203,6 +2209,11 @@ function buildGroupCycleSnapshot(groupRuts, cycle, workdays, nameByRut, catalogs
         c.extras += Number(wd.extras) || 0;
         c.hasManejo = c.hasManejo || !!wd.hasManejo;
         c.hasSupervision = c.hasSupervision || !!wd.hasSupervision;
+      } else if (labor.type === "tratoEtapas") {
+        // Pago = amount de todas las etapas; unidades (jornadas) = solo las
+        // etapas que cuentan.
+        c.amount += Number(wd.amount) || 0;
+        if (countingSet.has(String(wd.stageId))) c.jornadas += Number(wd.qty) || 0;
       } else {
         c.amount += Number(wd.amount) || 0;
         c.jornadas += 1;
@@ -2374,6 +2385,12 @@ function renderProductionCell(cell, laborType, tratoLabel, kilosUnit, catalogs =
     const baseHtml = cell.jornadas ? `<div>Base ${fmtMoney(cell.jornadas)}</div>` : "";
     return `${baseHtml}${flagsHtml}<div class="muted">${fmtMoney(cell.amount)}</div>`;
   }
+  if (laborType === "tratoEtapas") {
+    // jornadas = unidades que cuentan (carpas). El monto es el pago del día.
+    const j = cell.jornadas || 0;
+    const jHtml = j ? `<div>${num(j)} unid</div>` : "";
+    return `${jHtml}${pisoTag}<div class="muted">${fmtMoney(cell.amount)}</div>`;
+  }
   // main / supervision / extra
   return `<div>${fmtMoney(cell.amount)}</div>`;
 }
@@ -2423,6 +2440,11 @@ function renderProductionTotal(totals, laborType, tratoLabel, kilosUnit, catalog
     const sub = parts.length ? `<div class="muted">${parts.join(" · ")}</div>` : "";
     return `${sub}<div><b>${fmtMoney(amount)}</b></div>`;
   }
+  if (laborType === "tratoEtapas") {
+    const j = totals.jornadas || 0;
+    const jHtml = j ? `<div>${num(j)} unid</div>` : "";
+    return `${jHtml}${pisoTag}<div><b>${fmtMoney(amount)}</b></div>`;
+  }
   return `<div><b>${fmtMoney(amount)}</b></div>`;
 }
 
@@ -2432,6 +2454,7 @@ const LABOR_TYPE_LABEL = {
   extra: "Adicional",
   cosecha: "Cosecha",
   trato: "A trato",
+  tratoEtapas: "A trato por etapas",
   tratoHE: "Jornadas con HE",
 };
 

@@ -3,6 +3,7 @@ import { toPng, toBlob } from "html-to-image";
 import Modal from "./Modal";
 import { workdayMapKey, getTratoTierTotals, getTratoTiers, containerLabel, tratoTypeLabel, tratoUnitLabel, cosechaUnit } from "../utils/cosechaCombos";
 import { DEFAULT_OVERTIME_RATE } from "../utils/tratoHE";
+import { countingStageIds } from "../utils/tratoEtapas";
 import { cyclesService, faenasService, subfaenasService, workdaysService } from "../services";
 import { payrollsService } from "../services/payrollsService";
 import {
@@ -102,6 +103,8 @@ function buildCycleRows(workerRut, cycle, workdaysByLabor, catalogs, payrollById
       }
     }
     const heRate = Number(labor.overtimeRate) || DEFAULT_OVERTIME_RATE;
+    // tratoEtapas: etapas que cuentan para el conteo de unidades.
+    const countingSet = labor.type === "tratoEtapas" ? countingStageIds(labor) : null;
     const sortedGroups = [...byDate.entries()].sort(([a], [b]) => (a < b ? -1 : 1));
     for (const [, group] of sortedGroups) {
       const { date: d, wds, tiersByIdx } = group;
@@ -130,6 +133,11 @@ function buildCycleRows(workerRut, cycle, workdaysByLabor, catalogs, payrollById
           const t = getTratoTierTotals(wd);
           tratoQty += t.qty;
           amount += t.amount;
+        } else if (labor.type === "tratoEtapas") {
+          // Pago = amount de todas las etapas; unidades (tratoQty) = solo las
+          // etapas que cuentan. Reusamos la columna trato para las unidades.
+          amount += Number(wd.amount) || 0;
+          if (countingSet.has(String(wd.stageId))) tratoQty += Number(wd.qty) || 0;
         } else if (labor.type === "tratoHE") {
           jornadas += Number(wd.qty) || 0;
           const oh = Number(wd.overtimeHours) || 0;
@@ -715,9 +723,13 @@ export async function loadWorkerSummaryData(workerId, catalogs, options = {}) {
     // configurada la MISMA unidad (Árbol, Metro, Polín…), usamos esa. Si no
     // (o hay mezcla), caemos al tipo de trato como antes.
     const tratoRows = rows.filter((r) => r.laborType === "trato");
+    const hasEtapas = rows.some((r) => r.laborType === "tratoEtapas");
     const tratoUnits = new Set(tratoRows.map((r) => r.tratoUnit).filter((u) => u != null));
     let tratoLabel;
-    if (tratoUnits.size === 1) {
+    if (tratoRows.length === 0 && hasEtapas) {
+      // Solo etapas → la columna de cantidad son "Unidades" producidas.
+      tratoLabel = "Unidades";
+    } else if (tratoUnits.size === 1) {
       const u = [...tratoUnits][0];
       tratoLabel = tratoUnitLabel(catalogs, u) || "Trato";
     } else {

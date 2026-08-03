@@ -40,6 +40,15 @@ import {
   calcTratoHEAmount,
   workdayHasData,
 } from "../utils/tratoHE";
+import {
+  defaultStages,
+  normalizeStages,
+  newStageId,
+  getStageDayPrice,
+  computeStageDayAmount,
+  getDayStages,
+  getEtapasTotals,
+} from "../utils/tratoEtapas";
 import { useAuth } from "../contexts/AuthContext";
 import { useCatalogs } from "../contexts/CatalogsContext";
 import { useToast } from "../contexts/ToastContext";
@@ -143,6 +152,7 @@ const LABOR_TYPES = [
   { value: "extra", label: "Adicional" },
   { value: "cosecha", label: "Cosecha" },
   { value: "trato", label: "A trato" },
+  { value: "tratoEtapas", label: "A trato por etapas" },
   { value: "tratoHE", label: "Jornadas con horas extras" },
 ];
 
@@ -406,6 +416,33 @@ function buildRowsTrato(workers, days, wdMap, dayTiersByDate) {
   });
 }
 
+// Filas de la grilla para tratoEtapas. Las columnas por día son las etapas
+// visibles ese día (las que tienen precio configurado o ya tienen producción),
+// y la key del workday es el stageId. `row[${d}__${stageId}]` = qty, `__amt` =
+// monto ya calculado (qty × precio del día).
+function buildRowsTratoEtapas(workers, days, wdMap, dayStagesByDate) {
+  return workers.map((w) => {
+    const row = { rut: w.rut, name: w.name, _isTemp: !!w.isTemp, _isOrphan: !!w.isOrphan };
+    let total = 0;
+    for (const d of days) {
+      const stages = dayStagesByDate[d] || [];
+      let dayTotal = 0;
+      for (const st of stages) {
+        const wd = wdMap[workdayMapKey(w.rut, d, st.id)];
+        const qty = Number(wd?.qty) || 0;
+        const amt = Number(wd?.amount) || 0;
+        row[`${d}__${st.id}`] = qty;
+        row[`${d}__${st.id}__amt`] = amt;
+        dayTotal += amt;
+      }
+      row[`${d}__total`] = dayTotal;
+      total += dayTotal;
+    }
+    row.total = total;
+    return row;
+  });
+}
+
 function buildRowsNormal(workers, days, wdMap) {
   return workers.map((w) => {
     const row = { rut: w.rut, name: w.name, _isTemp: !!w.isTemp, _isOrphan: !!w.isOrphan, _monthly: !!w.monthly };
@@ -421,6 +458,66 @@ function buildRowsNormal(workers, days, wdMap) {
     row.total = total;
     return row;
   });
+}
+
+// Editor de etapas para un labor "A trato por etapas". Cada etapa: nombre,
+// tarifa fija y si cuenta para el conteo de unidades. Pueden marcarse VARIAS
+// como "cuenta" (ej. Instalación y Completo). Preparación se deja sin marcar.
+function StagesEditor({ stages, onChange }) {
+  const update = (idx, patch) =>
+    onChange(stages.map((s, i) => (i === idx ? { ...s, ...patch } : s)));
+  const add = () =>
+    onChange([...stages, { id: newStageId(), name: "", counts: false }]);
+  const remove = (idx) => onChange(stages.filter((_, i) => i !== idx));
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <span className="text-sm font-medium">Etapas</span>
+        <button
+          type="button"
+          onClick={add}
+          className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
+        >
+          + Agregar etapa
+        </button>
+      </div>
+      <p className="text-xs text-[var(--color-muted)]">
+        Cada etapa: nombre y si cuenta para el conteo de unidades (✓). El precio
+        se configura por día abajo, igual que en trato. Marcá las que cuentan
+        (ej. Instalación, Completo); las que no cuentan pagan pero no suman unidades.
+      </p>
+      {stages.length === 0 && (
+        <p className="text-xs text-[var(--color-danger)]">Agregá al menos una etapa.</p>
+      )}
+      {stages.map((st, idx) => (
+        <div key={st.id || idx} className="flex items-center gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] p-2">
+          <input
+            value={st.name}
+            onChange={(e) => update(idx, { name: e.target.value })}
+            placeholder="Nombre (ej. Preparación)"
+            className="min-w-0 flex-1 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-sm outline-none focus:border-[var(--color-accent)]"
+          />
+          <label className="flex shrink-0 items-center gap-1 text-xs" title="¿Cuenta para el conteo de unidades?">
+            <input
+              type="checkbox"
+              checked={!!st.counts}
+              onChange={(e) => update(idx, { counts: e.target.checked })}
+            />
+            cuenta
+          </label>
+          <button
+            type="button"
+            onClick={() => remove(idx)}
+            title="Quitar etapa"
+            className="shrink-0 text-[var(--color-danger)]"
+          >
+            ✕
+          </button>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 export default function CycleDetail() {
@@ -703,8 +800,14 @@ export default function CycleDetail() {
 
   const isCosechaLabor = activeLabor?.type === "cosecha";
   const isTratoLabor = activeLabor?.type === "trato";
+  const isTratoEtapasLabor = activeLabor?.type === "tratoEtapas";
   const isTratoHELabor = activeLabor?.type === "tratoHE";
-  const isQtyLabor = isCosechaLabor || isTratoLabor || isTratoHELabor;
+  const isQtyLabor = isCosechaLabor || isTratoLabor || isTratoEtapasLabor || isTratoHELabor;
+  // Etapas del labor por etapas (fijas, no por día). Normalizadas para el render.
+  const etapas = useMemo(
+    () => (isTratoEtapasLabor ? normalizeStages(activeLabor?.stages) : []),
+    [isTratoEtapasLabor, activeLabor],
+  );
   // Labores que pagan un monto por día por trabajador (main/supervision/extra).
   // No usan combos ni tiers — un único precio sugerido por día se persiste en
   // dayPrices y aparece como hint clickeable en la celda del trabajador.
@@ -784,6 +887,29 @@ export default function CycleDetail() {
     return out;
   }, [isTratoLabor, activeLabor, days, dayPrices, defaultMode, workdaysByLabor]);
 
+  // Etapas visibles por día para tratoEtapas: todas las etapas del labor con su
+  // precio/modo de ese día resueltos. A diferencia de trato (tiers ad-hoc), las
+  // columnas son las etapas fijas del labor; el precio viene del día. Cada
+  // entrada: { id, name, counts, price, mode }.
+  const dayStagesByDate = useMemo(() => {
+    if (!isTratoEtapasLabor || !activeLabor) return {};
+    const wdMapForLabor = workdaysByLabor[activeLabor.id] || {};
+    const out = {};
+    for (const d of days) {
+      // Etapas con producción ese día (para no ocultar una columna que ya tiene
+      // datos aunque le hayan borrado el precio).
+      const withData = new Set();
+      for (const k in wdMapForLabor) {
+        if (!k.includes(`__${d}__`)) continue;
+        const wd = wdMapForLabor[k];
+        if (wd?.stageId && (Number(wd.qty) || 0) > 0) withData.add(String(wd.stageId));
+      }
+      out[d] = getDayStages(activeLabor, dayPrices, d)
+        .filter((s) => s.price > 0 || withData.has(String(s.id)));
+    }
+    return out;
+  }, [isTratoEtapasLabor, activeLabor, days, dayPrices, workdaysByLabor]);
+
   const dayNotes = cycle?.dayNotes || {};
 
   const openDayNote = (date) => {
@@ -854,10 +980,11 @@ export default function CycleDetail() {
   const rowDataRaw = useMemo(() => {
     if (isCosechaLabor) return buildRowsCosecha(gridWorkers, days, wdMap, dayCombosByDate);
     if (isTratoLabor) return buildRowsTrato(gridWorkers, days, wdMap, dayTiersByDate);
+    if (isTratoEtapasLabor) return buildRowsTratoEtapas(gridWorkers, days, wdMap, dayStagesByDate);
     if (isTratoHELabor) return buildRowsTratoHE(gridWorkers, days, wdMap);
     return buildRowsNormal(gridWorkers, days, wdMap);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gridWorkers, days, wdMap, isCosechaLabor, isTratoLabor, isTratoHELabor, dayCombosByDate, dayTiersByDate]);
+  }, [gridWorkers, days, wdMap, isCosechaLabor, isTratoLabor, isTratoEtapasLabor, isTratoHELabor, dayCombosByDate, dayTiersByDate, dayStagesByDate]);
 
   const groupBuckets = useMemo(() => {
     const buckets = new Map();
@@ -959,11 +1086,15 @@ export default function CycleDetail() {
     const out = {};
     if (!cycle?.labors) return out;
     for (const l of cycle.labors) {
-      if (l.type !== "trato") continue;
       const m = workdaysByLabor[l.id] || {};
-      let sum = 0;
-      for (const k in m) sum += getTratoTierTotals(m[k]).qty;
-      out[l.id] = sum;
+      if (l.type === "trato") {
+        let sum = 0;
+        for (const k in m) sum += getTratoTierTotals(m[k]).qty;
+        out[l.id] = sum;
+      } else if (l.type === "tratoEtapas") {
+        // Conteo deduplicado: solo las etapas marcadas como que cuentan.
+        out[l.id] = getEtapasTotals(l, Object.values(m)).unidades;
+      }
     }
     return out;
   }, [cycle?.labors, workdaysByLabor]);
@@ -1185,6 +1316,48 @@ export default function CycleDetail() {
     setDayPrices(next);
     await cyclesService.update(id, { dayPrices: next });
     await recalcDayCombo(laborId, date, ck, merged.price, merged.mode, isTrato);
+  };
+
+  // tratoEtapas: recalcula los amounts de los workdays de una etapa en un día
+  // cuando cambia su precio/modo (cada workday guarda su amount, hay que
+  // reescribirlo o el resumen/nómina quedan con el valor viejo).
+  const recalcDayStage = async (laborId, date, stageId, price, mode) => {
+    const labor = cycle.labors.find((l) => l.id === laborId);
+    if (!labor || labor.type !== "tratoEtapas") return;
+    const wdMapForLabor = workdaysByLabor[laborId] || {};
+    const updates = {};
+    for (const w of labor.workers) {
+      const mapKey = workdayMapKey(w.rut, date, stageId);
+      const wd = wdMapForLabor[mapKey];
+      if (!wd) continue;
+      const qty = Number(wd.qty) || 0;
+      if (qty === 0) continue;
+      const amount = computeStageDayAmount(mode, price, qty);
+      if (amount === wd.amount) continue;
+      const docId = workdayDocId(id, laborId, w.rut, date, stageId);
+      const patch = { ...wd, amount };
+      await workdaysService.upsert(docId, patch);
+      updates[mapKey] = patch;
+    }
+    if (Object.keys(updates).length > 0) {
+      setWorkdaysByLabor((prev) => ({
+        ...prev,
+        [laborId]: { ...(prev[laborId] || {}), ...updates },
+      }));
+    }
+  };
+
+  // Persiste el precio/modo de una etapa en un día (dayPrices[lab][date][stageId])
+  // y recalcula los workdays afectados.
+  const persistStagePrice = async (laborId, date, stageId, patch) => {
+    const dayEntry = dayPrices[laborId]?.[date] || {};
+    const current = dayEntry[stageId] || { price: 0, mode: "unit" };
+    const merged = { ...current, ...patch };
+    const nextDay = { ...dayEntry, [stageId]: merged };
+    const next = { ...dayPrices, [laborId]: { ...(dayPrices[laborId] || {}), [date]: nextDay } };
+    setDayPrices(next);
+    await cyclesService.update(id, { dayPrices: next });
+    await recalcDayStage(laborId, date, stageId, merged.price, merged.mode);
   };
 
   // Piso = monto fijo configurable por día (con fallback al pisoDefault de la
@@ -1772,6 +1945,58 @@ export default function CycleDetail() {
       return;
     }
 
+    if (isTratoEtapasLabor) {
+      const [date, ...rest] = field.split("__");
+      const stageId = rest.join("_");
+      const workerRut = params.data.rut;
+      const docId = workdayDocId(id, activeLabor.id, workerRut, date, stageId);
+      const mapKey = workdayMapKey(workerRut, date, stageId);
+      const qty = parseAmount(params.newValue) || 0;
+      // Precio del día para esa etapa → amount = qty × precio (o fijo si flat).
+      const { price, mode } = getStageDayPrice(dayPrices, activeLabor.id, date, stageId);
+      const amount = computeStageDayAmount(mode, price, qty);
+
+      if (qty === 0) {
+        if (wdMap[mapKey]) {
+          await workdaysService.remove(docId);
+          setWorkdaysByLabor((prev) => {
+            const lab = { ...(prev[activeLabor.id] || {}) };
+            delete lab[mapKey];
+            return { ...prev, [activeLabor.id]: lab };
+          });
+        }
+        params.node.setDataValue(field, 0);
+        params.node.setDataValue(`${field}__amt`, 0);
+      } else {
+        // `stageId` explícito en el doc: lo consumen el conteo (getEtapasTotals),
+        // los resúmenes y la nómina sin tener que re-parsear el docId.
+        await workdaysService.upsert(docId, {
+          cycleId: id, laborId: activeLabor.id, workerRut, date, qty, amount, stageId,
+        });
+        setWorkdaysByLabor((prev) => {
+          const lab = { ...(prev[activeLabor.id] || {}) };
+          lab[mapKey] = {
+            ...lab[mapKey],
+            cycleId: id, laborId: activeLabor.id, workerRut, date, qty, amount, stageId,
+          };
+          return { ...prev, [activeLabor.id]: lab };
+        });
+        params.node.setDataValue(field, qty);
+        params.node.setDataValue(`${field}__amt`, amount);
+      }
+
+      let rowTotal = 0;
+      for (const d of days) {
+        for (const st of dayStagesByDate[d] || []) {
+          const f = `${d}__${st.id}`;
+          if (f === field) rowTotal += amount;
+          else rowTotal += Number(params.data[`${f}__amt`]) || 0;
+        }
+      }
+      params.node.setDataValue("total", rowTotal);
+      return;
+    }
+
     // Normal labor
     const date = field;
     const workerRut = params.data.rut;
@@ -2018,6 +2243,7 @@ export default function CycleDetail() {
         cosechaMode: "unit",
         tratoMode: "unit",
         tratoType: catalogs.tratoTypes?.[0]?.value ?? 0,
+        stages: defaultStages(),
         baseDayDefault: DEFAULT_BASE_DAY,
         bonusManejo: DEFAULT_BONUS_MANEJO,
         bonusSupervision: DEFAULT_BONUS_SUPERVISION,
@@ -2035,6 +2261,9 @@ export default function CycleDetail() {
         cosechaMode: activeLabor.cosechaMode || "unit",
         tratoMode: activeLabor.tratoMode || "unit",
         tratoType: activeLabor.tratoType ?? (catalogs.tratoTypes?.[0]?.value ?? 0),
+        stages: (activeLabor.stages && activeLabor.stages.length)
+          ? activeLabor.stages.map((s) => ({ ...s }))
+          : defaultStages(),
         baseDayDefault: activeLabor.baseDayDefault ?? DEFAULT_BASE_DAY,
         bonusManejo: activeLabor.bonusManejo ?? DEFAULT_BONUS_MANEJO,
         bonusSupervision: activeLabor.bonusSupervision ?? DEFAULT_BONUS_SUPERVISION,
@@ -2057,6 +2286,9 @@ export default function CycleDetail() {
       if (laborForm.data.type === "trato") {
         base.tratoMode = laborForm.data.tratoMode;
         base.tratoType = Number(laborForm.data.tratoType);
+      }
+      if (laborForm.data.type === "tratoEtapas") {
+        base.stages = normalizeStages(laborForm.data.stages);
       }
       if (laborForm.data.type === "tratoHE") {
         base.baseDayDefault = Number(laborForm.data.baseDayDefault) || DEFAULT_BASE_DAY;
@@ -2102,6 +2334,8 @@ export default function CycleDetail() {
           }));
         }
       }
+      // tratoEtapas: el precio es por día (no del labor), así que cambiar las
+      // etapas (nombre/counts) no requiere recalcular montos de workdays.
     }
     setLaborForm(null);
   };
@@ -2516,6 +2750,46 @@ export default function CycleDetail() {
       return [...baseLeft, ...dayGroups, totalCol, ...actionsCol];
     }
 
+    if (isTratoEtapasLabor) {
+      // Cada día es un grupo; sus columnas hijas son las etapas visibles ese
+      // día (con precio configurado o con producción). El precio del día va en
+      // el header. La celda editable es la cantidad; abajo muestra el monto.
+      const dayGroups = days.map((d) => {
+        const stages = dayStagesByDate[d] || [];
+        const children = stages.map((st) => ({
+          headerName: `${st.name}${st.counts ? " ✓" : ""}`,
+          headerTooltip: `${st.name} · ${fmtCurrency(st.price)}${st.mode === "flat" ? "/día" : "/unid"}${st.counts ? " · cuenta para producción" : " · no cuenta unidades"}`,
+          field: `${d}__${st.id}`,
+          editable: !readOnly && !photoMode,
+          width: isMobile ? 84 : 130,
+          type: "numericColumn",
+          valueParser: (p) => parseAmount(p.newValue),
+          cellEditor: FormulaCellEditor,
+          cellRenderer: (p) => {
+            const qty = Number(p.value) || 0;
+            const amt = Number(p.data?.[`${d}__${st.id}__amt`]) || 0;
+            if (!qty && !amt) return "";
+            return (
+              <div className="leading-tight">
+                <div className="font-medium tabular-nums">{qty.toLocaleString("es-CL")}</div>
+                {amt > 0 && (
+                  <div className="text-[10px] text-[var(--color-muted)] tabular-nums">{fmtCurrency(amt)}</div>
+                )}
+              </div>
+            );
+          },
+        }));
+        return {
+          headerName: d, groupId: `g_${d}`,
+          ...dayGroupHdr(d),
+          children: children.length ? children : [{
+            headerName: "sin precio", field: `${d}__placeholder`, editable: false, width: 90, valueGetter: () => "",
+          }],
+        };
+      });
+      return [...baseLeft, ...dayGroups, totalCol, ...actionsCol];
+    }
+
     if (isTratoHELabor) {
       const labor = activeLabor;
       const rates = {
@@ -2766,7 +3040,7 @@ export default function CycleDetail() {
     });
     return [...baseLeft, ...dayCols, totalCol, ...actionsCol];
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [days, readOnly, photoMode, isCosechaLabor, isTratoLabor, isTratoHELabor, dayCombosByDate, dayTiersByDate, catalogs, dayPrices, activeLabor, tratoHEView, cosechaView, tratoView, dayNotes, daysWithPiso, isMobile]);
+  }, [days, readOnly, photoMode, isCosechaLabor, isTratoLabor, isTratoEtapasLabor, isTratoHELabor, dayCombosByDate, dayTiersByDate, dayStagesByDate, catalogs, dayPrices, activeLabor, tratoHEView, cosechaView, tratoView, dayNotes, daysWithPiso, isMobile]);
 
   if (loading) return <div className="text-[var(--color-muted)]">Cargando...</div>;
   if (!cycle) return <div className="text-[var(--color-muted)]">Ciclo no encontrado.</div>;
@@ -2933,20 +3207,23 @@ export default function CycleDetail() {
         {cycle.labors.map((l) => {
           const isCo = l.type === "cosecha";
           const isTr = l.type === "trato";
+          const isEt = l.type === "tratoEtapas";
           const isHE = l.type === "tratoHE";
           const totalAmt = totalsByLabor[l.id] || 0;
           const qtyByContainer = totalQtyByContainerByLabor[l.id] || {};
           const totalQty = totalQtyByLabor[l.id] || 0;
           const heMetrics = tratoHEMetricsByLabor[l.id];
           const pisoMetrics = pisoMetricsByLabor[l.id] || { count: 0, amount: 0 };
-          const tag = isCo ? "cosecha" : isTr ? "trato" : isHE ? "jornadas+HE" : l.type === "main" ? "al día" : l.type;
+          const tag = isCo ? "cosecha" : isTr ? "trato" : isEt ? "por etapas" : isHE ? "jornadas+HE" : l.type === "main" ? "al día" : l.type;
           const tagClass = isCo
             ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
             : isTr
               ? "bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-400"
-              : isHE
-                ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
-                : "bg-[var(--color-surface-2)]";
+              : isEt
+                ? "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400"
+                : isHE
+                  ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
+                  : "bg-[var(--color-surface-2)]";
           return (
             <button
               type="button"
@@ -2999,6 +3276,12 @@ export default function CycleDetail() {
                         ))}
                     </div>
                   )}
+                </div>
+              )}
+              {isEt && (
+                <div className="mt-1 text-[11px] tabular-nums text-[var(--color-muted)]">
+                  {totalQty.toLocaleString("es-CL")} unid. producidas
+                  <span className="ml-1 opacity-70">(etapas que cuentan)</span>
                 </div>
               )}
               {(isCo || isTr) && pisoMetrics.count > 0 && (
@@ -3135,6 +3418,11 @@ export default function CycleDetail() {
               {isTratoLabor && (
                 <span className="ml-3 text-[var(--color-muted)]/70">
                   Trato · {tratoTypeLabel(catalogs, activeLabor.tratoType ?? 0)} · ingresa cantidad y precio del día
+                </span>
+              )}
+              {isTratoEtapasLabor && (
+                <span className="ml-3 text-[var(--color-muted)]/70">
+                  Por etapas · {etapas.map((s) => `${s.name}${s.counts ? " ✓" : ""}`).join(" · ")} · ✓ = cuenta unidades
                 </span>
               )}
               {isTratoHELabor && (
@@ -3377,6 +3665,80 @@ export default function CycleDetail() {
                     </div>
                   );
                 })}
+              </div>
+              )}
+            </div>
+          )}
+
+          {/* TratoEtapas price bar — precio por día por etapa (fijas del labor) */}
+          {isTratoEtapasLabor && days.length > 0 && (
+            <div className={`mb-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] ${pricesCollapsed ? "px-3 py-1.5" : "p-3"}`}>
+              <button
+                type="button"
+                onClick={() => setPricesCollapsed((v) => !v)}
+                className="flex w-full items-center gap-2 text-left text-xs font-medium text-[var(--color-muted)] uppercase tracking-wider hover:text-[var(--color-accent)]"
+                title={pricesCollapsed ? "Mostrar precios" : "Ocultar precios"}
+              >
+                <span>{pricesCollapsed ? "▶" : "▼"}</span>
+                <span>🏕</span>
+                <span>Precios por día y etapa</span>
+                {readOnly && <span className="text-[var(--color-warning)]">solo lectura</span>}
+              </button>
+              {!pricesCollapsed && (
+              <div className="mt-2 flex flex-wrap gap-2">
+                {days.map((d) => (
+                  <div key={d} className="flex flex-col gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)] p-2 text-xs min-w-[220px]">
+                    <div className="font-medium text-[var(--color-muted)]">{d}</div>
+                    {etapas.map((st) => {
+                      const { price, mode } = getStageDayPrice(dayPrices, activeLabor.id, d, st.id);
+                      return (
+                        <div
+                          key={st.id}
+                          className={`flex flex-col gap-1 rounded-md border px-2 py-1.5 ${
+                            price > 0
+                              ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)]"
+                              : "border-[var(--color-border)] bg-[var(--color-surface)]"
+                          }`}
+                        >
+                          <span className="font-medium text-[var(--color-text)]">
+                            {st.name}
+                            {st.counts && <span className="ml-1 text-[10px] text-[var(--color-accent)]" title="cuenta para el conteo de unidades">✓</span>}
+                          </span>
+                          <div className="flex rounded-md overflow-hidden border border-[var(--color-border)] text-[10px]">
+                            <button
+                              disabled={readOnly}
+                              onClick={() => persistStagePrice(activeLabor.id, d, st.id, { mode: "unit" })}
+                              className={`flex-1 px-1 py-0.5 transition-colors ${mode === "unit" ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)] font-medium" : "bg-[var(--color-surface-2)] text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)]"} disabled:opacity-50`}
+                            >
+                              $/unidad
+                            </button>
+                            <button
+                              disabled={readOnly}
+                              onClick={() => persistStagePrice(activeLabor.id, d, st.id, { mode: "flat" })}
+                              className={`flex-1 px-1 py-0.5 transition-colors ${mode === "flat" ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)] font-medium" : "bg-[var(--color-surface-2)] text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)]"} disabled:opacity-50`}
+                            >
+                              $/día
+                            </button>
+                          </div>
+                          <div className="flex items-center gap-1">
+                            <span className="text-[var(--color-muted)]">$</span>
+                            <input
+                              key={`${d}_${st.id}_${price}_${mode}`}
+                              type="number" min="0" disabled={readOnly}
+                              defaultValue={price > 0 ? price : ""}
+                              onBlur={(e) => {
+                                const v = Number(e.target.value) || 0;
+                                if (v !== price) persistStagePrice(activeLabor.id, d, st.id, { price: v });
+                              }}
+                              placeholder={mode === "flat" ? "tarifa/día" : "precio/unid"}
+                              className="w-full rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-0.5 text-right tabular-nums outline-none focus:border-[var(--color-accent)] disabled:opacity-50"
+                            />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ))}
               </div>
               )}
             </div>
@@ -3980,6 +4342,12 @@ export default function CycleDetail() {
                   options={COSECHA_MODES}
                 />
               </>
+            )}
+            {laborForm.data.type === "tratoEtapas" && (
+              <StagesEditor
+                stages={laborForm.data.stages || []}
+                onChange={(next) => setLaborForm((s) => ({ ...s, data: { ...s.data, stages: next } }))}
+              />
             )}
             {laborForm.data.type === "tratoHE" && (
               <div className="grid gap-3 sm:grid-cols-2">
