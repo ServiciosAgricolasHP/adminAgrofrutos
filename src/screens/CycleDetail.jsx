@@ -48,6 +48,7 @@ import {
   computeStageDayAmount,
   getDayStages,
   getEtapasTotals,
+  countingStageIds,
 } from "../utils/tratoEtapas";
 import { useAuth } from "../contexts/AuthContext";
 import { useCatalogs } from "../contexts/CatalogsContext";
@@ -1098,6 +1099,34 @@ export default function CycleDetail() {
     }
     return out;
   }, [cycle?.labors, workdaysByLabor]);
+
+  // Resumen diario del labor tratoEtapas activo, para mostrar en la barra de
+  // precios (donde están los combos por día): producción del día (unidades de
+  // las etapas que cuentan, deduplicado), personas que trabajaron ese día
+  // (ruts únicos con qty>0 en cualquier etapa) y el monto del día.
+  // { [date]: { counted, people, amount } }.
+  const etapasDaySummary = useMemo(() => {
+    if (!isTratoEtapasLabor || !activeLabor) return {};
+    const counting = countingStageIds(activeLabor);
+    const m = workdaysByLabor[activeLabor.id] || {};
+    const acc = {};
+    for (const k in m) {
+      const wd = m[k];
+      const d = wd.date || k.split("__")[1];
+      if (!d) continue;
+      const qty = Number(wd.qty) || 0;
+      if (!acc[d]) acc[d] = { counted: 0, amount: 0, people: new Set() };
+      acc[d].amount += Number(wd.amount) || 0;
+      if (counting.has(wd.stageId)) acc[d].counted += qty;
+      const rut = wd.workerRut || k.split("__")[0];
+      if (qty > 0 && rut) acc[d].people.add(rut);
+    }
+    const out = {};
+    for (const d in acc) {
+      out[d] = { counted: acc[d].counted, amount: acc[d].amount, people: acc[d].people.size };
+    }
+    return out;
+  }, [isTratoEtapasLabor, activeLabor, workdaysByLabor]);
 
   // Cantidad de RUTs únicos con producción real (qty > 0) por labor de trato.
   // Usado para mostrar "N personas · prom X/persona" en la tarjeta de
@@ -3737,6 +3766,29 @@ export default function CycleDetail() {
                         </div>
                       );
                     })}
+                    {(() => {
+                      const s = etapasDaySummary[d];
+                      if (!s || (s.counted === 0 && s.people === 0)) return null;
+                      const avg = s.people > 0 ? s.counted / s.people : 0;
+                      return (
+                        <div className="mt-0.5 rounded-md border border-[var(--color-accent)]/40 bg-[var(--color-accent-soft)] px-2 py-1 tabular-nums">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[var(--color-muted)]">Producción</span>
+                            <span className="font-semibold text-[var(--color-accent)]">
+                              {s.counted.toLocaleString("es-CL")} unid.
+                            </span>
+                          </div>
+                          <div className="flex items-center justify-between text-[10px]">
+                            <span className="text-[var(--color-muted)]">
+                              {s.people} persona{s.people === 1 ? "" : "s"}
+                            </span>
+                            <span className="text-[var(--color-text)]">
+                              prom {avg.toLocaleString("es-CL", { maximumFractionDigits: 1 })}/pers.
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })()}
                   </div>
                 ))}
               </div>
