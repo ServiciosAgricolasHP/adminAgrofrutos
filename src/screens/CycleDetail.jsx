@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useParams, Link } from "react-router-dom";
+import { useParams, useNavigate, Link } from "react-router-dom";
 import { AgGridReact } from "ag-grid-react";
 import { ModuleRegistry, AllCommunityModule } from "ag-grid-community";
 import "ag-grid-community/styles/ag-grid.css";
@@ -57,7 +57,6 @@ import Modal from "../components/Modal";
 import TextField from "../components/TextField";
 import Select from "../components/Select";
 import ConfirmDialog from "../components/ConfirmDialog";
-import { useResizableHeight, ResizeHandle } from "../components/ResizableArea";
 import { useIsMobile } from "../hooks/useIsMobile";
 import WorkerPickerModal from "../components/WorkerPickerModal";
 import WorkerEditModal from "../components/WorkerEditModal";
@@ -141,6 +140,28 @@ function FormulaCellEditor({ initialValue, onValueChange, eventKey }) {
 
 const todayStr = () => new Date().toISOString().slice(0, 10);
 const newId = () => (crypto?.randomUUID?.() || `id_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`);
+
+// Primer/último día real con producción cargada en el ciclo (cycle.days).
+// Se usan al cerrar el ciclo para recalcular startDate/endDate en base a lo
+// que efectivamente se trabajó, no en base a lo que alguien tipeó al crear
+// el ciclo (startDate) o a la fecha en que apretó "Cerrar ciclo" (endDate) —
+// ambas pueden estar mal si el ciclo se creó antes de empezar a trabajar, o
+// si se cierran varios ciclos atrasados de una sola vez. Si el ciclo nunca
+// tuvo días cargados, no hay nada que recalcular: se deja lo que ya había.
+const firstWorkedDay = (cycle) => {
+  const days = cycle?.days;
+  if (Array.isArray(days) && days.length > 0) {
+    return days.reduce((min, d) => (d < min ? d : min), days[0]);
+  }
+  return cycle?.startDate || todayStr();
+};
+const lastWorkedDay = (cycle) => {
+  const days = cycle?.days;
+  if (Array.isArray(days) && days.length > 0) {
+    return days.reduce((max, d) => (d > max ? d : max), days[0]);
+  }
+  return cycle?.endDate || todayStr();
+};
 
 const fmtCurrency = (value) =>
   new Intl.NumberFormat("es-CL", { style: "currency", currency: "CLP", minimumFractionDigits: 0 }).format(
@@ -523,6 +544,7 @@ function StagesEditor({ stages, onChange }) {
 
 export default function CycleDetail() {
   const { id } = useParams();
+  const navigate = useNavigate();
   const { isAdmin } = useAuth();
   const { catalogs, addEntry: addCatalogEntry, renameEntry: renameCatalogEntry } = useCatalogs();
   const toast = useToast();
@@ -541,12 +563,6 @@ export default function CycleDetail() {
     const d = new Date();
     return { year: d.getFullYear(), month: d.getMonth() };
   });
-  // Grid height + drag handle: handle is rendered as a full-width splitter
-  // right above the grid so it is always visible. The wrapping div uses this
-  // height directly.
-  const { height: gridHeight, onPointerDown: onGridResizeStart, reset: resetGridHeight } =
-    useResizableHeight("cycle-detail-grid", 460, 280);
-
   // Day notes: one annotation per day, shared across all labors of the cycle.
   // Stored at cycle.dayNotes = { "YYYY-MM-DD": "text" }. Edited via a modal
   // that opens when the user clicks the date header (DayHeader component).
@@ -571,6 +587,17 @@ export default function CycleDetail() {
   const [pricesCollapsed, setPricesCollapsed] = useState(() => {
     try { return localStorage.getItem("cycleDetail.pricesCollapsed") === "true"; } catch { return false; }
   });
+  // Toggle maestro: colapsa TODO el bloque de controles (título+botones,
+  // métricas, tabs de labor, barra de la labor activa, chips de días,
+  // precios) en una sola línea, para maximizar el alto de la grilla. Los
+  // toggles individuales (metricsCollapsed/pricesCollapsed) siguen aplicando
+  // cuando este está expandido.
+  const [toolbarCollapsed, setToolbarCollapsed] = useState(() => {
+    try { return localStorage.getItem("cycleDetail.toolbarCollapsed") === "true"; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("cycleDetail.toolbarCollapsed", String(toolbarCollapsed)); } catch { /* noop */ }
+  }, [toolbarCollapsed]);
   useEffect(() => {
     try { localStorage.setItem("cycleDetail.pricesCollapsed", String(pricesCollapsed)); } catch { /* noop */ }
   }, [pricesCollapsed]);
@@ -711,6 +738,50 @@ export default function CycleDetail() {
 
   const closed = cycle?.status === "closed";
   const readOnly = closed && !isAdmin;
+
+  // Navegación rápida entre ciclos hermanos (misma faena + subfaena), para
+  // saltar de "Ciclo 8" a "Ciclo 7" sin volver al listado. Ordenados por el
+  // PRIMER día real con producción cargada (min de cycle.days), no por
+  // startDate/endDate/createdAt: esos campos son manuales y se desalinean
+  // cuando se cierran ciclos atrasados o varios a la vez. Tampoco se usa el
+  // número en el label (editable, podría no coincidir con el orden real).
+  // Solo se recarga cuando cambia el ámbito (faenaId/subfaenaId), no en cada
+  // edición del ciclo.
+  const [siblingCycles, setSiblingCycles] = useState(null);
+  useEffect(() => {
+    const faenaId = cycle?.faenaId;
+    if (!faenaId) { setSiblingCycles(null); return; }
+    const subfaenaId = cycle?.subfaenaId || null;
+    let cancelled = false;
+    (async () => {
+      const list = await cyclesService.list({
+        wheres: [["faenaId", "==", faenaId]],
+        cache: true,
+        ttl: 2 * 60 * 1000,
+      });
+      if (cancelled) return;
+      const scope = list.filter((c) => (c.subfaenaId || null) === subfaenaId);
+      // Fallback propio para ordenar (createdAt en vez de todayStr): un ciclo
+      // sin días cargados debe ubicarse según cuándo se creó, no como si
+      // "ahora" fuera su fecha — eso lo mandaría al final de la lista.
+      const firstDayForSort = (c) => {
+        const days = c.days;
+        if (Array.isArray(days) && days.length > 0) {
+          return days.reduce((min, d) => (d < min ? d : min), days[0]);
+        }
+        return c.startDate || c.createdAt?.toDate?.()?.toISOString?.() || "";
+      };
+      scope.sort((a, b) => firstDayForSort(a).localeCompare(firstDayForSort(b)));
+      setSiblingCycles(scope.map((c) => ({ id: c.id, label: c.label })));
+    })();
+    return () => { cancelled = true; };
+  }, [cycle?.faenaId, cycle?.subfaenaId]);
+
+  const cycleNavIndex = siblingCycles ? siblingCycles.findIndex((c) => c.id === id) : -1;
+  const prevCycle = cycleNavIndex > 0 ? siblingCycles[cycleNavIndex - 1] : null;
+  const nextCycle = cycleNavIndex >= 0 && cycleNavIndex < (siblingCycles?.length || 0) - 1
+    ? siblingCycles[cycleNavIndex + 1]
+    : null;
 
   const loadAllWorkers = async () => {
     const list = await workersService.list({
@@ -2404,8 +2475,10 @@ export default function CycleDetail() {
   const handleCloseCycle = async () => {
     setCloseBusy(true);
     try {
-      await cyclesService.update(id, { status: "closed", endDate: todayStr() });
-      setCycle((c) => ({ ...c, status: "closed", endDate: todayStr() }));
+      const startDate = firstWorkedDay(cycle);
+      const endDate = lastWorkedDay(cycle);
+      await cyclesService.update(id, { status: "closed", startDate, endDate });
+      setCycle((c) => ({ ...c, status: "closed", startDate, endDate }));
       setCloseFlow(false);
       showToast("Ciclo cerrado");
     } finally {
@@ -3146,7 +3219,7 @@ export default function CycleDetail() {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="mb-3 flex items-center gap-2 text-sm text-[var(--color-muted)]">
+      <div className="mb-2 flex items-center gap-2 text-sm text-[var(--color-muted)]">
         <Link to="/faenas" className="hover:text-[var(--color-accent)]">Faenas</Link>
         <span>/</span>
         {faena ? (
@@ -3174,9 +3247,76 @@ export default function CycleDetail() {
         <span className="text-[var(--color-text)]">{cycle.label}</span>
       </div>
 
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+      {toolbarCollapsed && (
+        <div className="mb-2 flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => setToolbarCollapsed(false)}
+            title="Mostrar controles del ciclo"
+            className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-[var(--color-border)] text-xs text-[var(--color-muted)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+          >
+            ▶
+          </button>
+          <button
+            type="button"
+            onClick={() => prevCycle && navigate(`/cycles/${prevCycle.id}`)}
+            disabled={!prevCycle}
+            title={prevCycle ? `Ciclo anterior: ${prevCycle.label}` : "No hay ciclo anterior"}
+            className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-[var(--color-border)] text-xs text-[var(--color-muted)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:opacity-30 disabled:pointer-events-none"
+          >
+            ‹
+          </button>
+          <span className="text-lg font-semibold tracking-tight">{cycle.label}</span>
+          <button
+            type="button"
+            onClick={() => nextCycle && navigate(`/cycles/${nextCycle.id}`)}
+            disabled={!nextCycle}
+            title={nextCycle ? `Ciclo siguiente: ${nextCycle.label}` : "No hay ciclo siguiente"}
+            className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-[var(--color-border)] text-xs text-[var(--color-muted)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:opacity-30 disabled:pointer-events-none"
+          >
+            ›
+          </button>
+          {activeLabor && (
+            <span className="ml-1 truncate text-xs text-[var(--color-muted)]">
+              {activeLabor.name} · {workers.length} trab. · {days.length} días
+            </span>
+          )}
+        </div>
+      )}
+
+      {!toolbarCollapsed && (
+      <>
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">{cycle.label}</h1>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setToolbarCollapsed(true)}
+              title="Ocultar controles del ciclo (más espacio para la grilla)"
+              className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-[var(--color-border)] text-xs text-[var(--color-muted)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+            >
+              ▼
+            </button>
+            <button
+              type="button"
+              onClick={() => prevCycle && navigate(`/cycles/${prevCycle.id}`)}
+              disabled={!prevCycle}
+              title={prevCycle ? `Ciclo anterior: ${prevCycle.label}` : "No hay ciclo anterior"}
+              className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-[var(--color-border)] text-xs text-[var(--color-muted)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:opacity-30 disabled:pointer-events-none"
+            >
+              ‹
+            </button>
+            <h1 className="text-2xl font-semibold tracking-tight">{cycle.label}</h1>
+            <button
+              type="button"
+              onClick={() => nextCycle && navigate(`/cycles/${nextCycle.id}`)}
+              disabled={!nextCycle}
+              title={nextCycle ? `Ciclo siguiente: ${nextCycle.label}` : "No hay ciclo siguiente"}
+              className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-[var(--color-border)] text-xs text-[var(--color-muted)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:opacity-30 disabled:pointer-events-none"
+            >
+              ›
+            </button>
+          </div>
           <p className="text-sm text-[var(--color-muted)]">
             {cycle.labors.length} labor{cycle.labors.length === 1 ? "" : "es"} · {days.length} días
             {closed && (isAdmin ? " · ciclo cerrado · edición de admin" : " · ciclo cerrado (solo lectura)")}
@@ -3232,7 +3372,7 @@ export default function CycleDetail() {
         <span>Métricas</span>
       </button>
       {!metricsCollapsed && (
-      <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="mb-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
         {cycle.labors.map((l) => {
           const isCo = l.type === "cosecha";
           const isTr = l.type === "trato";
@@ -3392,7 +3532,7 @@ export default function CycleDetail() {
       )}
 
       {/* Labor tabs */}
-      <div className="mb-3 flex flex-wrap items-center gap-1 border-b border-[var(--color-border)]">
+      <div className="mb-2 flex flex-wrap items-center gap-1 border-b border-[var(--color-border)]">
         {cycle.labors.map((l) => {
           const isActive = l.id === activeLabor?.id;
           const isCo = l.type === "cosecha";
@@ -3410,7 +3550,7 @@ export default function CycleDetail() {
             <button
               key={l.id}
               onClick={() => setActiveLaborId(l.id)}
-              className={`relative px-4 py-2 text-sm transition-colors ${
+              className={`relative px-4 py-1.5 text-sm transition-colors ${
                 isActive ? "font-medium text-[var(--color-accent)]" : "text-[var(--color-muted)] hover:text-[var(--color-text)]"
               }`}
             >
@@ -3428,10 +3568,14 @@ export default function CycleDetail() {
           + Labor
         </button>
       </div>
+      </>
+      )}
 
       {activeLabor && (
         <>
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          {!toolbarCollapsed && (
+          <>
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
             <div className="text-xs text-[var(--color-muted)]">
               {workers.length} trabajadores · {days.length} días
               {!isQtyLabor && (
@@ -3570,7 +3714,7 @@ export default function CycleDetail() {
 
           {/* Cosecha price bar */}
           {isCosechaLabor && days.length > 0 && (
-            <div className={`mb-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] ${pricesCollapsed ? "px-3 py-1.5" : "p-3"}`}>
+            <div className={`mb-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] ${pricesCollapsed ? "px-3 py-1.5" : "p-2"}`}>
               <button
                 type="button"
                 onClick={() => setPricesCollapsed((v) => !v)}
@@ -3701,7 +3845,7 @@ export default function CycleDetail() {
 
           {/* TratoEtapas price bar — precio por día por etapa (fijas del labor) */}
           {isTratoEtapasLabor && days.length > 0 && (
-            <div className={`mb-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] ${pricesCollapsed ? "px-3 py-1.5" : "p-3"}`}>
+            <div className={`mb-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] ${pricesCollapsed ? "px-3 py-1.5" : "p-2"}`}>
               <button
                 type="button"
                 onClick={() => setPricesCollapsed((v) => !v)}
@@ -3716,52 +3860,56 @@ export default function CycleDetail() {
               {!pricesCollapsed && (
               <div className="mt-2 flex flex-wrap gap-2">
                 {days.map((d) => (
-                  <div key={d} className="flex flex-col gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)] p-2 text-xs min-w-[220px]">
+                  <div key={d} className="flex flex-col gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)] p-1.5 text-xs min-w-[210px]">
                     <div className="font-medium text-[var(--color-muted)]">{d}</div>
                     {etapas.map((st) => {
                       const { price, mode } = getStageDayPrice(dayPrices, activeLabor.id, d, st.id);
                       return (
                         <div
                           key={st.id}
-                          className={`flex flex-col gap-1 rounded-md border px-2 py-1.5 ${
+                          className={`flex flex-col gap-0.5 rounded-md border px-1.5 py-1 ${
                             price > 0
                               ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)]"
                               : "border-[var(--color-border)] bg-[var(--color-surface)]"
                           }`}
                         >
-                          <span className="font-medium text-[var(--color-text)]">
+                          <span className="truncate font-medium text-[var(--color-text)]">
                             {st.name}
                             {st.counts && <span className="ml-1 text-[10px] text-[var(--color-accent)]" title="cuenta para el conteo de unidades">✓</span>}
                           </span>
-                          <div className="flex rounded-md overflow-hidden border border-[var(--color-border)] text-[10px]">
-                            <button
-                              disabled={readOnly}
-                              onClick={() => persistStagePrice(activeLabor.id, d, st.id, { mode: "unit" })}
-                              className={`flex-1 px-1 py-0.5 transition-colors ${mode === "unit" ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)] font-medium" : "bg-[var(--color-surface-2)] text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)]"} disabled:opacity-50`}
-                            >
-                              $/unidad
-                            </button>
-                            <button
-                              disabled={readOnly}
-                              onClick={() => persistStagePrice(activeLabor.id, d, st.id, { mode: "flat" })}
-                              className={`flex-1 px-1 py-0.5 transition-colors ${mode === "flat" ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)] font-medium" : "bg-[var(--color-surface-2)] text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)]"} disabled:opacity-50`}
-                            >
-                              $/día
-                            </button>
-                          </div>
                           <div className="flex items-center gap-1">
-                            <span className="text-[var(--color-muted)]">$</span>
-                            <input
-                              key={`${d}_${st.id}_${price}_${mode}`}
-                              type="number" min="0" disabled={readOnly}
-                              defaultValue={price > 0 ? price : ""}
-                              onBlur={(e) => {
-                                const v = Number(e.target.value) || 0;
-                                if (v !== price) persistStagePrice(activeLabor.id, d, st.id, { price: v });
-                              }}
-                              placeholder={mode === "flat" ? "tarifa/día" : "precio/unid"}
-                              className="w-full rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-0.5 text-right tabular-nums outline-none focus:border-[var(--color-accent)] disabled:opacity-50"
-                            />
+                            <div className="flex shrink-0 rounded overflow-hidden border border-[var(--color-border)] text-[9px]">
+                              <button
+                                disabled={readOnly}
+                                onClick={() => persistStagePrice(activeLabor.id, d, st.id, { mode: "unit" })}
+                                title="Precio por unidad"
+                                className={`px-1 py-0.5 transition-colors ${mode === "unit" ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)] font-medium" : "bg-[var(--color-surface-2)] text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)]"} disabled:opacity-50`}
+                              >
+                                u
+                              </button>
+                              <button
+                                disabled={readOnly}
+                                onClick={() => persistStagePrice(activeLabor.id, d, st.id, { mode: "flat" })}
+                                title="Precio fijo por día"
+                                className={`px-1 py-0.5 transition-colors ${mode === "flat" ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)] font-medium" : "bg-[var(--color-surface-2)] text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)]"} disabled:opacity-50`}
+                              >
+                                d
+                              </button>
+                            </div>
+                            <div className="flex min-w-0 flex-1 items-center gap-0.5">
+                              <span className="text-[var(--color-muted)]">$</span>
+                              <input
+                                key={`${d}_${st.id}_${price}_${mode}`}
+                                type="number" min="0" disabled={readOnly}
+                                defaultValue={price > 0 ? price : ""}
+                                onBlur={(e) => {
+                                  const v = Number(e.target.value) || 0;
+                                  if (v !== price) persistStagePrice(activeLabor.id, d, st.id, { price: v });
+                                }}
+                                placeholder={mode === "flat" ? "día" : "unid"}
+                                className="w-full min-w-0 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-1 py-0.5 text-right tabular-nums outline-none focus:border-[var(--color-accent)] disabled:opacity-50"
+                              />
+                            </div>
                           </div>
                         </div>
                       );
@@ -3771,21 +3919,13 @@ export default function CycleDetail() {
                       if (!s || (s.counted === 0 && s.people === 0)) return null;
                       const avg = s.people > 0 ? s.counted / s.people : 0;
                       return (
-                        <div className="mt-0.5 rounded-md border border-[var(--color-accent)]/40 bg-[var(--color-accent-soft)] px-2 py-1 tabular-nums">
-                          <div className="flex items-center justify-between">
-                            <span className="text-[var(--color-muted)]">Producción</span>
-                            <span className="font-semibold text-[var(--color-accent)]">
-                              {s.counted.toLocaleString("es-CL")} unid.
-                            </span>
-                          </div>
-                          <div className="flex items-center justify-between text-[10px]">
-                            <span className="text-[var(--color-muted)]">
-                              {s.people} persona{s.people === 1 ? "" : "s"}
-                            </span>
-                            <span className="text-[var(--color-text)]">
-                              prom {avg.toLocaleString("es-CL", { maximumFractionDigits: 1 })}/pers.
-                            </span>
-                          </div>
+                        <div
+                          className="flex items-center justify-between gap-1 rounded-md border border-[var(--color-accent)]/40 bg-[var(--color-accent-soft)] px-1.5 py-1 text-[10px] tabular-nums"
+                          title={`Producción del día: ${s.counted.toLocaleString("es-CL")} unid. que cuentan · ${s.people} persona${s.people === 1 ? "" : "s"} · promedio ${avg.toLocaleString("es-CL", { maximumFractionDigits: 1 })} por persona`}
+                        >
+                          <span className="font-semibold text-[var(--color-accent)]">{s.counted.toLocaleString("es-CL")} unid.</span>
+                          <span className="text-[var(--color-muted)]">{s.people} pers.</span>
+                          <span className="text-[var(--color-text)]">prom {avg.toLocaleString("es-CL", { maximumFractionDigits: 1 })}</span>
                         </div>
                       );
                     })()}
@@ -3798,7 +3938,7 @@ export default function CycleDetail() {
 
           {/* TratoHE price bar */}
           {isTratoHELabor && days.length > 0 && (
-            <div className={`mb-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] ${pricesCollapsed ? "px-3 py-1.5" : "p-3"}`}>
+            <div className={`mb-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] ${pricesCollapsed ? "px-3 py-1.5" : "p-2"}`}>
               <button
                 type="button"
                 onClick={() => setPricesCollapsed((v) => !v)}
@@ -3856,7 +3996,7 @@ export default function CycleDetail() {
 
           {/* Trato price bar */}
           {isTratoLabor && days.length > 0 && (
-            <div className={`mb-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] ${pricesCollapsed ? "px-3 py-1.5" : "p-3"}`}>
+            <div className={`mb-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] ${pricesCollapsed ? "px-3 py-1.5" : "p-2"}`}>
               <button
                 type="button"
                 onClick={() => setPricesCollapsed((v) => !v)}
@@ -4065,7 +4205,7 @@ export default function CycleDetail() {
               sugerido por día que se usa como hint clickeable en las celdas
               vacías del grid. Se persiste en dayPrices del ciclo. */}
           {isNormalLabor && days.length > 0 && (
-            <div className={`mb-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] ${pricesCollapsed ? "px-3 py-1.5" : "p-3"}`}>
+            <div className={`mb-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] ${pricesCollapsed ? "px-3 py-1.5" : "p-2"}`}>
               <button
                 type="button"
                 onClick={() => setPricesCollapsed((v) => !v)}
@@ -4133,6 +4273,8 @@ export default function CycleDetail() {
               )}
             </div>
           )}
+          </>
+          )}
 
           {!photoMode && workers.length > 0 && (
             <div className="mb-2 flex flex-wrap items-center gap-2">
@@ -4174,11 +4316,11 @@ export default function CycleDetail() {
             </div>
           )}
 
-          <ResizeHandle
-            onPointerDown={onGridResizeStart}
-            onDoubleClick={resetGridHeight}
-          />
-          <div style={{ height: `${gridHeight}px` }} className="flex min-h-0 flex-col">
+          {/* La grilla ocupa exactamente el alto libre del <main> (flex-1) y
+              scrollea internamente cuando hay más filas de las que caben. Sin
+              alto fijo ni piso: así nunca se fuerza más alta que el viewport,
+              que era lo que dejaba el área vacía ("footer") abajo. */}
+          <div className="flex min-h-0 flex-1 flex-col">
             {grid}
           </div>
         </>

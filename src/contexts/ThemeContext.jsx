@@ -7,7 +7,7 @@ export const THEMES = [
   { key: "light", label: "Light", isDark: false },
   { key: "dark", label: "Dark", isDark: true },
   { key: "donDiego", label: "Don Diego", isDark: true },
-  { key: "sheridan", label: "Sheridan", isDark: true },
+  { key: "sheridan", label: "DarkViolet", isDark: true },
   { key: "aetiskViolet", label: "Aetisk Violet", isDark: false },
   { key: "aetiskPastel", label: "Aetisk Pastel", isDark: false },
 ];

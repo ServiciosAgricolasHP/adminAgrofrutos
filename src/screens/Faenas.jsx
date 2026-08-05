@@ -31,6 +31,28 @@ const orderKey = (uid) => `af.faenaOrder.${uid || "anon"}`;
 const todayStr = () => new Date().toISOString().slice(0, 10);
 const newId = () => (crypto?.randomUUID?.() || `id_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`);
 
+// Primer/último día real con producción cargada en el ciclo (cycle.days).
+// Se usan al cerrar el ciclo para recalcular startDate/endDate en base a lo
+// que efectivamente se trabajó, no en base a lo que alguien tipeó al crear
+// el ciclo (startDate) o a la fecha en que apretó "Cerrar ciclo" (endDate) —
+// ambas pueden estar mal si el ciclo se creó antes de empezar a trabajar, o
+// si se cierran varios ciclos atrasados de una sola vez. Si el ciclo nunca
+// tuvo días cargados, no hay nada que recalcular: se deja lo que ya había.
+const firstWorkedDay = (cycle) => {
+  const days = cycle?.days;
+  if (Array.isArray(days) && days.length > 0) {
+    return days.reduce((min, d) => (d < min ? d : min), days[0]);
+  }
+  return cycle?.startDate || todayStr();
+};
+const lastWorkedDay = (cycle) => {
+  const days = cycle?.days;
+  if (Array.isArray(days) && days.length > 0) {
+    return days.reduce((max, d) => (d > max ? d : max), days[0]);
+  }
+  return cycle?.endDate || todayStr();
+};
+
 function applyOrder(items, order) {
   if (!order?.length) return items;
   const idx = new Map(order.map((id, i) => [id, i]));
@@ -658,7 +680,11 @@ export default function Faenas() {
     if (!closeFlow) return;
     setBusy(true);
     try {
-      await cyclesService.update(closeFlow.cycle.id, { status: "closed", endDate: todayStr() });
+      await cyclesService.update(closeFlow.cycle.id, {
+        status: "closed",
+        startDate: firstWorkedDay(closeFlow.cycle),
+        endDate: lastWorkedDay(closeFlow.cycle),
+      });
       setCloseFlow((s) => ({ ...s, askNext: true }));
       await loadCycles(closeFlow.faenaId);
     } finally {
