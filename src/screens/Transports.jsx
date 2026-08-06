@@ -1481,6 +1481,9 @@ function PaymentsTab() {
             payments={pending}
             carrierById={carrierById}
             transportPayrollById={transportPayrollById}
+            faenaById={faenaById}
+            subfaenaById={subfaenaById}
+            cycleById={cycleById}
             onView={setViewing}
             empty={hasActiveFilter ? "Ningún pendiente coincide con el filtro" : "Sin resúmenes pendientes"}
           />
@@ -1490,6 +1493,9 @@ function PaymentsTab() {
               payments={paid}
               carrierById={carrierById}
               transportPayrollById={transportPayrollById}
+              faenaById={faenaById}
+              subfaenaById={subfaenaById}
+              cycleById={cycleById}
               onView={setViewing}
               empty={hasActiveFilter ? "Ningún pago coincide con el filtro" : "Sin pagos registrados"}
               dim
@@ -2477,7 +2483,7 @@ function BalanceSummary({ carriers, reloadVersion }) {
   );
 }
 
-function PaymentSection({ title, payments, carrierById, transportPayrollById, onView, empty, dim = false }) {
+function PaymentSection({ title, payments, carrierById, transportPayrollById, faenaById, subfaenaById, cycleById, onView, empty, dim = false }) {
   // Agrupado por transportista. Cada grupo es colapsable; default expandido
   // porque típicamente hay pocos resúmenes por transportista (1-3) y el
   // usuario quiere verlos para click-to-detail.
@@ -2509,6 +2515,11 @@ function PaymentSection({ title, payments, carrierById, transportPayrollById, on
     else next.add(cid);
     return next;
   });
+
+  // Vista unificada: junta las vueltas de TODOS los resúmenes de un
+  // transportista (ej. las dos quincenas de un mes) en una sola tabla
+  // filtrable por día, para no tener que abrir cada resumen por separado.
+  const [unifiedGroup, setUnifiedGroup] = useState(null);
 
   const fmtDate = (d) => {
     if (!d || typeof d !== "string") return "";
@@ -2547,21 +2558,33 @@ function PaymentSection({ title, payments, carrierById, transportPayrollById, on
             const collapsed = collapsedCarriers.has(g.carrierId);
             return (
               <div key={g.carrierId} className="rounded-md border border-[var(--color-border)]">
-                <button
-                  type="button"
-                  onClick={() => toggleCarrier(g.carrierId)}
-                  className="flex w-full items-center gap-2 bg-[var(--color-surface-2)] px-3 py-2 text-left text-sm hover:bg-[var(--color-accent-soft)]"
-                >
-                  <span className="text-[var(--color-muted)]">{collapsed ? "▸" : "▾"}</span>
-                  <span className="font-semibold">{g.alias}</span>
-                  {g.name && <span className="text-xs text-[var(--color-muted)]">· {g.name}</span>}
-                  <span className="ml-2 text-[10px] text-[var(--color-muted)]">
-                    · {g.items.length} resumen{g.items.length === 1 ? "" : "es"}
-                  </span>
+                <div className="flex w-full flex-wrap items-center gap-2 bg-[var(--color-surface-2)] px-3 py-2 text-sm">
+                  <button
+                    type="button"
+                    onClick={() => toggleCarrier(g.carrierId)}
+                    className="flex items-center gap-2 text-left hover:text-[var(--color-accent)]"
+                  >
+                    <span className="text-[var(--color-muted)]">{collapsed ? "▸" : "▾"}</span>
+                    <span className="font-semibold">{g.alias}</span>
+                    {g.name && <span className="text-xs text-[var(--color-muted)]">· {g.name}</span>}
+                    <span className="text-[10px] text-[var(--color-muted)]">
+                      · {g.items.length} resumen{g.items.length === 1 ? "" : "es"}
+                    </span>
+                  </button>
+                  {g.items.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => setUnifiedGroup(g)}
+                      title="Ver todas las vueltas de estos resúmenes juntas en una sola tabla, filtrable por día"
+                      className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-[10px] hover:bg-[var(--color-accent-soft)]"
+                    >
+                      🔗 Vista unificada
+                    </button>
+                  )}
                   <span className="ml-auto font-semibold tabular-nums">
                     {fmtCurrency(g.total)}
                   </span>
-                </button>
+                </div>
                 {!collapsed && (
                   <div className="grid gap-2 p-2">
                     {g.items.map(renderPaymentCard)}
@@ -2572,6 +2595,15 @@ function PaymentSection({ title, payments, carrierById, transportPayrollById, on
           })}
         </div>
       )}
+
+      <UnifiedSummaryModal
+        open={!!unifiedGroup}
+        onClose={() => setUnifiedGroup(null)}
+        group={unifiedGroup}
+        faenaById={faenaById}
+        subfaenaById={subfaenaById}
+        cycleById={cycleById}
+      />
     </div>
   );
 }
@@ -2656,6 +2688,221 @@ function paymentCardContent(p, c, period, transportPayrollById) {
         </div>
       </div>
     </>
+  );
+}
+
+// Junta las vueltas de todos los resúmenes de un transportista (ej. las dos
+// quincenas de un mes) en una sola tabla, para verlas/imprimirlas/copiarlas
+// de corrido en vez de resumen por resumen. Solo lectura — editar montos o
+// quitar vueltas se sigue haciendo desde el resumen individual.
+function UnifiedSummaryModal({ open, onClose, group, faenaById, subfaenaById, cycleById }) {
+  const toast = useToast();
+  const [trips, setTrips] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState("");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const printRef = useRef(null);
+
+  const fmtDate = (d) => {
+    if (!d || typeof d !== "string") return "";
+    const m = d.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    return m ? `${m[3]}/${m[2]}/${m[1].slice(2)}` : d;
+  };
+
+  useEffect(() => {
+    if (!open || !group) return;
+    (async () => {
+      setLoading(true);
+      try {
+        const tripIds = new Set();
+        for (const p of group.items) for (const id of p.tripIds || []) tripIds.add(id);
+        const all = await tripsService.listByCarrier(group.carrierId);
+        const filtered = all
+          .filter((t) => tripIds.has(t.id))
+          .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+        setTrips(filtered);
+        setDateFrom(filtered[0]?.date || "");
+        setDateTo(filtered[filtered.length - 1]?.date || "");
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [open, group]);
+
+  if (!group) return null;
+  const carrier = { id: group.carrierId, alias: group.alias, name: group.name };
+
+  const filteredTrips = trips.filter((t) => {
+    if (dateFrom && t.date < dateFrom) return false;
+    if (dateTo && t.date > dateTo) return false;
+    return true;
+  });
+  const total = filteredTrips.reduce((s, t) => s + (Number(t.amount) || 0), 0);
+  const resetRange = () => {
+    setDateFrom(trips[0]?.date || "");
+    setDateTo(trips[trips.length - 1]?.date || "");
+  };
+  const periodLabel = filteredTrips.length > 0
+    ? `${fmtDate(filteredTrips[0].date)} → ${fmtDate(filteredTrips[filteredTrips.length - 1].date)}`
+    : "—";
+
+  const handleCopy = async () => {
+    if (!printRef.current) return;
+    setBusy("copy");
+    try {
+      const blob = await captureFullWidthBlob(printRef.current);
+      if (!blob) throw new Error("No se pudo generar la imagen");
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+      toast.success("Imagen copiada al portapapeles");
+    } catch (err) {
+      toast.error("Error al copiar: " + (err.message || err));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const handleDownload = async () => {
+    if (!printRef.current) return;
+    setBusy("download");
+    try {
+      const dataUrl = await captureFullWidthDataUrl(printRef.current);
+      const link = document.createElement("a");
+      link.download = `transporte_unificado_${group.alias}_${dateFrom}_${dateTo}.png`;
+      link.href = dataUrl;
+      link.click();
+    } catch (err) {
+      toast.error("Error al generar imagen: " + (err.message || err));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const handlePrint = () => {
+    if (!printRef.current) return;
+    const html = printRef.current.outerHTML;
+    const win = window.open("", "_blank", "width=900,height=700");
+    if (!win) return;
+    win.document.write(`<!DOCTYPE html><html><head><title>Resumen Transporte Unificado</title>
+      <style>
+        * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; color-adjust: exact !important; }
+        html, body { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+        body { font-family: ui-sans-serif, system-ui, sans-serif; padding: 20px; color: #000; }
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid #999; padding: 6px 8px; font-size: 12px; }
+        thead th { background: #92d050 !important; text-align: left; }
+        .month-tag { background: #e6c0e0 !important; padding: 2px 8px; font-weight: 600; display: inline-block; }
+        .num { text-align: right; font-variant-numeric: tabular-nums; }
+        @media print {
+          @page { size: landscape; margin: 12mm; }
+          * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; color-adjust: exact !important; }
+        }
+      </style>
+    </head><body>${html}</body></html>`);
+    win.document.close();
+    win.focus();
+    setTimeout(() => { win.print(); }, 250);
+  };
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={`🔗 Vista unificada — ${group.alias}`}
+      size="xl"
+      footer={
+        <>
+          <button onClick={onClose} className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm">
+            Cerrar
+          </button>
+          <button
+            onClick={handleCopy}
+            disabled={busy === "copy"}
+            className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)] disabled:opacity-60"
+          >
+            {busy === "copy" ? "Copiando..." : "📋 Copiar imagen"}
+          </button>
+          <button
+            onClick={handleDownload}
+            disabled={busy === "download"}
+            className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)] disabled:opacity-60"
+          >
+            {busy === "download" ? "Descargando..." : "📥 Descargar PNG"}
+          </button>
+          <button
+            onClick={handlePrint}
+            className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)]"
+          >
+            🖨 Imprimir
+          </button>
+        </>
+      }
+    >
+      <div className="mb-2 flex flex-wrap gap-1 text-[10px] text-[var(--color-muted)]">
+        Incluye {group.items.length} resúmenes:{" "}
+        {group.items
+          .slice()
+          .sort((a, b) => (a.periodFrom || "").localeCompare(b.periodFrom || ""))
+          .map((p) => `${fmtDate(p.periodFrom)}→${fmtDate(p.periodTo)}`)
+          .join(" · ")}
+      </div>
+
+      <div className="mb-3 flex flex-wrap items-end justify-between gap-2 text-xs">
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="flex items-center gap-1">
+            <span className="text-[var(--color-muted)]">Desde</span>
+            <input
+              type="date"
+              value={dateFrom}
+              onChange={(e) => setDateFrom(e.target.value)}
+              className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1"
+            />
+          </label>
+          <label className="flex items-center gap-1">
+            <span className="text-[var(--color-muted)]">Hasta</span>
+            <input
+              type="date"
+              value={dateTo}
+              onChange={(e) => setDateTo(e.target.value)}
+              className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1"
+            />
+          </label>
+          <button
+            type="button"
+            onClick={resetRange}
+            className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 hover:bg-[var(--color-accent-soft)]"
+            title="Volver a mostrar todo el rango incluido"
+          >
+            ⟲ Todo el rango
+          </button>
+        </div>
+        <div className="text-sm">
+          <span className="text-[var(--color-muted)]">
+            {filteredTrips.length} vuelta{filteredTrips.length === 1 ? "" : "s"} ·{" "}
+          </span>
+          <span className="font-semibold tabular-nums">{fmtCurrency(total)}</span>
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="py-6 text-center text-sm text-[var(--color-muted)]">Cargando...</div>
+      ) : filteredTrips.length === 0 ? (
+        <div className="rounded-md border border-dashed border-[var(--color-border)] py-8 text-center text-sm text-[var(--color-muted)]">
+          Sin vueltas en el rango seleccionado
+        </div>
+      ) : (
+        <PrintableSummary
+          ref={printRef}
+          payment={null}
+          carrier={carrier}
+          trips={filteredTrips}
+          periodLabel={periodLabel}
+          faenaById={faenaById}
+          subfaenaById={subfaenaById}
+          cycleById={cycleById}
+        />
+      )}
+    </Modal>
   );
 }
 
@@ -2825,12 +3072,19 @@ function PaymentDetailModal({ open, onClose, payment, carrier, carriers = [], fa
   const printRef = useRef(null);
   const [busy, setBusy] = useState("");
   const [editMode, setEditMode] = useState(false);
-  const [savingTripId, setSavingTripId] = useState(null);
   // Edición avanzada de una vuelta (mismo modal que TripsTab) + confirmación
   // para sacar una vuelta del resumen sin borrarla del sistema (vuelve a
   // estar "suelta" para futuras nóminas).
   const [editingTrip, setEditingTrip] = useState(null);
   const [confirmRemoveTrip, setConfirmRemoveTrip] = useState(null);
+  // Agregar vueltas sueltas olvidadas: en vez de borrar el resumen y
+  // regenerarlo, se buscan vueltas pendientes del mismo transportista que
+  // no estén vinculadas a ningún resumen y se suman a este.
+  const [addingTrips, setAddingTrips] = useState(false);
+  const [availableTrips, setAvailableTrips] = useState([]);
+  const [loadingAvailable, setLoadingAvailable] = useState(false);
+  const [selectedToAdd, setSelectedToAdd] = useState(() => new Set());
+  const [addBusy, setAddBusy] = useState(false);
   // Abonos: el resumen puede tener pagos parciales antes de marcarse 100%
   // pagado. Mantenemos un estado local sincronizado con el doc para que el UI
   // refleje los cambios sin esperar el reload del padre.
@@ -2895,33 +3149,6 @@ function PaymentDetailModal({ open, onClose, payment, carrier, carriers = [], fa
       toast.error("Error al copiar: " + (err.message || err));
     } finally {
       setBusy("");
-    }
-  };
-
-  // Edita inline el `amount` de una vuelta. Optimista: actualiza el state
-  // local primero, después escribe a Firestore (trip.amount + payment.total).
-  // Si Firestore falla, recargamos los trips desde la fuente.
-  const handleAmountChange = async (tripId, newAmount) => {
-    if (payment.status === "paid") return;
-    setSavingTripId(tripId);
-    const nextTrips = trips.map((t) => (t.id === tripId ? { ...t, amount: Number(newAmount) || 0 } : t));
-    setTrips(nextTrips);
-    const newTotal = nextTrips.reduce((s, t) => s + (Number(t.amount) || 0), 0);
-    try {
-      await tripsService.update(tripId, { amount: Number(newAmount) || 0 });
-      await paymentsService.updateTotal(payment.id, newTotal);
-      if (onChanged) await onChanged();
-    } catch (err) {
-      toast.error("Error al guardar: " + (err.message || err));
-      try {
-        const all = await tripsService.listByCarrier(payment.carrierId);
-        const filtered = all
-          .filter((t) => (payment.tripIds || []).includes(t.id))
-          .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
-        setTrips(filtered);
-      } catch { /* noop */ }
-    } finally {
-      setSavingTripId(null);
     }
   };
 
@@ -3036,6 +3263,51 @@ function PaymentDetailModal({ open, onClose, payment, carrier, carriers = [], fa
     }
   };
 
+  // Carga vueltas pendientes del mismo transportista sin resumen asignado —
+  // las "sueltas" que se olvidaron incluir al generar este resumen.
+  const openAddTrips = async () => {
+    setSelectedToAdd(new Set());
+    setAddingTrips(true);
+    setLoadingAvailable(true);
+    try {
+      const all = await tripsService.listByCarrier(payment.carrierId, { onlyPending: true });
+      const unlinked = all
+        .filter((t) => !t.paymentId)
+        .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+      setAvailableTrips(unlinked);
+    } catch (err) {
+      toast.error("Error al buscar vueltas sueltas: " + (err.message || err));
+    } finally {
+      setLoadingAvailable(false);
+    }
+  };
+
+  const toggleSelectToAdd = (id) => {
+    setSelectedToAdd((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const handleAddTrips = async () => {
+    if (selectedToAdd.size === 0) return;
+    setAddBusy(true);
+    try {
+      await paymentsService.editSummaryTrips(payment.id, { addTripIds: [...selectedToAdd] });
+      setAddingTrips(false);
+      setSelectedToAdd(new Set());
+      await refreshTrips();
+      if (onChanged) await onChanged();
+      toast.success("Vueltas agregadas al resumen");
+    } catch (err) {
+      toast.error("Error al agregar: " + (err.message || err));
+    } finally {
+      setAddBusy(false);
+    }
+  };
+
   const handlePrint = () => {
     if (!printRef.current) return;
     const html = printRef.current.outerHTML;
@@ -3103,6 +3375,15 @@ function PaymentDetailModal({ open, onClose, payment, carrier, carriers = [], fa
               {editMode ? "✓ Listo" : "✏️ Editar resumen"}
             </button>
           )}
+          {!isPaid && (
+            <button
+              onClick={openAddTrips}
+              className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm hover:bg-[var(--color-accent-soft)]"
+              title="Sumar a este resumen vueltas pendientes que se olvidaron incluir, sin borrarlo y volverlo a crear"
+            >
+              + Vuelta suelta
+            </button>
+          )}
           {/* Marcar pagado / Revertir movieron a la pestaña "Quincenas".
               Desde acá solo se crea, edita o elimina el resumen suelto.
               Cuando el modal se abre desde la quincena, `onDelete` viene
@@ -3126,7 +3407,6 @@ function PaymentDetailModal({ open, onClose, payment, carrier, carriers = [], fa
         <span className="text-[var(--color-muted)]">{periodLabel}</span>
         <span className="font-semibold tabular-nums">
           {fmtCurrency(trips.reduce((s, t) => s + (Number(t.amount) || 0), 0))}
-          {savingTripId && <span className="ml-2 text-xs text-[var(--color-muted)]">guardando…</span>}
         </span>
       </div>
 
@@ -3236,7 +3516,6 @@ function PaymentDetailModal({ open, onClose, payment, carrier, carriers = [], fa
           carrier={carrier}
           trips={trips}
           editable={editMode && !isPaid}
-          onAmountChange={handleAmountChange}
           onEditTrip={editMode && !isPaid ? (t) => setEditingTrip(t) : null}
           onRemoveTrip={editMode && !isPaid ? (t) => setConfirmRemoveTrip(t) : null}
           periodLabel={periodLabel}
@@ -3275,6 +3554,63 @@ function PaymentDetailModal({ open, onClose, payment, carrier, carriers = [], fa
         onCancel={() => setConfirmRemoveTrip(null)}
         onConfirm={handleRemoveTripFromPayment}
       />
+
+      <Modal
+        open={addingTrips}
+        onClose={() => setAddingTrips(false)}
+        title="+ Agregar vuelta suelta al resumen"
+        size="lg"
+        footer={
+          <>
+            <button
+              onClick={() => setAddingTrips(false)}
+              className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm"
+            >
+              Cancelar
+            </button>
+            <button
+              onClick={handleAddTrips}
+              disabled={selectedToAdd.size === 0 || addBusy}
+              className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
+            >
+              {addBusy ? "Agregando..." : `Agregar (${selectedToAdd.size})`}
+            </button>
+          </>
+        }
+      >
+        {loadingAvailable ? (
+          <div className="py-6 text-center text-sm text-[var(--color-muted)]">Buscando vueltas sueltas...</div>
+        ) : availableTrips.length === 0 ? (
+          <div className="rounded-md border border-dashed border-[var(--color-border)] py-8 text-center text-sm text-[var(--color-muted)]">
+            {carrier?.alias || "Este transportista"} no tiene vueltas pendientes sin resumen asignado.
+          </div>
+        ) : (
+          <div className="max-h-[50vh] space-y-1.5 overflow-auto">
+            {availableTrips.map((t) => {
+              const checked = selectedToAdd.has(t.id);
+              const fa = faenaById?.get(t.faenaId);
+              const sb = subfaenaById?.get(t.subfaenaId);
+              return (
+                <label
+                  key={t.id}
+                  className={`flex cursor-pointer items-center gap-2 rounded-md border px-2.5 py-2 text-sm ${
+                    checked ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)]" : "border-[var(--color-border)] hover:bg-[var(--color-surface-2)]"
+                  }`}
+                >
+                  <input type="checkbox" checked={checked} onChange={() => toggleSelectToAdd(t.id)} />
+                  <span className="font-mono text-xs tabular-nums text-[var(--color-muted)]">{t.date}</span>
+                  <span className="min-w-0 flex-1 truncate">
+                    {t.vehicleAlias || "—"}
+                    {fa && <span className="text-[var(--color-muted)]"> · {fa.name}{sb ? ` / ${sb.name}` : ""}</span>}
+                    {t.lugar && <span className="text-[var(--color-muted)]"> · {t.lugar}{t.destino ? ` → ${t.destino}` : ""}</span>}
+                  </span>
+                  <span className="shrink-0 font-semibold tabular-nums">{fmtCurrency(t.amount)}</span>
+                </label>
+              );
+            })}
+          </div>
+        )}
+      </Modal>
     </Modal>
   );
 }
@@ -3297,26 +3633,18 @@ function monthOfTrips(trips) {
 }
 
 const PrintableSummary = forwardRef(function PrintableSummary(
-  { payment, carrier, trips, periodLabel, faenaById, subfaenaById, cycleById, editable = false, onAmountChange, onEditTrip, onRemoveTrip },
+  { payment, carrier, trips, periodLabel, faenaById, subfaenaById, cycleById, editable = false, onEditTrip, onRemoveTrip },
   ref,
 ) {
   // Si el modal en edición pasó callbacks por trip, mostramos una columna
   // "Acciones" extra. Cuando se imprime, el usuario debería desactivar el
   // modo edición antes (sino los botones aparecen en el print, pero son
-  // visualmente discretos y no afectan el contenido).
+  // visualmente discretos y no afectan el contenido). El "Valor" ya no se
+  // edita inline acá: se edita completo (qty/tarifa) vía el lápiz, que abre
+  // TripEditModal — evita que quede desincronizado de N° vueltas/tarifa.
   const showActions = editable && (onEditTrip || onRemoveTrip);
   const month = monthOfTrips(trips);
   const total = trips.reduce((s, t) => s + (Number(t.amount) || 0), 0);
-  const inputStyle = {
-    width: 90,
-    textAlign: "right",
-    fontVariantNumeric: "tabular-nums",
-    border: "1px solid #ccc",
-    borderRadius: 3,
-    padding: "1px 4px",
-    background: "#fffbeb",
-    fontSize: 12,
-  };
 
   return (
     <div ref={ref} style={{ background: "#ffffff", color: "#000", padding: 16, fontFamily: "ui-sans-serif, system-ui, sans-serif" }}>
@@ -3361,20 +3689,8 @@ const PrintableSummary = forwardRef(function PrintableSummary(
                 <td style={cell}>{t.lugar || ""}</td>
                 <td style={cell}>{t.destino || ""}</td>
                 <td style={cell}>{labor}</td>
-                <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums", padding: editable ? 3 : "5px 8px" }}>
-                  {editable ? (
-                    <input
-                      type="number"
-                      defaultValue={Number(t.amount) || 0}
-                      onBlur={(e) => {
-                        const v = e.target.value === "" ? 0 : Number(e.target.value);
-                        if (v !== Number(t.amount)) onAmountChange && onAmountChange(t.id, v);
-                      }}
-                      style={inputStyle}
-                    />
-                  ) : (
-                    fmtCurrency(t.amount)
-                  )}
+                <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums", padding: "5px 8px" }}>
+                  {fmtCurrency(t.amount)}
                 </td>
                 <td style={cell}>
                   {t.personCount != null ? `${t.personCount} PERS` : ""}

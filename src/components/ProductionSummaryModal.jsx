@@ -635,6 +635,7 @@ function CombinedSummaryCard({ dataByColumn, days }) {
         </div>
       </div>
       {!collapsed && (
+        <>
         <div ref={captureRef} style={{ background: "#fff", color: "#000", padding: 12 }}>
           <div style={{ marginBottom: 8 }}>
             <div style={{ fontSize: 14, fontWeight: 700 }}>📊 Tabla general — resumen consolidado</div>
@@ -746,13 +747,14 @@ function CombinedSummaryCard({ dataByColumn, days }) {
               </tbody>
             </table>
           </div>
+        </div>
 
-          {/* Tabla auxiliar para AJUSTAR la ganancia — separada de la tabla
-              principal a propósito: la principal es la que se copia/imprime
-              tal cual (limpia, sin inputs); acá se editan los % (o lo que
-              paga el cliente en labores de jornada) y eso alimenta las filas
-              GANANCIAS/TOTAL GENERAL de arriba. */}
-          <div style={{ marginTop: 12, borderTop: "2px solid #ccc", paddingTop: 10 }}>
+        {/* Tabla auxiliar para AJUSTAR la ganancia — a propósito FUERA de
+            captureRef: no debe salir al copiar/imprimir, solo ayuda en
+            pantalla a editar los % (o lo que paga el cliente en labores de
+            jornada), lo que alimenta las filas GANANCIAS/TOTAL GENERAL de
+            la tabla de arriba. */}
+        <div style={{ marginTop: 12, borderTop: "2px solid #ccc", paddingTop: 10, padding: "10px 12px 12px" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8, fontSize: 13, fontWeight: 700 }}>
               <span>💰 Ajustar ganancia</span>
               <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 400, color: "#444", marginLeft: 8 }}>
@@ -856,7 +858,7 @@ function CombinedSummaryCard({ dataByColumn, days }) {
               </table>
             </div>
           </div>
-        </div>
+        </>
       )}
     </div>
   );
