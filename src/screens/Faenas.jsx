@@ -1541,9 +1541,11 @@ function CycleRow({ cycle, subName, onEdit, onOpenCloseFlow, onReopen, onDelete 
   // a nivel faena (todos los ciclos) hay un modal aparte en SelectedDetail.
   const [resumenOpen, setResumenOpen] = useState(false);
   // Solo tiene sentido mostrar el botón si el ciclo tiene al menos una labor
-  // de trato o cosecha (sino el modal saldría vacío).
+  // de trato, cosecha, trato por etapas o pago al día (sino el modal saldría
+  // vacío). "main" es el tipo interno de las labores "Pago al día" — el
+  // label visible (ej. "Principal") es solo el nombre, no cambia el type.
   const hasProdLabor = (cycle.labors || []).some(
-    (l) => l.type === "cosecha" || l.type === "trato",
+    (l) => l.type === "cosecha" || l.type === "trato" || l.type === "tratoEtapas" || l.type === "main",
   );
   return (
     <li className="flex flex-wrap items-center justify-between gap-2 px-3 py-2">
@@ -1662,12 +1664,13 @@ function SelectedDetail({
 
   // Resumen de producción a nivel faena: arranca cerrado y el usuario lo
   // abre con el botón. Cuando se abre, le pasamos TODOS los ciclos con
-  // labores de trato/cosecha (abiertos y cerrados). El modal por dentro
-  // tiene chips para togglear cuáles incluir — default arranca con los
-  // abiertos seleccionados, los cerrados quedan apagados.
+  // labores de trato/cosecha/trato por etapas/pago al día (abiertos y
+  // cerrados). El modal por dentro tiene chips para togglear cuáles incluir
+  // — default arranca con los abiertos seleccionados, los cerrados quedan
+  // apagados.
   const [resumenOpen, setResumenOpen] = useState(false);
   const cyclesWithProd = (cycles || []).filter((c) =>
-    (c.labors || []).some((l) => l.type === "cosecha" || l.type === "trato"),
+    (c.labors || []).some((l) => l.type === "cosecha" || l.type === "trato" || l.type === "tratoEtapas" || l.type === "main"),
   );
   // Ordenamos: abiertos primero, después cerrados (más reciente primero).
   const cyclesForResumen = [...cyclesWithProd].sort((a, b) => {

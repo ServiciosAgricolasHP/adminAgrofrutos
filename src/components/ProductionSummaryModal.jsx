@@ -22,6 +22,23 @@ const fmtCLP = (v) =>
 const fmtNum = (v) =>
   new Intl.NumberFormat("es-CL", { maximumFractionDigits: 1 }).format(Number(v) || 0);
 
+// Persistencia de las opciones que el usuario configura en este modal
+// (filtros, % de ganancia, valores "pagan $", IVA, etc.) — así no hay que
+// re-ingresarlas cada vez que se reabre el resumen. Las claves por labor
+// (pctOverrides/paidToUs/workersPaid) usan colKey = cycleId__laborId, que es
+// estable en el tiempo, así que quedan asociadas al ciclo/labor correctos
+// aunque se reabra el modal semanas después.
+const LS_PREFIX = "productionSummary.";
+const loadJSON = (key, fallback) => {
+  try {
+    const raw = localStorage.getItem(LS_PREFIX + key);
+    return raw != null ? JSON.parse(raw) : fallback;
+  } catch { return fallback; }
+};
+const saveJSON = (key, value) => {
+  try { localStorage.setItem(LS_PREFIX + key, JSON.stringify(value)); } catch { /* noop */ }
+};
+
 // Paleta y estilos clonados de las tablas de cobrar (CycleSummaryModal). Inline
 // porque las tablas tienen fondo blanco fijo — el modal entero corre con la
 // vista "print-ready" para que la imagen/impresión salga igual al UI.
@@ -32,6 +49,13 @@ const HDR_GREEN = "#a9d08e";   // verde header — tabla general
 const ROW_TOTAL_LIGHT = "#c6efce"; // verde claro — fila total por-labor
 const ROW_TOTAL_DARK = "#6aa84f";  // verde oscuro — fila total general
 const ROW_HIGHLIGHT = "#fffbeb";   // amarillo pale — subhead general (labor name row)
+// Rampa de verdes para el bloque TOTAL/GANANCIAS/TOTAL GENERAL/IVA/BRUTO de
+// la tabla general — mismo tono base que el resto, pero cada fila con un
+// matiz distinto para que no se vea como un solo bloque sólido pegado.
+const ROW_GANANCIAS = "#93c47d";      // verde más claro que TOTAL — fila GANANCIAS
+const ROW_TOTAL_GENERAL = "#38761d";  // verde bosque — fila TOTAL GENERAL
+const ROW_IVA = "#d9ead3";            // verde muy pálido — fila IVA (informativa, texto oscuro)
+const ROW_BRUTO = "#274e13";          // verde más oscuro — fila BRUTO (el total final)
 
 // Modal de resumen de producción para una o varias faenas/ciclos. Muestra
 // una tabla pivot: filas = días, columnas = (ciclo, labor) que sea trato o
@@ -58,10 +82,19 @@ export default function ProductionSummaryModal({
   // vista a nivel faena donde solo queremos los abiertos por default, pero
   // los cerrados igual deben aparecer como chip apagado por si el usuario
   // quiere verlos también.
-  const [typeFilter, setTypeFilter] = useState({ cosecha: true, trato: true, tratoEtapas: true });
+  const [typeFilter, setTypeFilter] = useState(
+    () => loadJSON("typeFilter", { cosecha: true, trato: true, tratoEtapas: true, main: true }),
+  );
+  useEffect(() => { saveJSON("typeFilter", typeFilter); }, [typeFilter]);
   const [enabledCycles, setEnabledCycles] = useState(
     () => new Set(initialEnabledCycleIds || cycles.map((c) => c.id)),
   );
+  // Toggle maestro: colapsa/expande de un solo click todas las tarjetas de
+  // ciclos cerrados (cada una ya arranca colapsada por defecto individualmente
+  // si el ciclo está cerrado; esto fuerza el estado de TODAS a la vez para no
+  // tener que ir card por card cuando hay muchos ciclos cerrados en la lista).
+  const [allClosedCollapsed, setAllClosedCollapsed] = useState(() => loadJSON("allClosedCollapsed", true));
+  useEffect(() => { saveJSON("allClosedCollapsed", allClosedCollapsed); }, [allClosedCollapsed]);
 
   useEffect(() => {
     setEnabledCycles(new Set(initialEnabledCycleIds || cycles.map((c) => c.id)));
@@ -99,15 +132,46 @@ export default function ProductionSummaryModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, cycles.map((c) => c.id).join(",")]);
 
-  // Columnas: una por (ciclo, labor) donde labor.type es trato o cosecha. Si
-  // dos ciclos tienen labores con el mismo nombre, quedan como columnas
-  // separadas — el usuario ve el detalle de cada ciclo sin que se mezclen.
+  // Orden de columnas/chips: agrupadas por subfaena (para que los ciclos de
+  // una misma subfaena queden uno al lado del otro) y, dentro de cada grupo,
+  // en orden cronológico ascendente (más viejo primero) por el primer día
+  // real trabajado — mismo criterio que la navegación prev/next de
+  // CycleDetail, más confiable que startDate/createdAt tipeados a mano. Los
+  // grupos de subfaena también se ordenan cronológicamente por su ciclo más
+  // antiguo, así toda la tabla queda de más vieja a más nueva, agrupada por
+  // subfaena (ej. sub1/ciclo8 · sub1/ciclo9 · sub2/ciclo4 · sub3/ciclo1).
+  const orderedCycles = useMemo(() => {
+    const sortKeyFor = (c) => {
+      const days = c.days;
+      if (Array.isArray(days) && days.length > 0) {
+        return days.reduce((min, d) => (d < min ? d : min), days[0]);
+      }
+      return c.startDate || c.createdAt?.toDate?.()?.toISOString?.() || "";
+    };
+    const groups = new Map(); // subfaenaId (o "" para huérfanos) -> cycles[]
+    for (const c of cycles) {
+      const key = c.subfaenaId || "";
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(c);
+    }
+    const groupList = [...groups.values()].map((list) => {
+      const sorted = [...list].sort((a, b) => sortKeyFor(a).localeCompare(sortKeyFor(b)));
+      return { sorted, groupKey: sorted.length > 0 ? sortKeyFor(sorted[0]) : "" };
+    });
+    groupList.sort((a, b) => a.groupKey.localeCompare(b.groupKey));
+    return groupList.flatMap((g) => g.sorted);
+  }, [cycles]);
+
+  // Columnas: una por (ciclo, labor) donde labor.type es trato, cosecha,
+  // trato por etapas o pago al día (jornadas). Si dos ciclos tienen labores
+  // con el mismo nombre, quedan como columnas separadas — el usuario ve el
+  // detalle de cada ciclo sin que se mezclen.
   const columns = useMemo(() => {
     const cols = [];
-    for (const c of cycles) {
+    for (const c of orderedCycles) {
       if (!enabledCycles.has(c.id)) continue;
       for (const l of c.labors || []) {
-        if (l.type !== "cosecha" && l.type !== "trato" && l.type !== "tratoEtapas") continue;
+        if (l.type !== "cosecha" && l.type !== "trato" && l.type !== "tratoEtapas" && l.type !== "main") continue;
         if (!typeFilter[l.type]) continue;
         cols.push({
           key: `${c.id}__${l.id}`,
@@ -120,7 +184,7 @@ export default function ProductionSummaryModal({
       }
     }
     return cols;
-  }, [cycles, enabledCycles, typeFilter]);
+  }, [orderedCycles, enabledCycles, typeFilter]);
 
   // Días: union de todas las fechas con workdays de los ciclos habilitados,
   // ordenadas ascendente. Solo días con al menos un workday relevante.
@@ -189,6 +253,9 @@ export default function ProductionSummaryModal({
             // Solo cuenta como "persona con producción" si aportó en una etapa
             // que cuenta (misma regla que las unidades).
             hasProd = countingForCol.has(String(wd.stageId)) && Number(wd.qty) > 0 && !wd.pisoOnly;
+          } else if (col.labor.type === "main") {
+            // Pago al día: el monto ya está directo en el workday, sin tiers.
+            hasProd = Number(wd.amount) > 0 && !wd.pisoOnly;
           } else {
             hasProd = Number(getTratoTierTotals(wd).qty) > 0 && !wd.pisoOnly;
           }
@@ -208,7 +275,7 @@ export default function ProductionSummaryModal({
   }, [columns, days, cellsByKey, wdByCycle]);
 
   return (
-    <Modal open={open} onClose={onClose} title={title} size="xl">
+    <Modal open={open} onClose={onClose} title={title} size="2xl">
       <div className="mb-3 flex flex-wrap items-center gap-3 text-xs">
         {/* Filtro de tipos */}
         <span className="text-[var(--color-muted)]">Tipo:</span>
@@ -236,12 +303,34 @@ export default function ProductionSummaryModal({
           />
           <span>🏕 Por etapas</span>
         </label>
-        {/* Filtro de ciclos — solo se muestra cuando hay más de uno */}
+        <label className="flex items-center gap-1">
+          <input
+            type="checkbox"
+            checked={typeFilter.main}
+            onChange={(e) => setTypeFilter((p) => ({ ...p, main: e.target.checked }))}
+          />
+          <span>💰 Jornadas</span>
+        </label>
+        <button
+          type="button"
+          onClick={() => setAllClosedCollapsed((v) => !v)}
+          className="ml-2 rounded-full border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2.5 py-1 text-[11px] hover:bg-[var(--color-accent-soft)]"
+          title="Colapsa o expande de una vez los chips de ciclos cerrados y las labores de ciclos cerrados en la lista de abajo, para que no ocupen tanto espacio"
+        >
+          {allClosedCollapsed ? "▸ Expandir cerrados" : "▾ Colapsar cerrados"}
+        </button>
+        {/* Filtro de ciclos — solo se muestra cuando hay más de uno. Cuando
+            allClosedCollapsed está activo, los chips de ciclos cerrados se
+            esconden y se resumen en un único chip "🔒 +N cerrados" — son
+            justamente los que más se acumulan y menos se tocan (arrancan
+            deshabilitados por defecto), así que ocultarlos es lo que de
+            verdad libera espacio en esta fila. */}
         {cycles.length > 1 && (
           <>
             <span className="ml-3 text-[var(--color-muted)]">Ciclos:</span>
             <div className="flex flex-wrap gap-1">
-              {cycles.map((c) => {
+              {orderedCycles.map((c) => {
+                if (allClosedCollapsed && c.status === "closed") return null;
                 const on = enabledCycles.has(c.id);
                 return (
                   <button
@@ -266,6 +355,20 @@ export default function ProductionSummaryModal({
                   </button>
                 );
               })}
+              {allClosedCollapsed && (() => {
+                const closedCount = orderedCycles.filter((c) => c.status === "closed").length;
+                if (closedCount === 0) return null;
+                return (
+                  <button
+                    type="button"
+                    onClick={() => setAllClosedCollapsed(false)}
+                    className="rounded-full border border-dashed border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-0.5 text-[11px] text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)]"
+                    title="Mostrar los ciclos cerrados"
+                  >
+                    🔒 +{closedCount} cerrado{closedCount === 1 ? "" : "s"}
+                  </button>
+                );
+              })()}
             </div>
           </>
         )}
@@ -292,7 +395,7 @@ export default function ProductionSummaryModal({
             <CombinedSummaryCard dataByColumn={dataByColumn} days={days} />
           )}
           {dataByColumn.map((d) => (
-            <LaborSummaryCard key={d.col.key} data={d} catalogs={catalogs} />
+            <LaborSummaryCard key={d.col.key} data={d} catalogs={catalogs} allClosedCollapsed={allClosedCollapsed} />
           ))}
         </div>
       )}
@@ -309,6 +412,54 @@ function CombinedSummaryCard({ dataByColumn, days }) {
   const [collapsed, setCollapsed] = useState(false);
   const [busy, setBusy] = useState("");
   const captureRef = useRef(null);
+  // Ganancia por labor: para labores de trato/cosecha/por-etapas se calcula
+  // como monto × %, editable de forma independiente por columna. `generalPct`
+  // es un control "maestro": al cambiarlo se pisan todos los % individuales
+  // (pctOverrides se vacía) para que todas las columnas vuelvan a seguirlo.
+  // Para labores de pago al día (jornadas) no hay % — se ingresa a mano lo
+  // que nos pagarán por esa labor, y la ganancia es la diferencia contra el
+  // monto (lo que le debemos a los trabajadores). Si ya les pagamos ese
+  // monto (checkbox "workersPaid"), el monto pasa a ser solo informativo —
+  // ya no se resta, así que TODO lo que nos paguen es ganancia. Todo esto se
+  // persiste en localStorage por colKey (cycleId__laborId) para no tener que
+  // re-ingresarlo cada vez que se reabre el modal.
+  const [generalPct, setGeneralPct] = useState(() => loadJSON("generalPct", 40));
+  useEffect(() => { saveJSON("generalPct", generalPct); }, [generalPct]);
+  const [pctOverrides, setPctOverrides] = useState(() => loadJSON("pctOverrides", {})); // colKey -> % (solo no-jornada)
+  useEffect(() => { saveJSON("pctOverrides", pctOverrides); }, [pctOverrides]);
+  const [paidToUs, setPaidToUs] = useState(() => loadJSON("paidToUs", {})); // colKey -> $ pagado a nosotros (solo jornada)
+  useEffect(() => { saveJSON("paidToUs", paidToUs); }, [paidToUs]);
+  const [workersPaid, setWorkersPaid] = useState(() => loadJSON("workersPaid", {})); // colKey -> bool (solo jornada)
+  useEffect(() => { saveJSON("workersPaid", workersPaid); }, [workersPaid]);
+  // Si el resumen va con IVA: agrega una fila final que suma 19% solo sobre
+  // el gran total (columna "Total día"), las columnas por labor quedan en
+  // blanco en esa fila.
+  const [ivaEnabled, setIvaEnabled] = useState(() => loadJSON("ivaEnabled", false));
+  useEffect(() => { saveJSON("ivaEnabled", ivaEnabled); }, [ivaEnabled]);
+
+  const isJornadaCol = (col) => col.labor.type === "main";
+  const effectivePct = (colKey) => pctOverrides[colKey] ?? generalPct;
+  const gananciaFor = (col, totalAmount) => {
+    if (isJornadaCol(col)) {
+      const paid = Number(paidToUs[col.key]) || 0;
+      if (workersPaid[col.key]) return paid;
+      return paid - totalAmount;
+    }
+    return (totalAmount * effectivePct(col.key)) / 100;
+  };
+  // Total general por columna: monto + ganancia, salvo el caso de jornada ya
+  // pagada — ahí el monto ya está cubierto aparte (no se vuelve a sumar) y
+  // solo se considera lo que nos van a pagar, que es 100% ganancia.
+  const totalGeneralFor = (col, totalAmount) => {
+    if (isJornadaCol(col) && workersPaid[col.key]) {
+      return Number(paidToUs[col.key]) || 0;
+    }
+    return totalAmount + gananciaFor(col, totalAmount);
+  };
+  const handleGeneralPctChange = (v) => {
+    setGeneralPct(v);
+    setPctOverrides({});
+  };
 
   // Solo días que tengan al menos un dato en alguna labor visible.
   const activeDays = useMemo(() => {
@@ -346,6 +497,19 @@ function CombinedSummaryCard({ dataByColumn, days }) {
     [dataByColumn],
   );
 
+  const totalGanancia = useMemo(
+    () => dataByColumn.reduce((s, d) => s + gananciaFor(d.col, d.totalAmount), 0),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [dataByColumn, generalPct, pctOverrides, paidToUs, workersPaid],
+  );
+  const grandTotalGeneral = useMemo(
+    () => dataByColumn.reduce((s, d) => s + totalGeneralFor(d.col, d.totalAmount), 0),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [dataByColumn, generalPct, pctOverrides, paidToUs, workersPaid],
+  );
+  const grandTotalIva = grandTotalGeneral * 0.19;
+  const grandTotalBruto = grandTotalGeneral + grandTotalIva;
+
   const buildPlainText = () => {
     const lines = [];
     lines.push("📊 TABLA GENERAL — todas las labores seleccionadas");
@@ -366,9 +530,32 @@ function CombinedSummaryCard({ dataByColumn, days }) {
       lines.push(cols.join(" | "));
     }
     const totalRow = ["TOTAL"];
-    for (const d of dataByColumn) totalRow.push(`${fmtNum(d.totalQty)}${d.unit ? " " + d.unit : ""} · ${fmtCLP(d.totalAmount)}`);
+    for (const d of dataByColumn) {
+      const paidTag = isJornadaCol(d.col) && workersPaid[d.col.key] ? " [ya pagado]" : "";
+      totalRow.push(`${fmtNum(d.totalQty)}${d.unit ? " " + d.unit : ""} · ${fmtCLP(d.totalAmount)}${paidTag}`);
+    }
     totalRow.push(fmtCLP(grandTotal));
     lines.push(totalRow.join(" | "));
+    lines.push("");
+    lines.push("💰 GANANCIAS");
+    for (const d of dataByColumn) {
+      const g = gananciaFor(d.col, d.totalAmount);
+      const detail = isJornadaCol(d.col)
+        ? (workersPaid[d.col.key] ? `pagan ${fmtCLP(Number(paidToUs[d.col.key]) || 0)}, ya pagado` : `pagan ${fmtCLP(Number(paidToUs[d.col.key]) || 0)}`)
+        : `${effectivePct(d.col.key)}%`;
+      lines.push(`${d.col.labor.name} (${d.col.cycleLabel}) [${detail}]: ${fmtCLP(g)}`);
+    }
+    lines.push(`TOTAL GANANCIAS: ${fmtCLP(totalGanancia)}`);
+    lines.push("");
+    const generalRow = ["TOTAL GENERAL"];
+    for (const d of dataByColumn) generalRow.push(fmtCLP(totalGeneralFor(d.col, d.totalAmount)));
+    generalRow.push(fmtCLP(grandTotalGeneral));
+    lines.push(generalRow.join(" | "));
+    if (ivaEnabled) {
+      lines.push("");
+      lines.push(`IVA (19%): ${fmtCLP(grandTotalIva)}`);
+      lines.push(`BRUTO: ${fmtCLP(grandTotalBruto)}`);
+    }
     return lines.join("\n");
   };
 
@@ -503,14 +690,171 @@ function CombinedSummaryCard({ dataByColumn, days }) {
                         {fmtNum(d.totalQty)}{d.unit ? ` ${d.unit}` : ""}
                       </div>
                       <div>{fmtCLP(d.totalAmount)}</div>
+                      {isJornadaCol(d.col) && workersPaid[d.col.key] && (
+                        <div style={{ fontSize: 9, fontWeight: 400, marginTop: 1, color: "#d4f5d4" }}>✅ ya pagado</div>
+                      )}
                     </td>
                   ))}
                   <td style={{ ...cell, textAlign: "right", borderColor: "#3d6b2e", fontSize: 13 }}>
                     {fmtCLP(grandTotal)}
                   </td>
                 </tr>
+                <tr style={{ background: ROW_GANANCIAS, color: "#1a2e0f", fontWeight: 700 }}>
+                  <td style={{ ...cell, borderColor: "#6aa84f" }}>GANANCIAS</td>
+                  {dataByColumn.map((d) => (
+                    <td key={d.col.key} style={{ ...cell, textAlign: "right", borderColor: "#6aa84f" }}>
+                      {fmtCLP(gananciaFor(d.col, d.totalAmount))}
+                    </td>
+                  ))}
+                  <td style={{ ...cell, textAlign: "right", borderColor: "#6aa84f", fontSize: 13 }}>
+                    {fmtCLP(totalGanancia)}
+                  </td>
+                </tr>
+                <tr style={{ background: ROW_TOTAL_GENERAL, color: "#fff", fontWeight: 700 }}>
+                  <td style={{ ...cell, borderColor: "#274e13" }}>TOTAL GENERAL</td>
+                  {dataByColumn.map((d) => (
+                    <td key={d.col.key} style={{ ...cell, textAlign: "right", borderColor: "#274e13" }}>
+                      {fmtCLP(totalGeneralFor(d.col, d.totalAmount))}
+                    </td>
+                  ))}
+                  <td style={{ ...cell, textAlign: "right", borderColor: "#274e13", fontSize: 13 }}>
+                    {fmtCLP(grandTotalGeneral)}
+                  </td>
+                </tr>
+                {ivaEnabled && (
+                  <>
+                    <tr style={{ background: ROW_IVA, color: "#274e13", fontWeight: 700 }}>
+                      <td style={{ ...cell, borderColor: "#93c47d" }}>IVA (19%)</td>
+                      {dataByColumn.map((d) => (
+                        <td key={d.col.key} style={{ ...cell, borderColor: "#93c47d" }}></td>
+                      ))}
+                      <td style={{ ...cell, textAlign: "right", borderColor: "#93c47d", fontSize: 13 }}>
+                        {fmtCLP(grandTotalIva)}
+                      </td>
+                    </tr>
+                    <tr style={{ background: ROW_BRUTO, color: "#fff", fontWeight: 700 }}>
+                      <td style={{ ...cell, borderColor: "#16260a" }}>BRUTO</td>
+                      {dataByColumn.map((d) => (
+                        <td key={d.col.key} style={{ ...cell, borderColor: "#16260a" }}></td>
+                      ))}
+                      <td style={{ ...cell, textAlign: "right", borderColor: "#16260a", fontSize: 13 }}>
+                        {fmtCLP(grandTotalBruto)}
+                      </td>
+                    </tr>
+                  </>
+                )}
               </tbody>
             </table>
+          </div>
+
+          {/* Tabla auxiliar para AJUSTAR la ganancia — separada de la tabla
+              principal a propósito: la principal es la que se copia/imprime
+              tal cual (limpia, sin inputs); acá se editan los % (o lo que
+              paga el cliente en labores de jornada) y eso alimenta las filas
+              GANANCIAS/TOTAL GENERAL de arriba. */}
+          <div style={{ marginTop: 12, borderTop: "2px solid #ccc", paddingTop: 10 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8, fontSize: 13, fontWeight: 700 }}>
+              <span>💰 Ajustar ganancia</span>
+              <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 400, color: "#444", marginLeft: 8 }}>
+                % general:
+                <input
+                  type="number"
+                  min="0"
+                  value={generalPct}
+                  onChange={(e) => handleGeneralPctChange(Math.max(0, Number(e.target.value) || 0))}
+                  title="Al cambiarlo se aplica a todas las labores que no sean de jornada, pisando cualquier % propio editado abajo"
+                  style={{ width: 56, padding: "2px 5px", border: "1px solid #999", borderRadius: 4, textAlign: "right" }}
+                />
+                %
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 400, color: "#444", marginLeft: 8, cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={ivaEnabled}
+                  onChange={(e) => setIvaEnabled(e.target.checked)}
+                />
+                Resumen con IVA (19%)
+              </label>
+            </div>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ borderCollapse: "collapse", width: "100%" }}>
+                <thead>
+                  <tr style={{ background: HDR_GREEN }}>
+                    <th style={cellH}>Labor</th>
+                    <th style={{ ...cellH, textAlign: "right" }}>Monto</th>
+                    <th style={{ ...cellH, textAlign: "right" }}>% / pagan</th>
+                    <th style={{ ...cellH, textAlign: "right" }}>Ganancia</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {dataByColumn.map((d) => (
+                    <tr key={d.col.key}>
+                      <td style={cell}>
+                        {d.col.labor.name}
+                        <span style={{ marginLeft: 4, fontSize: 9, color: "#888" }}>· {d.col.cycleLabel}</span>
+                      </td>
+                      <td style={{ ...cell, textAlign: "right" }}>
+                        {fmtCLP(d.totalAmount)}
+                        {isJornadaCol(d.col) && workersPaid[d.col.key] && (
+                          <div style={{ fontSize: 9, fontWeight: 700, color: "#2e7d32", marginTop: 1 }}>
+                            ✅ ya pagado <span style={{ fontWeight: 400, color: "#666" }}>(solo informativo)</span>
+                          </div>
+                        )}
+                      </td>
+                      <td style={{ ...cell, textAlign: "right" }}>
+                        {isJornadaCol(d.col) ? (
+                          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3 }}>
+                            <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+                              $
+                              <input
+                                type="number"
+                                min="0"
+                                value={paidToUs[d.col.key] ?? ""}
+                                onChange={(e) => setPaidToUs((p) => ({ ...p, [d.col.key]: e.target.value }))}
+                                placeholder="0"
+                                title="Lo que nos van a pagar por esta labor"
+                                style={{ width: 80, padding: "2px 4px", border: "1px solid #999", borderRadius: 4, textAlign: "right" }}
+                              />
+                            </span>
+                            <label style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: 9, color: "#444", cursor: "pointer" }}>
+                              <input
+                                type="checkbox"
+                                checked={!!workersPaid[d.col.key]}
+                                onChange={(e) => setWorkersPaid((p) => ({ ...p, [d.col.key]: e.target.checked }))}
+                              />
+                              ya pagamos a los trabajadores
+                            </label>
+                          </div>
+                        ) : (
+                          <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+                            <input
+                              type="number"
+                              min="0"
+                              value={effectivePct(d.col.key)}
+                              onChange={(e) => setPctOverrides((p) => ({ ...p, [d.col.key]: Math.max(0, Number(e.target.value) || 0) }))}
+                              title="% propio de esta labor — edítalo para separarlo del % general"
+                              style={{ width: 50, padding: "2px 4px", border: "1px solid #999", borderRadius: 4, textAlign: "right" }}
+                            />
+                            %
+                          </span>
+                        )}
+                      </td>
+                      <td style={{ ...cell, textAlign: "right", fontWeight: 600 }}>
+                        {fmtCLP(gananciaFor(d.col, d.totalAmount))}
+                      </td>
+                    </tr>
+                  ))}
+                  <tr style={{ background: ROW_TOTAL_DARK, color: "#fff", fontWeight: 700 }}>
+                    <td style={{ ...cell, borderColor: "#3d6b2e" }}>TOTAL</td>
+                    <td style={{ ...cell, textAlign: "right", borderColor: "#3d6b2e" }}>{fmtCLP(grandTotal)}</td>
+                    <td style={{ ...cell, borderColor: "#3d6b2e" }}></td>
+                    <td style={{ ...cell, textAlign: "right", borderColor: "#3d6b2e", fontSize: 13 }}>
+                      {fmtCLP(totalGanancia)}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       )}
@@ -521,18 +865,30 @@ function CombinedSummaryCard({ dataByColumn, days }) {
 // Card independiente por labor — header con título + total + chevron +
 // botones de copiar/imprimir, body con la tabla día por día. Default
 // colapsado para labores de ciclos cerrados; abierto para ciclos en curso.
-function LaborSummaryCard({ data, catalogs }) {
+function LaborSummaryCard({ data, catalogs, allClosedCollapsed }) {
   const toast = useToast();
   const { col, rows, totalQty, totalAmount, unit, persons } = data;
-  const [collapsed, setCollapsed] = useState(col.cycleStatus === "closed");
+  const isClosed = col.cycleStatus === "closed";
+  const [collapsed, setCollapsed] = useState(isClosed);
   const [busy, setBusy] = useState("");
   const captureRef = useRef(null);
+
+  // El toggle maestro del modal fuerza el colapso de todas las tarjetas
+  // cerradas a la vez; una tarjeta abierta nunca se ve afectada por esto. El
+  // usuario puede seguir expandiendo/colapsando cada una manualmente después
+  // — el próximo click al toggle maestro vuelve a sincronizar todas.
+  useEffect(() => {
+    if (isClosed) setCollapsed(allClosedCollapsed);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allClosedCollapsed]);
 
   const typeLabel = col.labor.type === "cosecha"
     ? "🌾 Cosecha"
     : col.labor.type === "tratoEtapas"
       ? "🏕 Por etapas"
-      : `🛠 ${tratoTypeLabel(catalogs, col.labor.tratoType ?? 0)}`;
+      : col.labor.type === "main"
+        ? "💰 Jornadas"
+        : `🛠 ${tratoTypeLabel(catalogs, col.labor.tratoType ?? 0)}`;
 
   // Texto plano del desglose para pegar en chat / nota. Mantenemos columnas
   // alineadas con padStart sobre los strings finales — funciona en monospace
@@ -801,8 +1157,8 @@ function buildCell(labor, date, workdays, dayPrices, catalogs) {
   }
   if (labor.type === "tratoEtapas") {
     // Conteo del día (qty) = solo etapas que cuentan; pago (amount) = todas.
-    // Además armamos un desglose por etapa del día para que se vea qué se
-    // trabajó y cuál cuenta (✓).
+    // El desglose por etapa del día (priceLabel) también se limita a las que
+    // cuentan — las demás no aportan al conteo, así que no van en el detalle.
     const counting = countingStageIds(labor);
     let qty = 0;
     let amount = 0;
@@ -820,15 +1176,35 @@ function buildCell(labor, date, workdays, dayPrices, catalogs) {
       }
     }
     if (qty === 0 && amount === 0) return null;
-    // Desglose "Prep 5 · Inst 5✓" en el orden de las etapas del labor.
+    // Desglose "Inst 5" con solo las etapas que cuentan — las que no cuentan
+    // no aportan al conteo de unidades, así que no van en el detalle.
     const stages = normalizeStages(labor.stages);
     const priceLabel = stages
-      .filter((s) => (byStage.get(String(s.id)) || 0) > 0)
-      .map((s) => `${s.name} ${fmtNum(byStage.get(String(s.id)))}${s.counts ? "✓" : ""}`)
+      .filter((s) => s.counts && (byStage.get(String(s.id)) || 0) > 0)
+      .map((s) => `${s.name} ${fmtNum(byStage.get(String(s.id)))}`)
       .join(" · ");
     const persons = ruts.size;
     const avg = persons > 0 ? qty / persons : 0;
     return { qty, amount, unit: "unid", priceLabel, persons, avg };
+  }
+  if (labor.type === "main") {
+    // Pago al día: no hay precio/unidad que calcular, el monto ya viene
+    // directo en cada workday. La "cantidad" es el número de jornadas
+    // (trabajadores distintos pagados ese día).
+    let amount = 0;
+    const ruts = new Set();
+    for (const wd of workdays) {
+      if (wd.pisoOnly) continue;
+      const amt = Number(wd.amount) || 0;
+      amount += amt;
+      if (amt > 0 && wd.workerRut) ruts.add(wd.workerRut);
+    }
+    if (amount === 0) return null;
+    const qty = ruts.size;
+    const persons = ruts.size;
+    const avg = qty > 0 ? amount / qty : 0;
+    const priceLabel = qty > 0 ? `~${fmtCLP(avg)}/jornada` : "";
+    return { qty, amount, unit: "jornadas", priceLabel, persons, avg };
   }
   return null;
 }
