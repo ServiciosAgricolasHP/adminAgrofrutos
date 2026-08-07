@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { captureFullWidthBlob } from "../utils/imageCapture";
 import Modal from "./Modal";
 import { workdaysService } from "../services";
+import { tripsService } from "../services/transportsService";
 import { useCatalogs } from "../contexts/CatalogsContext";
 import { useToast } from "../contexts/ToastContext";
 import {
@@ -21,6 +22,11 @@ const fmtCLP = (v) =>
     .format(Number(v) || 0);
 const fmtNum = (v) =>
   new Intl.NumberFormat("es-CL", { maximumFractionDigits: 1 }).format(Number(v) || 0);
+// "2026-07-24" → "24/07", para mostrar rangos de fecha compactos en tablas.
+const shortDate = (iso) => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || "");
+  return m ? `${m[3]}/${m[2]}` : (iso || "");
+};
 
 // Persistencia de las opciones que el usuario configura en este modal
 // (filtros, % de ganancia, valores "pagan $", IVA, etc.) — así no hay que
@@ -37,6 +43,23 @@ const loadJSON = (key, fallback) => {
 };
 const saveJSON = (key, value) => {
   try { localStorage.setItem(LS_PREFIX + key, JSON.stringify(value)); } catch { /* noop */ }
+};
+
+// Qué ciclos quedan tildados en el selector se recuerda por id de ciclo
+// (mapa acumulativo en localStorage, nunca se resetea entero) — así, si el
+// usuario destilda un ciclo, sigue destildado la próxima vez que se abra el
+// resumen, sea de la misma faena o de otra. Los ciclos que todavía no se
+// vieron nunca (no están en el mapa) usan el default que manda el caller
+// (`initialEnabledCycleIds`, típicamente "solo los abiertos").
+const computeEnabledCycles = (cyclesList, initialEnabledCycleIds) => {
+  const map = loadJSON("enabledCyclesMap", {});
+  const defaults = new Set(initialEnabledCycleIds || cyclesList.map((c) => c.id));
+  const set = new Set();
+  for (const c of cyclesList) {
+    const v = map[c.id];
+    if (v === true || (v === undefined && defaults.has(c.id))) set.add(c.id);
+  }
+  return set;
 };
 
 // Paleta y estilos clonados de las tablas de cobrar (CycleSummaryModal). Inline
@@ -76,6 +99,7 @@ export default function ProductionSummaryModal({
 }) {
   const { catalogs } = useCatalogs();
   const [wdByCycle, setWdByCycle] = useState(workdaysByCycleProp || {});
+  const [tripsByCycle, setTripsByCycle] = useState({});
   const [loading, setLoading] = useState(false);
   // Filtros: por tipo de labor (cosecha / trato) y por ciclos incluidos.
   // `initialEnabledCycleIds` decide cuáles arrancan prendidos — útil para la
@@ -83,12 +107,23 @@ export default function ProductionSummaryModal({
   // los cerrados igual deben aparecer como chip apagado por si el usuario
   // quiere verlos también.
   const [typeFilter, setTypeFilter] = useState(
-    () => loadJSON("typeFilter", { cosecha: true, trato: true, tratoEtapas: true, main: true }),
+    () => loadJSON("typeFilter", { cosecha: true, trato: true, tratoEtapas: true, main: true, supervision: true }),
   );
   useEffect(() => { saveJSON("typeFilter", typeFilter); }, [typeFilter]);
-  const [enabledCycles, setEnabledCycles] = useState(
-    () => new Set(initialEnabledCycleIds || cycles.map((c) => c.id)),
+  const [enabledCycles, setEnabledCyclesState] = useState(
+    () => computeEnabledCycles(cycles, initialEnabledCycleIds),
   );
+  // Envuelve el setter para que, además de actualizar el estado, persista el
+  // on/off de cada ciclo tocado en el mapa acumulativo de localStorage.
+  const setEnabledCycles = (updater) => {
+    setEnabledCyclesState((prev) => {
+      const next = typeof updater === "function" ? updater(prev) : updater;
+      const map = loadJSON("enabledCyclesMap", {});
+      for (const c of cycles) map[c.id] = next.has(c.id);
+      saveJSON("enabledCyclesMap", map);
+      return next;
+    });
+  };
   // Toggle maestro: colapsa/expande de un solo click todas las tarjetas de
   // ciclos cerrados (cada una ya arranca colapsada por defecto individualmente
   // si el ciclo está cerrado; esto fuerza el estado de TODAS a la vez para no
@@ -97,7 +132,7 @@ export default function ProductionSummaryModal({
   useEffect(() => { saveJSON("allClosedCollapsed", allClosedCollapsed); }, [allClosedCollapsed]);
 
   useEffect(() => {
-    setEnabledCycles(new Set(initialEnabledCycleIds || cycles.map((c) => c.id)));
+    setEnabledCyclesState(computeEnabledCycles(cycles, initialEnabledCycleIds));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cycles.map((c) => c.id).join(","), (initialEnabledCycleIds || []).join(",")]);
 
@@ -127,6 +162,30 @@ export default function ProductionSummaryModal({
       } finally {
         if (!cancelled) setLoading(false);
       }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, cycles.map((c) => c.id).join(",")]);
+
+  // Carga las vueltas de transporte de cada ciclo — usadas por la fila
+  // TRANSPORTE de la tabla general (costo de transporte por ciclo).
+  useEffect(() => {
+    if (!open) return;
+    const missing = cycles.filter((c) => !tripsByCycle[c.id]);
+    if (missing.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const fetched = await Promise.all(
+          missing.map(async (c) => [c.id, await tripsService.listByCycle(c.id)]),
+        );
+        if (cancelled) return;
+        setTripsByCycle((prev) => {
+          const next = { ...prev };
+          for (const [cid, list] of fetched) next[cid] = list;
+          return next;
+        });
+      } catch { /* noop */ }
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -171,7 +230,7 @@ export default function ProductionSummaryModal({
     for (const c of orderedCycles) {
       if (!enabledCycles.has(c.id)) continue;
       for (const l of c.labors || []) {
-        if (l.type !== "cosecha" && l.type !== "trato" && l.type !== "tratoEtapas" && l.type !== "main") continue;
+        if (l.type !== "cosecha" && l.type !== "trato" && l.type !== "tratoEtapas" && l.type !== "main" && l.type !== "supervision") continue;
         if (!typeFilter[l.type]) continue;
         cols.push({
           key: `${c.id}__${l.id}`,
@@ -253,7 +312,7 @@ export default function ProductionSummaryModal({
             // Solo cuenta como "persona con producción" si aportó en una etapa
             // que cuenta (misma regla que las unidades).
             hasProd = countingForCol.has(String(wd.stageId)) && Number(wd.qty) > 0 && !wd.pisoOnly;
-          } else if (col.labor.type === "main") {
+          } else if (col.labor.type === "main" || col.labor.type === "supervision") {
             // Pago al día: el monto ya está directo en el workday, sin tiers.
             hasProd = Number(wd.amount) > 0 && !wd.pisoOnly;
           } else {
@@ -273,6 +332,42 @@ export default function ProductionSummaryModal({
       })
       .filter((d) => d.rows.length > 0);
   }, [columns, days, cellsByKey, wdByCycle]);
+
+  // Costo de transporte por ciclo (no por labor — un ciclo puede tener
+  // varias columnas de labor, pero el transporte es uno solo por ciclo).
+  // `hasTrips` distingue $0 porque hay vueltas creadas sin monto (revisar
+  // tarifas) de $0 porque no se cargó ninguna vuelta (típico cuando el
+  // transporte es propio y no se factura, aunque también puede ser un
+  // olvido — sin datos no hay forma de distinguir eso último).
+  const transportByCycle = useMemo(() => {
+    const out = new Map();
+    for (const c of cycles) {
+      const trips = tripsByCycle[c.id] || [];
+      out.set(c.id, {
+        total: trips.reduce((s, t) => s + (Number(t.amount) || 0), 0),
+        hasTrips: trips.length > 0,
+      });
+    }
+    return out;
+  }, [cycles, tripsByCycle]);
+
+  // Primera columna visible de cada ciclo — ahí (y solo ahí) se muestra el
+  // total de transporte de ese ciclo, para no duplicarlo cuando un ciclo
+  // tiene varias labores/columnas y así no inflar el gran total.
+  const firstColKeyForCycle = useMemo(() => {
+    const seen = new Map();
+    for (const d of dataByColumn) {
+      if (!seen.has(d.col.cycleId)) seen.set(d.col.cycleId, d.col.key);
+    }
+    return seen;
+  }, [dataByColumn]);
+
+  const grandTotalTransport = useMemo(() => {
+    const cycleIds = new Set(dataByColumn.map((d) => d.col.cycleId));
+    let sum = 0;
+    for (const cid of cycleIds) sum += transportByCycle.get(cid)?.total || 0;
+    return sum;
+  }, [dataByColumn, transportByCycle]);
 
   return (
     <Modal open={open} onClose={onClose} title={title} size="2xl">
@@ -311,68 +406,107 @@ export default function ProductionSummaryModal({
           />
           <span>💰 Jornadas</span>
         </label>
-        <button
-          type="button"
-          onClick={() => setAllClosedCollapsed((v) => !v)}
-          className="ml-2 rounded-full border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2.5 py-1 text-[11px] hover:bg-[var(--color-accent-soft)]"
-          title="Colapsa o expande de una vez los chips de ciclos cerrados y las labores de ciclos cerrados en la lista de abajo, para que no ocupen tanto espacio"
-        >
-          {allClosedCollapsed ? "▸ Expandir cerrados" : "▾ Colapsar cerrados"}
-        </button>
-        {/* Filtro de ciclos — solo se muestra cuando hay más de uno. Cuando
-            allClosedCollapsed está activo, los chips de ciclos cerrados se
-            esconden y se resumen en un único chip "🔒 +N cerrados" — son
-            justamente los que más se acumulan y menos se tocan (arrancan
-            deshabilitados por defecto), así que ocultarlos es lo que de
-            verdad libera espacio en esta fila. */}
-        {cycles.length > 1 && (
-          <>
-            <span className="ml-3 text-[var(--color-muted)]">Ciclos:</span>
-            <div className="flex flex-wrap gap-1">
-              {orderedCycles.map((c) => {
-                if (allClosedCollapsed && c.status === "closed") return null;
-                const on = enabledCycles.has(c.id);
-                return (
-                  <button
-                    key={c.id}
-                    onClick={() => setEnabledCycles((prev) => {
-                      const next = new Set(prev);
-                      if (next.has(c.id)) next.delete(c.id);
-                      else next.add(c.id);
-                      return next;
-                    })}
-                    className={`rounded-full px-2 py-0.5 text-[11px] ${
-                      on
-                        ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
-                        : "bg-[var(--color-surface-2)] border border-[var(--color-border)] hover:bg-[var(--color-accent-soft)]"
-                    }`}
-                    title={c.status === "closed" ? "Ciclo cerrado" : "Ciclo abierto"}
-                  >
-                    {c.label || c.id}
-                    {c.status === "closed" && (
-                      <span className="ml-1 opacity-70">·🔒</span>
-                    )}
-                  </button>
-                );
-              })}
-              {allClosedCollapsed && (() => {
-                const closedCount = orderedCycles.filter((c) => c.status === "closed").length;
-                if (closedCount === 0) return null;
-                return (
-                  <button
-                    type="button"
-                    onClick={() => setAllClosedCollapsed(false)}
-                    className="rounded-full border border-dashed border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-0.5 text-[11px] text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)]"
-                    title="Mostrar los ciclos cerrados"
-                  >
-                    🔒 +{closedCount} cerrado{closedCount === 1 ? "" : "s"}
-                  </button>
-                );
-              })()}
-            </div>
-          </>
-        )}
+        <label className="flex items-center gap-1">
+          <input
+            type="checkbox"
+            checked={typeFilter.supervision}
+            onChange={(e) => setTypeFilter((p) => ({ ...p, supervision: e.target.checked }))}
+          />
+          <span>🧑‍💼 Supervisión</span>
+        </label>
       </div>
+
+      {/* Selector de ciclos como tabla: mucho más legible que los chips que
+          tenía antes cuando hay varios ciclos — se ve de un vistazo el
+          estado y los días trabajados de cada uno. Los cerrados se colapsan
+          por defecto (son los que más se acumulan) detrás de un resumen
+          "+N cerrados". El on/off de cada ciclo se persiste por id en
+          localStorage (ver `computeEnabledCycles`), así la selección se
+          mantiene aunque se reabra el resumen otro día. */}
+      {cycles.length > 1 && (
+        <div className="mb-3 overflow-hidden rounded-md border border-[var(--color-border)]">
+          <div className="flex items-center justify-between bg-[var(--color-surface-2)] px-2 py-1.5 text-xs">
+            <span className="font-medium text-[var(--color-muted)]">Ciclos incluidos</span>
+            <button
+              type="button"
+              onClick={() => setAllClosedCollapsed((v) => !v)}
+              className="rounded-full border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-0.5 text-[11px] hover:bg-[var(--color-accent-soft)]"
+              title="Colapsa o expande los ciclos cerrados de la tabla, para que no ocupen tanto espacio"
+            >
+              {allClosedCollapsed ? "▸ Expandir cerrados" : "▾ Colapsar cerrados"}
+            </button>
+          </div>
+          <div className="max-h-44 overflow-y-auto">
+            <table className="w-full text-xs">
+              <thead className="sticky top-0 bg-[var(--color-surface)] text-left text-[10px] uppercase tracking-wide text-[var(--color-muted)]">
+                <tr>
+                  <th className="w-7 px-2 py-1"></th>
+                  <th className="px-2 py-1">Ciclo</th>
+                  <th className="px-2 py-1 text-right">Días trabajados</th>
+                  <th className="px-2 py-1">Estado</th>
+                </tr>
+              </thead>
+              <tbody>
+                {orderedCycles.map((c) => {
+                  if (allClosedCollapsed && c.status === "closed") return null;
+                  const on = enabledCycles.has(c.id);
+                  const days = Array.isArray(c.days) ? c.days : [];
+                  const dayCount = days.length;
+                  const range = dayCount > 0
+                    ? [...days].sort().reduce((r, d) => ({ from: r.from < d ? r.from : d, to: r.to > d ? r.to : d }), { from: days[0], to: days[0] })
+                    : null;
+                  return (
+                    <tr
+                      key={c.id}
+                      onClick={() => setEnabledCycles((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(c.id)) next.delete(c.id);
+                        else next.add(c.id);
+                        return next;
+                      })}
+                      title={range ? `${range.from} → ${range.to}` : "sin días trabajados"}
+                      className={`cursor-pointer border-t border-[var(--color-border)] ${on ? "bg-[var(--color-accent-soft)]" : "hover:bg-[var(--color-surface-2)]"}`}
+                    >
+                      <td className="px-2 py-1">
+                        <input type="checkbox" checked={on} readOnly className="pointer-events-none" />
+                      </td>
+                      <td className="px-2 py-1 font-medium">{c.label || c.id}</td>
+                      <td className="px-2 py-1 text-right tabular-nums">
+                        <div>{dayCount} día{dayCount === 1 ? "" : "s"}</div>
+                        {range && (
+                          <div className="text-[10px] font-normal text-[var(--color-muted)]">
+                            {shortDate(range.from)} → {shortDate(range.to)}
+                          </div>
+                        )}
+                      </td>
+                      <td className="px-2 py-1">
+                        {c.status === "closed" ? (
+                          <span className="rounded-full bg-[var(--color-surface-2)] px-1.5 py-0.5 text-[10px] text-[var(--color-muted)]">🔒 cerrado</span>
+                        ) : (
+                          <span className="rounded-full bg-[var(--color-success-soft)] px-1.5 py-0.5 text-[10px] text-[var(--color-success)]">abierto</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          {allClosedCollapsed && (() => {
+            const closedCount = orderedCycles.filter((c) => c.status === "closed").length;
+            if (closedCount === 0) return null;
+            return (
+              <button
+                type="button"
+                onClick={() => setAllClosedCollapsed(false)}
+                className="w-full border-t border-dashed border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-center text-[11px] text-[var(--color-muted)] hover:bg-[var(--color-accent-soft)]"
+              >
+                🔒 +{closedCount} cerrado{closedCount === 1 ? "" : "s"} — mostrar
+              </button>
+            );
+          })()}
+        </div>
+      )}
 
       {loading && (
         <div className="py-2 text-center text-xs text-[var(--color-muted)]">Cargando workdays...</div>
@@ -392,7 +526,13 @@ export default function ProductionSummaryModal({
               día y totales por labor. Aparece arriba para ver el resumen
               global; abajo viene el detalle por labor. */}
           {dataByColumn.length > 1 && (
-            <CombinedSummaryCard dataByColumn={dataByColumn} days={days} />
+            <CombinedSummaryCard
+              dataByColumn={dataByColumn}
+              days={days}
+              transportByCycle={transportByCycle}
+              firstColKeyForCycle={firstColKeyForCycle}
+              grandTotalTransport={grandTotalTransport}
+            />
           )}
           {dataByColumn.map((d) => (
             <LaborSummaryCard key={d.col.key} data={d} catalogs={catalogs} allClosedCollapsed={allClosedCollapsed} />
@@ -407,7 +547,7 @@ export default function ProductionSummaryModal({
 // días como filas. Cada celda muestra qty (con unidad) arriba y monto
 // abajo. Hay una columna "Total día" al final con la suma de montos y una
 // fila TOTAL al pie con los acumulados por labor y el gran total.
-function CombinedSummaryCard({ dataByColumn, days }) {
+function CombinedSummaryCard({ dataByColumn, days, transportByCycle, firstColKeyForCycle, grandTotalTransport }) {
   const toast = useToast();
   const [collapsed, setCollapsed] = useState(false);
   const [busy, setBusy] = useState("");
@@ -438,6 +578,12 @@ function CombinedSummaryCard({ dataByColumn, days }) {
   useEffect(() => { saveJSON("ivaEnabled", ivaEnabled); }, [ivaEnabled]);
 
   const isJornadaCol = (col) => col.labor.type === "main";
+  // Supervisión no se cobra aparte: normalmente ya está considerada dentro
+  // del % de ganancia del resto de las labores, así que en vez de sumarle
+  // su propio % se descuenta completa (monto negativo) — reduce la ganancia
+  // total y su "total general" queda en $0 (no se le cobra nada al cliente
+  // por esta línea, es un costo interno ya cubierto por el margen general).
+  const isSupervisionCol = (col) => col.labor.type === "supervision";
   const effectivePct = (colKey) => pctOverrides[colKey] ?? generalPct;
   const gananciaFor = (col, totalAmount) => {
     if (isJornadaCol(col)) {
@@ -445,12 +591,19 @@ function CombinedSummaryCard({ dataByColumn, days }) {
       if (workersPaid[col.key]) return paid;
       return paid - totalAmount;
     }
+    if (isSupervisionCol(col)) return -totalAmount;
     return (totalAmount * effectivePct(col.key)) / 100;
   };
   // Total general por columna: monto + ganancia, salvo el caso de jornada ya
   // pagada — ahí el monto ya está cubierto aparte (no se vuelve a sumar) y
   // solo se considera lo que nos van a pagar, que es 100% ganancia.
+  // Supervisión SIEMPRE es $0 acá — no es que "monto + ganancia" den cero por
+  // casualidad, es una regla explícita: lo que se factura al cliente no debe
+  // depender jamás de cuánto se gastó en supervisión, ese costo se cubre con
+  // el margen de las demás labores y solo se refleja como descuento
+  // informativo en la fila GANANCIAS, nunca en lo facturado.
   const totalGeneralFor = (col, totalAmount) => {
+    if (isSupervisionCol(col)) return 0;
     if (isJornadaCol(col) && workersPaid[col.key]) {
       return Number(paidToUs[col.key]) || 0;
     }
@@ -502,6 +655,23 @@ function CombinedSummaryCard({ dataByColumn, days }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [dataByColumn, generalPct, pctOverrides, paidToUs, workersPaid],
   );
+  // GANANCIAS y SUPERVISIÓN son filas separadas: GANANCIAS muestra el margen
+  // puro de las labores facturables, sin tocar por el descuento de
+  // supervisión. El "monto libre" (ganancia − supervisión) se calcula y
+  // muestra únicamente en la celda de gran total de la fila SUPERVISIÓN,
+  // mostrando los dos montos de la resta — no reemplaza ni reduce el total
+  // de GANANCIAS.
+  const totalGananciaBillable = useMemo(
+    () => dataByColumn.reduce((s, d) => s + (isSupervisionCol(d.col) ? 0 : gananciaFor(d.col, d.totalAmount)), 0),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [dataByColumn, generalPct, pctOverrides, paidToUs, workersPaid],
+  );
+  const totalSupervisionDeduction = useMemo(
+    () => dataByColumn.reduce((s, d) => s + (isSupervisionCol(d.col) ? gananciaFor(d.col, d.totalAmount) : 0), 0),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [dataByColumn, generalPct, pctOverrides, paidToUs, workersPaid],
+  );
+  const hasSupervisionCols = dataByColumn.some((d) => isSupervisionCol(d.col));
   const grandTotalGeneral = useMemo(
     () => dataByColumn.reduce((s, d) => s + totalGeneralFor(d.col, d.totalAmount), 0),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -529,7 +699,7 @@ function CombinedSummaryCard({ dataByColumn, days }) {
       cols.push(fmtCLP(totalsByDay.get(day) || 0));
       lines.push(cols.join(" | "));
     }
-    const totalRow = ["TOTAL"];
+    const totalRow = ["TOTAL A PAGAR"];
     for (const d of dataByColumn) {
       const paidTag = isJornadaCol(d.col) && workersPaid[d.col.key] ? " [ya pagado]" : "";
       totalRow.push(`${fmtNum(d.totalQty)}${d.unit ? " " + d.unit : ""} · ${fmtCLP(d.totalAmount)}${paidTag}`);
@@ -539,14 +709,42 @@ function CombinedSummaryCard({ dataByColumn, days }) {
     lines.push("");
     lines.push("💰 GANANCIAS");
     for (const d of dataByColumn) {
+      if (isSupervisionCol(d.col)) continue;
       const g = gananciaFor(d.col, d.totalAmount);
       const detail = isJornadaCol(d.col)
         ? (workersPaid[d.col.key] ? `pagan ${fmtCLP(Number(paidToUs[d.col.key]) || 0)}, ya pagado` : `pagan ${fmtCLP(Number(paidToUs[d.col.key]) || 0)}`)
         : `${effectivePct(d.col.key)}%`;
       lines.push(`${d.col.labor.name} (${d.col.cycleLabel}) [${detail}]: ${fmtCLP(g)}`);
     }
-    lines.push(`TOTAL GANANCIAS: ${fmtCLP(totalGanancia)}`);
+    lines.push(`TOTAL GANANCIAS: ${fmtCLP(totalGananciaBillable)}`);
     lines.push("");
+    lines.push("🚐 TRANSPORTE (por ciclo)");
+    {
+      const seenCycles = new Set();
+      for (const d of dataByColumn) {
+        if (seenCycles.has(d.col.cycleId)) continue;
+        seenCycles.add(d.col.cycleId);
+        const t = transportByCycle.get(d.col.cycleId) || { total: 0, hasTrips: false };
+        const tag = t.total === 0 ? (t.hasTrips ? " [vueltas creadas]" : " [sin vueltas]") : "";
+        lines.push(`${d.col.cycleLabel}: ${fmtCLP(t.total)}${tag}`);
+      }
+    }
+    lines.push(`TOTAL TRANSPORTE: ${fmtCLP(grandTotalTransport)}`);
+    lines.push("");
+    if (hasSupervisionCols) {
+      lines.push("➖ MONTO LIBRE (descuento por supervisión, informativo, no afecta lo facturado)");
+      for (const d of dataByColumn) {
+        if (!isSupervisionCol(d.col)) continue;
+        lines.push(`${d.col.labor.name} (${d.col.cycleLabel}): ${fmtCLP(gananciaFor(d.col, d.totalAmount))}`);
+      }
+      lines.push(`TOTAL SUPERVISIÓN: ${fmtCLP(totalSupervisionDeduction)}`);
+      lines.push(`MONTO LIBRE (${fmtCLP(totalGananciaBillable)} − ${fmtCLP(Math.abs(totalSupervisionDeduction))}): ${fmtCLP(totalGanancia)}`);
+      lines.push("");
+    }
+    if (grandTotalTransport !== 0) {
+      lines.push(`MONTO LIBRE NETO (${fmtCLP(totalGanancia)} − ${fmtCLP(grandTotalTransport)}, descuenta también transporte): ${fmtCLP(totalGanancia - grandTotalTransport)}`);
+      lines.push("");
+    }
     const generalRow = ["TOTAL GENERAL"];
     for (const d of dataByColumn) generalRow.push(fmtCLP(totalGeneralFor(d.col, d.totalAmount)));
     generalRow.push(fmtCLP(grandTotalGeneral));
@@ -684,7 +882,7 @@ function CombinedSummaryCard({ dataByColumn, days }) {
                   );
                 })}
                 <tr style={{ background: ROW_TOTAL_DARK, color: "#fff", fontWeight: 700 }}>
-                  <td style={{ ...cell, borderColor: "#3d6b2e" }}>TOTAL</td>
+                  <td style={{ ...cell, borderColor: "#3d6b2e" }}>TOTAL A PAGAR</td>
                   {dataByColumn.map((d) => (
                     <td key={d.col.key} style={{ ...cell, textAlign: "right", borderColor: "#3d6b2e" }}>
                       <div style={{ fontSize: 10, opacity: 0.9 }}>
@@ -693,6 +891,9 @@ function CombinedSummaryCard({ dataByColumn, days }) {
                       <div>{fmtCLP(d.totalAmount)}</div>
                       {isJornadaCol(d.col) && workersPaid[d.col.key] && (
                         <div style={{ fontSize: 9, fontWeight: 400, marginTop: 1, color: "#d4f5d4" }}>✅ ya pagado</div>
+                      )}
+                      {isSupervisionCol(d.col) && (
+                        <div style={{ fontSize: 9, fontWeight: 400, marginTop: 1, color: "#d4f5d4" }}>➖NF</div>
                       )}
                     </td>
                   ))}
@@ -704,18 +905,76 @@ function CombinedSummaryCard({ dataByColumn, days }) {
                   <td style={{ ...cell, borderColor: "#6aa84f" }}>GANANCIAS</td>
                   {dataByColumn.map((d) => (
                     <td key={d.col.key} style={{ ...cell, textAlign: "right", borderColor: "#6aa84f" }}>
-                      {fmtCLP(gananciaFor(d.col, d.totalAmount))}
+                      {isSupervisionCol(d.col) ? "—" : fmtCLP(gananciaFor(d.col, d.totalAmount))}
                     </td>
                   ))}
                   <td style={{ ...cell, textAlign: "right", borderColor: "#6aa84f", fontSize: 13 }}>
-                    {fmtCLP(totalGanancia)}
+                    {fmtCLP(totalGananciaBillable)}
                   </td>
                 </tr>
+                <tr style={{ background: ROW_TOTAL_DARK, color: "#fff", fontWeight: 700 }}>
+                  <td style={{ ...cell, borderColor: "#3d6b2e" }}>TRANSPORTE</td>
+                  {dataByColumn.map((d) => {
+                    const isFirst = firstColKeyForCycle.get(d.col.cycleId) === d.col.key;
+                    if (!isFirst) {
+                      return (
+                        <td key={d.col.key} style={{ ...cell, textAlign: "right", borderColor: "#3d6b2e" }}>—</td>
+                      );
+                    }
+                    const t = transportByCycle.get(d.col.cycleId) || { total: 0, hasTrips: false };
+                    return (
+                      <td key={d.col.key} style={{ ...cell, textAlign: "right", borderColor: "#3d6b2e" }}>
+                        {fmtCLP(t.total)}
+                        {t.total === 0 && (
+                          <div style={{ fontSize: 9, fontWeight: 400, marginTop: 1, color: "#d4f5d4" }}>
+                            {t.hasTrips ? "vueltas creadas" : "sin vueltas"}
+                          </div>
+                        )}
+                      </td>
+                    );
+                  })}
+                  <td style={{ ...cell, textAlign: "right", borderColor: "#3d6b2e", fontSize: 13 }}>
+                    {fmtCLP(grandTotalTransport)}
+                  </td>
+                </tr>
+                {hasSupervisionCols && (
+                  <tr style={{ background: ROW_IVA, color: "#274e13", fontWeight: 700 }}>
+                    <td style={{ ...cell, borderColor: "#93c47d" }}>MONTO LIBRE</td>
+                    {dataByColumn.map((d) => (
+                      <td key={d.col.key} style={{ ...cell, textAlign: "right", borderColor: "#93c47d" }}>
+                        {isSupervisionCol(d.col) ? fmtCLP(gananciaFor(d.col, d.totalAmount)) : "—"}
+                      </td>
+                    ))}
+                    <td style={{ ...cell, textAlign: "right", borderColor: "#93c47d", fontSize: 13 }}>
+                      <div style={{ fontSize: 9, fontWeight: 400 }}>
+                        {fmtCLP(totalGananciaBillable)} − {fmtCLP(Math.abs(totalSupervisionDeduction))}
+                      </div>
+                      <div>{fmtCLP(totalGanancia)}</div>
+                    </td>
+                  </tr>
+                )}
+                {grandTotalTransport !== 0 && (
+                  <tr style={{ background: ROW_IVA, color: "#274e13", fontWeight: 700 }}>
+                    <td style={{ ...cell, borderColor: "#93c47d" }}>MONTO LIBRE NETO</td>
+                    {dataByColumn.map((d) => (
+                      <td key={d.col.key} style={{ ...cell, borderColor: "#93c47d" }}></td>
+                    ))}
+                    <td style={{ ...cell, textAlign: "right", borderColor: "#93c47d", fontSize: 13 }}>
+                      <div style={{ fontSize: 9, fontWeight: 400 }}>
+                        {fmtCLP(totalGanancia)} − {fmtCLP(grandTotalTransport)}
+                      </div>
+                      <div>{fmtCLP(totalGanancia - grandTotalTransport)}</div>
+                    </td>
+                  </tr>
+                )}
                 <tr style={{ background: ROW_TOTAL_GENERAL, color: "#fff", fontWeight: 700 }}>
                   <td style={{ ...cell, borderColor: "#274e13" }}>TOTAL GENERAL</td>
                   {dataByColumn.map((d) => (
                     <td key={d.col.key} style={{ ...cell, textAlign: "right", borderColor: "#274e13" }}>
                       {fmtCLP(totalGeneralFor(d.col, d.totalAmount))}
+                      {isSupervisionCol(d.col) && (
+                        <div style={{ fontSize: 9, fontWeight: 400, marginTop: 1, color: "#d4f5d4" }}>➖NF</div>
+                      )}
                     </td>
                   ))}
                   <td style={{ ...cell, textAlign: "right", borderColor: "#274e13", fontSize: 13 }}>
@@ -802,9 +1061,18 @@ function CombinedSummaryCard({ dataByColumn, days }) {
                             ✅ ya pagado <span style={{ fontWeight: 400, color: "#666" }}>(solo informativo)</span>
                           </div>
                         )}
+                        {isSupervisionCol(d.col) && (
+                          <div style={{ fontSize: 9, fontWeight: 700, color: "#b91c1c", marginTop: 1 }}>
+                            ➖ descuento <span style={{ fontWeight: 400, color: "#666" }}>(cubierto por el % general)</span>
+                          </div>
+                        )}
                       </td>
                       <td style={{ ...cell, textAlign: "right" }}>
-                        {isJornadaCol(d.col) ? (
+                        {isSupervisionCol(d.col) ? (
+                          <span style={{ fontSize: 10, color: "#666", fontStyle: "italic" }}>
+                            −100% (automático)
+                          </span>
+                        ) : isJornadaCol(d.col) ? (
                           <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3 }}>
                             <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
                               $
@@ -890,7 +1158,9 @@ function LaborSummaryCard({ data, catalogs, allClosedCollapsed }) {
       ? "🏕 Por etapas"
       : col.labor.type === "main"
         ? "💰 Jornadas"
-        : `🛠 ${tratoTypeLabel(catalogs, col.labor.tratoType ?? 0)}`;
+        : col.labor.type === "supervision"
+          ? "🧑‍💼 Supervisión"
+          : `🛠 ${tratoTypeLabel(catalogs, col.labor.tratoType ?? 0)}`;
 
   // Texto plano del desglose para pegar en chat / nota. Mantenemos columnas
   // alineadas con padStart sobre los strings finales — funciona en monospace
@@ -1189,10 +1459,11 @@ function buildCell(labor, date, workdays, dayPrices, catalogs) {
     const avg = persons > 0 ? qty / persons : 0;
     return { qty, amount, unit: "unid", priceLabel, persons, avg };
   }
-  if (labor.type === "main") {
+  if (labor.type === "main" || labor.type === "supervision") {
     // Pago al día: no hay precio/unidad que calcular, el monto ya viene
     // directo en cada workday. La "cantidad" es el número de jornadas
-    // (trabajadores distintos pagados ese día).
+    // (trabajadores distintos pagados ese día). Supervisión usa la misma
+    // mecánica de monto-por-día-por-trabajador que jornadas (main).
     let amount = 0;
     const ruts = new Set();
     for (const wd of workdays) {
