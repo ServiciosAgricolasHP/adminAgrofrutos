@@ -14,6 +14,7 @@ import {
   TRIP_KINDS,
   groupTripsByDay,
   groupTripsByFaena,
+  titleCase,
 } from "../services/transportsService";
 import { faenasService, subfaenasService, cyclesService } from "../services";
 import { useIsMobile } from "../hooks/useIsMobile";
@@ -658,8 +659,8 @@ function CarrierTripsModal({ open, onClose, carrier }) {
                         {sb && <span className="text-[var(--color-muted)]"> / {sb.name}</span>}
                       </td>
                       <td className="px-2 py-1.5">
-                        {t.lugar || "—"}
-                        {t.destino && <span className="text-[var(--color-muted)]"> → {t.destino}</span>}
+                        {titleCase(t.lugar) || "—"}
+                        {t.destino && <span className="text-[var(--color-muted)]"> → {titleCase(t.destino)}</span>}
                       </td>
                       <td className="px-2 py-1.5 text-right tabular-nums">{t.personCount ?? "—"}</td>
                       <td className="px-2 py-1.5">{t.kind === "approach" ? "acerc." : "vuelta"}</td>
@@ -921,6 +922,16 @@ function TripsTab() {
   const faenaById = useMemo(() => new Map(faenas.map((f) => [f.id, f])), [faenas]);
   const subfaenaById = useMemo(() => new Map(subfaenas.map((s) => [s.id, s])), [subfaenas]);
 
+  // El filtro de Ciclo anida bajo Faena: sin faena elegida no tiene sentido
+  // listar los 30+ ciclos activos de golpe, así que el select queda vacío
+  // (deshabilitado) hasta que se elija una faena.
+  const cycleOptionsForFilter = useMemo(() => {
+    if (!filter.faenaId) return [];
+    return cycles
+      .filter((c) => c.faenaId === filter.faenaId)
+      .sort((a, b) => String(a.label || "").localeCompare(String(b.label || ""), "es"));
+  }, [cycles, filter.faenaId]);
+
   const filtered = useMemo(() => {
     return trips.filter((t) => {
       if (filter.carrierId && t.carrierId !== filter.carrierId) return false;
@@ -978,67 +989,72 @@ function TripsTab() {
 
   return (
     <div>
-      <div className="mb-3 grid grid-cols-1 gap-2 md:grid-cols-5">
-        <Select
-          label="Transportista"
-          value={filter.carrierId}
-          onChange={(v) => setFilter((f) => ({ ...f, carrierId: v }))}
-          options={activeCarriers.map((c) => ({ value: c.id, label: `${c.alias} — ${c.name}` }))}
-          placeholder="Todos"
-        />
-        <Select
-          label="Estado"
-          value={filter.status}
-          onChange={(v) => setFilter((f) => ({ ...f, status: v }))}
-          options={[
-            { value: "pending", label: "Pendiente" },
-            { value: "paid", label: "Pagado" },
-          ]}
-          placeholder="Todos"
-        />
-        <Select
-          label="Ciclo"
-          value={filter.cycleId}
-          onChange={(v) => setFilter((f) => ({ ...f, cycleId: v }))}
-          options={cycles.map((c) => ({ value: c.id, label: c.label || c.id }))}
-          placeholder="Todos"
-        />
-        <Select
-          label="Faena"
-          value={filter.faenaId}
-          onChange={(v) => setFilter((f) => ({ ...f, faenaId: v }))}
-          options={faenas.map((f) => ({ value: f.id, label: f.name }))}
-          placeholder="Todas"
-        />
-        <div className="flex items-end justify-end text-sm">
-          <span className="text-[var(--color-muted)]">Total: </span>
-          <span className="ml-1 font-semibold tabular-nums">{fmtCurrency(total)}</span>
-        </div>
-      </div>
-
-      <div className="mb-3 flex flex-wrap items-center gap-2 text-xs">
-        <span className="text-[var(--color-muted)]">Mostrar:</span>
-        <input
-          type="date"
-          disabled={showHistoric}
-          value={sinceDate}
-          onChange={(e) => setSinceDate(e.target.value || isoDateNDaysAgo(DEFAULT_HISTORY_DAYS))}
-          className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-xs outline-none focus:border-[var(--color-accent)] disabled:opacity-50"
-        />
-        <span className="text-[var(--color-muted)]">en adelante</span>
-        <label className="ml-2 flex items-center gap-1">
-          <input
-            type="checkbox"
-            checked={showHistoric}
-            onChange={(e) => setShowHistoric(e.target.checked)}
+      <div className="mb-4 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)] p-3">
+        <div className="grid grid-cols-1 gap-2 md:grid-cols-5">
+          <Select
+            label="Transportista"
+            value={filter.carrierId}
+            onChange={(v) => setFilter((f) => ({ ...f, carrierId: v }))}
+            options={activeCarriers.map((c) => ({ value: c.id, label: `${c.alias} — ${c.name}` }))}
+            placeholder="Todos"
           />
-          <span>ver histórico completo</span>
-        </label>
-        {!showHistoric && (
-          <span className="ml-auto text-[var(--color-muted)]">
-            Por defecto últimos {DEFAULT_HISTORY_DAYS} días
-          </span>
-        )}
+          <Select
+            label="Estado"
+            value={filter.status}
+            onChange={(v) => setFilter((f) => ({ ...f, status: v }))}
+            options={[
+              { value: "pending", label: "Pendiente" },
+              { value: "paid", label: "Pagado" },
+            ]}
+            placeholder="Todos"
+          />
+          <Select
+            label="Faena"
+            value={filter.faenaId}
+            onChange={(v) => setFilter((f) => ({ ...f, faenaId: v, cycleId: "" }))}
+            options={faenas.map((f) => ({ value: f.id, label: f.name }))}
+            placeholder="Todas"
+          />
+          <Select
+            label="Ciclo"
+            value={filter.cycleId}
+            onChange={(v) => setFilter((f) => ({ ...f, cycleId: v }))}
+            options={cycleOptionsForFilter.map((c) => ({ value: c.id, label: c.label || c.id }))}
+            placeholder={filter.faenaId ? "Todos" : "Elegí una faena primero"}
+            disabled={!filter.faenaId}
+          />
+          <div className="flex items-end justify-end text-sm">
+            <div className="rounded-md bg-[var(--color-accent-soft)] px-3 py-2 text-right">
+              <div className="text-[10px] uppercase tracking-wide text-[var(--color-muted)]">Total filtrado</div>
+              <div className="font-semibold tabular-nums text-[var(--color-accent)]">{fmtCurrency(total)}</div>
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-[var(--color-border)] pt-3 text-xs">
+          <span className="text-[var(--color-muted)]">Mostrar:</span>
+          <input
+            type="date"
+            disabled={showHistoric}
+            value={sinceDate}
+            onChange={(e) => setSinceDate(e.target.value || isoDateNDaysAgo(DEFAULT_HISTORY_DAYS))}
+            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-xs outline-none focus:border-[var(--color-accent)] disabled:opacity-50"
+          />
+          <span className="text-[var(--color-muted)]">en adelante</span>
+          <label className="ml-2 flex items-center gap-1">
+            <input
+              type="checkbox"
+              checked={showHistoric}
+              onChange={(e) => setShowHistoric(e.target.checked)}
+            />
+            <span>ver histórico completo</span>
+          </label>
+          {!showHistoric && (
+            <span className="ml-auto text-[var(--color-muted)]">
+              Por defecto últimos {DEFAULT_HISTORY_DAYS} días
+            </span>
+          )}
+        </div>
       </div>
 
       {loading ? (
@@ -1075,23 +1091,37 @@ function TripsTab() {
           <div className="space-y-2">
             {byCarrier.map((g) => {
               const expanded = expandedCarriers.has(g.carrierId);
+              const carrierObj = carrierById.get(g.carrierId);
+              const isOwn = carrierObj?.type === "own";
+              const bandColor = g.carrierId === "__none__" ? "var(--color-muted)" : (isOwn ? "var(--color-accent)" : "#d97706");
               return (
-                <div key={g.carrierId} className="rounded-md border border-[var(--color-border)]">
+                <div
+                  key={g.carrierId}
+                  className="overflow-hidden rounded-lg border border-[var(--color-border)] shadow-sm"
+                  style={{ borderTop: `3px solid ${bandColor}` }}
+                >
                   <button
                     type="button"
                     onClick={() => toggleCarrier(g.carrierId)}
-                    className="flex w-full items-center gap-2 bg-[var(--color-surface-2)] px-3 py-2 text-left text-sm hover:bg-[var(--color-accent-soft)]"
+                    className="flex w-full flex-wrap items-center gap-2.5 bg-[var(--color-surface-2)] px-3 py-2.5 text-left text-sm hover:bg-[var(--color-accent-soft)]"
                   >
                     <span className="text-[var(--color-muted)]">{expanded ? "▾" : "▸"}</span>
+                    <span className="text-base leading-none">{g.carrierId === "__none__" ? "❓" : isOwn ? "🏠" : "🚚"}</span>
                     <span className="font-semibold">{g.alias}</span>
                     {g.name && <span className="text-xs text-[var(--color-muted)]">· {g.name}</span>}
-                    <span className="ml-2 text-[10px] text-[var(--color-muted)]">
-                      {g.trips.length} vuelta{g.trips.length === 1 ? "" : "s"}
+                    <span className="ml-1 flex items-center gap-1">
+                      <span className="rounded-full bg-[var(--color-surface)] px-1.5 py-0.5 text-[10px] text-[var(--color-muted)]">
+                        {g.trips.length} vuelta{g.trips.length === 1 ? "" : "s"}
+                      </span>
                       {g.pendingCount > 0 && (
-                        <span className="ml-1 text-[var(--color-warning)]">· {g.pendingCount} pend.</span>
+                        <span className="rounded-full bg-[var(--color-warning-soft)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-warning)]">
+                          {g.pendingCount} pend.
+                        </span>
                       )}
                       {g.paidCount > 0 && (
-                        <span className="ml-1 text-[var(--color-success)]">· {g.paidCount} pag.</span>
+                        <span className="rounded-full bg-[var(--color-success-soft)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-success)]">
+                          {g.paidCount} pag.
+                        </span>
                       )}
                     </span>
                     <span className="ml-auto text-right">
@@ -1110,21 +1140,24 @@ function TripsTab() {
                           const cy = cycleById.get(t.cycleId);
                           const fa = faenaById.get(t.faenaId);
                           const sb = subfaenaById.get(t.subfaenaId);
+                          const zero = !(Number(t.amount) > 0);
                           return (
                             <div
                               key={t.id}
-                              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-2.5 space-y-2"
+                              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-2.5 space-y-2 shadow-sm"
                             >
                               <div className="flex items-start justify-between gap-2">
                                 <div className="font-mono text-xs text-[var(--color-muted)]">{t.date}</div>
                                 <div className="text-right">
-                                  <div className="font-semibold tabular-nums">{fmtCurrency(t.amount)}</div>
+                                  <div className={`font-semibold tabular-nums ${zero ? "italic text-[var(--color-muted)]" : "text-[var(--color-accent)]"}`}>
+                                    {fmtCurrency(t.amount)}
+                                  </div>
                                   {t.status === "paid" ? (
-                                    <span className="rounded-full bg-[var(--color-success-soft)] px-1.5 py-0.5 text-[11px] text-[var(--color-success)]">
+                                    <span className="rounded-full bg-[var(--color-success-soft)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--color-success)]">
                                       pagado
                                     </span>
                                   ) : (
-                                    <span className="rounded-full bg-[var(--color-warning-soft)] px-1.5 py-0.5 text-[11px] text-[var(--color-warning)]">
+                                    <span className="rounded-full bg-[var(--color-warning-soft)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--color-warning)]">
                                       pendiente
                                     </span>
                                   )}
@@ -1146,15 +1179,22 @@ function TripsTab() {
                                 </div>
                                 <div>
                                   <span className="text-[var(--color-muted)]">Destino: </span>
-                                  {t.destino || "—"}
+                                  {titleCase(t.destino) || "—"}
                                 </div>
                                 <div>
                                   <span className="text-[var(--color-muted)]">#Pers: </span>
                                   {t.personCount ?? "—"}
                                 </div>
                                 <div>
-                                  <span className="text-[var(--color-muted)]">Tipo: </span>
-                                  {t.kind === "approach" ? "acercamiento" : "vuelta"}
+                                  <span
+                                    className={`rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+                                      t.kind === "approach"
+                                        ? "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300"
+                                        : "bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-300"
+                                    }`}
+                                  >
+                                    {t.kind === "approach" ? "acercamiento" : "vuelta"}
+                                  </span>
                                 </div>
                                 <div>
                                   <span className="text-[var(--color-muted)]">Vlts/Tarifa: </span>
@@ -1168,48 +1208,70 @@ function TripsTab() {
                     ) : (
                       <div className="overflow-x-auto">
                         <table className="w-full text-sm">
-                          <thead className="bg-[var(--color-surface-2)]/60 text-left text-[var(--color-muted)]">
+                          <thead className="bg-[var(--color-accent-soft)] text-left text-[10px] uppercase tracking-wide text-[var(--color-accent)]">
                             <tr>
-                              <th className="px-2 py-1.5">Fecha</th>
-                              <th className="px-2 py-1.5">Vehículo</th>
-                              <th className="px-2 py-1.5">Ciclo</th>
-                              <th className="px-2 py-1.5">Faena / Subfaena</th>
-                              <th className="px-2 py-1.5">Destino</th>
-                              <th className="px-2 py-1.5 text-right">#Pers</th>
-                              <th className="px-2 py-1.5">Tipo</th>
-                              <th className="px-2 py-1.5 text-right">Vlts</th>
-                              <th className="px-2 py-1.5 text-right">Tarifa</th>
-                              <th className="px-2 py-1.5 text-right">Monto</th>
-                              <th className="px-2 py-1.5">Estado</th>
+                              <th className="px-2 py-2">Fecha</th>
+                              <th className="px-2 py-2">Vehículo</th>
+                              <th className="px-2 py-2">Ciclo</th>
+                              <th className="px-2 py-2">Faena / Subfaena</th>
+                              <th className="px-2 py-2">Destino</th>
+                              <th className="px-2 py-2 text-right">#Pers</th>
+                              <th className="px-2 py-2">Tipo</th>
+                              <th className="px-2 py-2 text-right">Vlts</th>
+                              <th className="px-2 py-2 text-right">Tarifa</th>
+                              <th className="px-2 py-2 text-right">Monto</th>
+                              <th className="px-2 py-2">Estado</th>
                             </tr>
                           </thead>
                           <tbody>
-                            {g.trips.map((t) => {
+                            {g.trips.map((t, idx) => {
                               const cy = cycleById.get(t.cycleId);
                               const fa = faenaById.get(t.faenaId);
                               const sb = subfaenaById.get(t.subfaenaId);
+                              const zero = !(Number(t.amount) > 0);
                               return (
-                                <tr key={t.id} className="border-t border-[var(--color-border)]">
-                                  <td className="px-2 py-1.5 tabular-nums">{t.date}</td>
+                                <tr
+                                  key={t.id}
+                                  className={`border-t border-[var(--color-border)] transition-colors hover:bg-[var(--color-accent-soft)]/50 ${idx % 2 === 1 ? "bg-[var(--color-surface-2)]/40" : ""}`}
+                                >
+                                  <td className="px-2 py-1.5 font-mono tabular-nums">{t.date}</td>
                                   <td className="px-2 py-1.5">{t.vehicleAlias || "—"}</td>
                                   <td className="px-2 py-1.5">{cy?.label || t.cycleId}</td>
                                   <td className="px-2 py-1.5">
                                     {fa?.name || "—"}
                                     {sb && <span className="text-[var(--color-muted)]"> / {sb.name}</span>}
                                   </td>
-                                  <td className="px-2 py-1.5">{t.destino || "—"}</td>
+                                  <td className="px-2 py-1.5">{titleCase(t.destino) || "—"}</td>
                                   <td className="px-2 py-1.5 text-right tabular-nums">{t.personCount ?? "—"}</td>
-                                  <td className="px-2 py-1.5">{t.kind === "approach" ? "acercamiento" : "vuelta"}</td>
+                                  <td className="px-2 py-1.5">
+                                    <span
+                                      className={`rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+                                        t.kind === "approach"
+                                          ? "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300"
+                                          : "bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-300"
+                                      }`}
+                                    >
+                                      {t.kind === "approach" ? "acercamiento" : "vuelta"}
+                                    </span>
+                                  </td>
                                   <td className="px-2 py-1.5 text-right tabular-nums">{t.qty}</td>
-                                  <td className="px-2 py-1.5 text-right tabular-nums">{fmtCurrency(t.rate)}</td>
-                                  <td className="px-2 py-1.5 text-right font-medium tabular-nums">{fmtCurrency(t.amount)}</td>
+                                  <td className={`px-2 py-1.5 text-right tabular-nums ${zero ? "text-[var(--color-muted)] italic" : ""}`}>
+                                    {fmtCurrency(t.rate)}
+                                  </td>
+                                  <td
+                                    className={`px-2 py-1.5 text-right tabular-nums ${
+                                      zero ? "italic text-[var(--color-muted)]" : "font-semibold text-[var(--color-accent)]"
+                                    }`}
+                                  >
+                                    {fmtCurrency(t.amount)}
+                                  </td>
                                   <td className="px-2 py-1.5">
                                     {t.status === "paid" ? (
-                                      <span className="rounded-full bg-[var(--color-success-soft)] px-1.5 py-0.5 text-[11px] text-[var(--color-success)]">
+                                      <span className="rounded-full bg-[var(--color-success-soft)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--color-success)]">
                                         pagado
                                       </span>
                                     ) : (
-                                      <span className="rounded-full bg-[var(--color-warning-soft)] px-1.5 py-0.5 text-[11px] text-[var(--color-warning)]">
+                                      <span className="rounded-full bg-[var(--color-warning-soft)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--color-warning)]">
                                         pendiente
                                       </span>
                                     )}
@@ -3602,7 +3664,7 @@ function PaymentDetailModal({ open, onClose, payment, carrier, carriers = [], fa
                   <span className="min-w-0 flex-1 truncate">
                     {t.vehicleAlias || "—"}
                     {fa && <span className="text-[var(--color-muted)]"> · {fa.name}{sb ? ` / ${sb.name}` : ""}</span>}
-                    {t.lugar && <span className="text-[var(--color-muted)]"> · {t.lugar}{t.destino ? ` → ${t.destino}` : ""}</span>}
+                    {t.lugar && <span className="text-[var(--color-muted)]"> · {titleCase(t.lugar)}{t.destino ? ` → ${titleCase(t.destino)}` : ""}</span>}
                   </span>
                   <span className="shrink-0 font-semibold tabular-nums">{fmtCurrency(t.amount)}</span>
                 </label>
@@ -3686,8 +3748,8 @@ const PrintableSummary = forwardRef(function PrintableSummary(
                 <td style={cell}>{dateLabel(t.date)}</td>
                 <td style={cell}>{t.vehicleAlias || "—"}</td>
                 <td style={{ ...cell, textAlign: "center" }}>{t.qty}</td>
-                <td style={cell}>{t.lugar || ""}</td>
-                <td style={cell}>{t.destino || ""}</td>
+                <td style={cell}>{titleCase(t.lugar)}</td>
+                <td style={cell}>{titleCase(t.destino)}</td>
                 <td style={cell}>{labor}</td>
                 <td style={{ ...cell, textAlign: "right", fontVariantNumeric: "tabular-nums", padding: "5px 8px" }}>
                   {fmtCurrency(t.amount)}
@@ -4110,7 +4172,7 @@ function FaenaBatchTab() {
                           <td className="px-3 py-1.5 font-mono text-xs">{t.date}</td>
                           <td className="px-3 py-1.5 text-xs">{t.vehicleAlias || "—"}</td>
                           <td className="px-3 py-1.5 text-xs text-[var(--color-muted)]">
-                            {t.lugar || "—"} → {t.destino || "—"}
+                            {titleCase(t.lugar) || "—"} → {titleCase(t.destino) || "—"}
                           </td>
                           <td className="px-3 py-1.5 text-xs">{t.kind === "approach" ? "Acerc." : "Vuelta"}</td>
                           <td className="px-3 py-1.5 text-right text-xs tabular-nums">{t.qty}</td>

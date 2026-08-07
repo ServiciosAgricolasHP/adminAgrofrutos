@@ -1,4 +1,4 @@
-export default function Select({ label, value, onChange, options, required = false, placeholder = "Selecciona..." }) {
+export default function Select({ label, value, onChange, options, required = false, placeholder = "Selecciona...", disabled = false }) {
   return (
     <label className="block">
       {label && (
@@ -11,7 +11,8 @@ export default function Select({ label, value, onChange, options, required = fal
         value={value ?? ""}
         onChange={(e) => onChange(e.target.value)}
         required={required}
-        className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)]"
+        disabled={disabled}
+        className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-50"
       >
         <option value="">{placeholder}</option>
         {options.map((o) => (

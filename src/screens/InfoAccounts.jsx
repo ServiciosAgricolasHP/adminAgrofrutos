@@ -38,10 +38,20 @@ const emptyAccount = () => ({
   email: "",
 });
 
+// Empresa siempre muestra el RUT. Para persona depende del toggle
+// `includeRut`; las fichas viejas (guardadas antes de que existiera este
+// campo) no lo tienen guardado — en ese caso, si ya tenían un RUT cargado
+// lo seguimos mostrando por compatibilidad, en vez de esconderlo de golpe.
+const rutIncluded = (card) => card.type !== "persona" || (card.includeRut ?? !!card.rut);
+
 const emptyCard = (type = "persona") => ({
   type,
   name: "",
   rut: "",
+  // Para personas el RUT no siempre aplica, así que arranca oculto por
+  // defecto (el dato igual se conserva si se llega a tipear y luego se
+  // apaga el toggle — solo deja de mostrarse). Empresa lo muestra siempre.
+  includeRut: type !== "persona",
   phone: "",
   email: "",
   address: "",
@@ -68,7 +78,7 @@ function cardToText(card) {
   const meta = TYPE_META[card.type] || TYPE_META.persona;
   const lines = [];
   if (card.name) lines.push(`${meta.nameLabel}: ${card.name}`);
-  if (card.rut) lines.push(`RUT: ${formatRutForDisplay(card.rut)}`);
+  if (card.rut && rutIncluded(card)) lines.push(`RUT: ${formatRutForDisplay(card.rut)}`);
   if (card.giro) lines.push(`Giro: ${card.giro}`);
   if (card.address) lines.push(`Dirección: ${card.address}`);
   if (card.phone) lines.push(`Teléfono: ${card.phone}`);
@@ -178,6 +188,7 @@ export default function InfoAccounts() {
       type: draft.type,
       name: (draft.name || "").trim(),
       rut: draft.rut ? normalizeRut(draft.rut) : "",
+      includeRut: draft.type === "persona" ? !!draft.includeRut : true,
       phone: (draft.phone || "").trim(),
       email: (draft.email || "").trim(),
       address: (draft.address || "").trim(),
@@ -375,7 +386,9 @@ function ContactCard({ card, onCopy, onCopyImage, onToggleFavorite, onEdit, onDe
 
       {/* Datos */}
       <div className="flex flex-col gap-0.5 px-3 py-2">
-        <Field label="RUT" value={card.rut ? formatRutForDisplay(card.rut) : ""} copyValue={formatRutForDisplay(card.rut)} onCopy={onCopy} mono />
+        {rutIncluded(card) && (
+          <Field label="RUT" value={card.rut ? formatRutForDisplay(card.rut) : ""} copyValue={formatRutForDisplay(card.rut)} onCopy={onCopy} mono />
+        )}
         {card.type === "empresa" && <Field label="Giro" value={card.giro} onCopy={onCopy} />}
         <Field label="Dirección" value={card.address} onCopy={onCopy} />
         <Field label="Teléfono" value={card.phone} onCopy={onCopy} mono />
@@ -530,7 +543,7 @@ const ContactCardImage = forwardRef(function ContactCardImage({ card }, ref) {
         <div style={{ fontSize: 21, fontWeight: 700, marginTop: 8, lineHeight: 1.2 }}>{card.name || "(sin nombre)"}</div>
         <div style={{ fontSize: 11, opacity: 0.9, marginTop: 3, textTransform: "uppercase", letterSpacing: 0.6 }}>
           {meta.label}
-          {card.rut ? ` · ${formatRutForDisplay(card.rut)}` : ""}
+          {card.rut && rutIncluded(card) ? ` · ${formatRutForDisplay(card.rut)}` : ""}
         </div>
       </div>
 
@@ -590,7 +603,12 @@ function ImgAccRow({ label, value, strong = false }) {
 // ============================================================
 function ContactCardModal({ initial, onCancel, onSave }) {
   const toast = useToast();
-  const [form, setForm] = useState(() => ({ ...emptyCard(initial.type), ...initial, accounts: (initial.accounts || []).map((a) => ({ ...a })) }));
+  const [form, setForm] = useState(() => {
+    const base = { ...emptyCard(initial.type), ...initial, accounts: (initial.accounts || []).map((a) => ({ ...a })) };
+    // `includeRut` puede no venir en fichas viejas guardadas antes de este
+    // campo — rutIncluded() aplica el fallback (mostrar si ya tenía RUT).
+    return { ...base, includeRut: rutIncluded(base) };
+  });
   const [busy, setBusy] = useState(false);
 
   const meta = TYPE_META[form.type] || TYPE_META.persona;
@@ -662,8 +680,22 @@ function ContactCardModal({ initial, onCancel, onSave }) {
             <input value={form.name} onChange={(e) => set({ name: e.target.value })} className={inputCls} />
           </div>
           <div>
-            <label className={labelCls}>RUT</label>
-            <input value={form.rut} onChange={(e) => set({ rut: e.target.value })} placeholder="12.345.678-9" className={inputCls} />
+            <div className="mb-1 flex items-center justify-between">
+              <span className={labelCls.replace("mb-1 ", "")}>RUT</span>
+              {form.type === "persona" && (
+                <label className="flex items-center gap-1 text-[10px] text-[var(--color-muted)]">
+                  <input
+                    type="checkbox"
+                    checked={!!form.includeRut}
+                    onChange={(e) => set({ includeRut: e.target.checked })}
+                  />
+                  Incluir RUT
+                </label>
+              )}
+            </div>
+            {(form.type !== "persona" || form.includeRut) && (
+              <input value={form.rut} onChange={(e) => set({ rut: e.target.value })} placeholder="12.345.678-9" className={inputCls} />
+            )}
           </div>
           {form.type === "empresa" && (
             <div>

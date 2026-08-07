@@ -41,6 +41,18 @@ const withCreate = () => ({
 // TRIPS
 // ============================================================
 
+// Normaliza un lugar/destino a formato de nombre propio (ej. "los lagos" o
+// "LOS LAGOS" → "Los Lagos") para que no queden varias grafías de un mismo
+// lugar dispersas en los informes. Exportada para poder normalizar también
+// en pantalla los registros viejos que se cargaron antes de este cambio.
+export function titleCase(str) {
+  return String(str || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase()
+    .replace(/(^|[\s/-])([a-záéíóúñü])/g, (_, sep, ch) => sep + ch.toUpperCase());
+}
+
 function normalizeTrip(data) {
   const qty = Number(data.qty) || 1;
   const rate = Number(data.rate) || 0;
@@ -56,8 +68,8 @@ function normalizeTrip(data) {
     qty,
     rate,
     amount: qty * rate,
-    lugar: data.lugar ? String(data.lugar).trim() : "",
-    destino: data.destino ? String(data.destino).trim() : "",
+    lugar: titleCase(data.lugar),
+    destino: titleCase(data.destino),
     personCount,
     notes: data.notes ? String(data.notes).trim() : "",
     status: data.status || "pending",

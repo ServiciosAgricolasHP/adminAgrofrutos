@@ -5,7 +5,7 @@ import Select from "./Select";
 import ConfirmDialog from "./ConfirmDialog";
 import { useCarriers } from "../contexts/CarriersContext";
 import { useToast } from "../contexts/ToastContext";
-import { tripsService, TRIP_KINDS } from "../services/transportsService";
+import { tripsService, TRIP_KINDS, titleCase } from "../services/transportsService";
 import { CARRIER_TYPES } from "../services/carriersService";
 
 const fmtCurrency = (v) =>
@@ -210,7 +210,7 @@ export default function TransportsModal({ open, onClose, cycle, faena, subfaena,
                                 )}
                               </td>
                               <td className="px-2 py-1.5">{t.vehicleAlias || "—"}</td>
-                              <td className="px-2 py-1.5">{t.destino || "—"}</td>
+                              <td className="px-2 py-1.5">{titleCase(t.destino) || "—"}</td>
                               <td className="px-2 py-1.5 text-right tabular-nums">{t.personCount ?? "—"}</td>
                               <td className="px-2 py-1.5 text-right tabular-nums">{t.qty}</td>
                               <td className="px-2 py-1.5 text-right tabular-nums">{fmtCurrency(t.rate)}</td>
