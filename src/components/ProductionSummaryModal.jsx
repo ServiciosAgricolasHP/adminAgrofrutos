@@ -110,6 +110,11 @@ export default function ProductionSummaryModal({
     () => loadJSON("typeFilter", { cosecha: true, trato: true, tratoEtapas: true, main: true, supervision: true }),
   );
   useEffect(() => { saveJSON("typeFilter", typeFilter); }, [typeFilter]);
+  // Aparte del filtro por tipo de labor, un toggle propio para poner/sacar
+  // la fila TRANSPORTE (y su derivada MONTO LIBRE NETO) de la tabla, sin
+  // perder el cálculo por ciclo que sigue disponible si se vuelve a activar.
+  const [includeTransport, setIncludeTransport] = useState(() => loadJSON("includeTransport", true));
+  useEffect(() => { saveJSON("includeTransport", includeTransport); }, [includeTransport]);
   const [enabledCycles, setEnabledCyclesState] = useState(
     () => computeEnabledCycles(cycles, initialEnabledCycleIds),
   );
@@ -414,6 +419,15 @@ export default function ProductionSummaryModal({
           />
           <span>🧑‍💼 Supervisión</span>
         </label>
+        <span className="mx-1 h-4 w-px bg-[var(--color-border)]" />
+        <label className="flex items-center gap-1">
+          <input
+            type="checkbox"
+            checked={includeTransport}
+            onChange={(e) => setIncludeTransport(e.target.checked)}
+          />
+          <span>🚐 Transporte</span>
+        </label>
       </div>
 
       {/* Selector de ciclos como tabla: mucho más legible que los chips que
@@ -532,6 +546,7 @@ export default function ProductionSummaryModal({
               transportByCycle={transportByCycle}
               firstColKeyForCycle={firstColKeyForCycle}
               grandTotalTransport={grandTotalTransport}
+              includeTransport={includeTransport}
             />
           )}
           {dataByColumn.map((d) => (
@@ -547,7 +562,7 @@ export default function ProductionSummaryModal({
 // días como filas. Cada celda muestra qty (con unidad) arriba y monto
 // abajo. Hay una columna "Total día" al final con la suma de montos y una
 // fila TOTAL al pie con los acumulados por labor y el gran total.
-function CombinedSummaryCard({ dataByColumn, days, transportByCycle, firstColKeyForCycle, grandTotalTransport }) {
+function CombinedSummaryCard({ dataByColumn, days, transportByCycle, firstColKeyForCycle, grandTotalTransport, includeTransport }) {
   const toast = useToast();
   const [collapsed, setCollapsed] = useState(false);
   const [busy, setBusy] = useState("");
@@ -718,8 +733,8 @@ function CombinedSummaryCard({ dataByColumn, days, transportByCycle, firstColKey
     }
     lines.push(`TOTAL GANANCIAS: ${fmtCLP(totalGananciaBillable)}`);
     lines.push("");
-    lines.push("🚐 TRANSPORTE (por ciclo)");
-    {
+    if (includeTransport) {
+      lines.push("🚐 TRANSPORTE (por ciclo)");
       const seenCycles = new Set();
       for (const d of dataByColumn) {
         if (seenCycles.has(d.col.cycleId)) continue;
@@ -728,9 +743,9 @@ function CombinedSummaryCard({ dataByColumn, days, transportByCycle, firstColKey
         const tag = t.total === 0 ? (t.hasTrips ? " [vueltas creadas]" : " [sin vueltas]") : "";
         lines.push(`${d.col.cycleLabel}: ${fmtCLP(t.total)}${tag}`);
       }
+      lines.push(`TOTAL TRANSPORTE: ${fmtCLP(grandTotalTransport)}`);
+      lines.push("");
     }
-    lines.push(`TOTAL TRANSPORTE: ${fmtCLP(grandTotalTransport)}`);
-    lines.push("");
     if (hasSupervisionCols) {
       lines.push("➖ MONTO LIBRE (descuento por supervisión, informativo, no afecta lo facturado)");
       for (const d of dataByColumn) {
@@ -741,7 +756,7 @@ function CombinedSummaryCard({ dataByColumn, days, transportByCycle, firstColKey
       lines.push(`MONTO LIBRE (${fmtCLP(totalGananciaBillable)} − ${fmtCLP(Math.abs(totalSupervisionDeduction))}): ${fmtCLP(totalGanancia)}`);
       lines.push("");
     }
-    if (grandTotalTransport !== 0) {
+    if (includeTransport && grandTotalTransport !== 0) {
       lines.push(`MONTO LIBRE NETO (${fmtCLP(totalGanancia)} − ${fmtCLP(grandTotalTransport)}, descuenta también transporte): ${fmtCLP(totalGanancia - grandTotalTransport)}`);
       lines.push("");
     }
@@ -912,31 +927,33 @@ function CombinedSummaryCard({ dataByColumn, days, transportByCycle, firstColKey
                     {fmtCLP(totalGananciaBillable)}
                   </td>
                 </tr>
-                <tr style={{ background: ROW_TOTAL_DARK, color: "#fff", fontWeight: 700 }}>
-                  <td style={{ ...cell, borderColor: "#3d6b2e" }}>TRANSPORTE</td>
-                  {dataByColumn.map((d) => {
-                    const isFirst = firstColKeyForCycle.get(d.col.cycleId) === d.col.key;
-                    if (!isFirst) {
+                {includeTransport && (
+                  <tr style={{ background: ROW_TOTAL_DARK, color: "#fff", fontWeight: 700 }}>
+                    <td style={{ ...cell, borderColor: "#3d6b2e" }}>TRANSPORTE</td>
+                    {dataByColumn.map((d) => {
+                      const isFirst = firstColKeyForCycle.get(d.col.cycleId) === d.col.key;
+                      if (!isFirst) {
+                        return (
+                          <td key={d.col.key} style={{ ...cell, textAlign: "right", borderColor: "#3d6b2e" }}>—</td>
+                        );
+                      }
+                      const t = transportByCycle.get(d.col.cycleId) || { total: 0, hasTrips: false };
                       return (
-                        <td key={d.col.key} style={{ ...cell, textAlign: "right", borderColor: "#3d6b2e" }}>—</td>
+                        <td key={d.col.key} style={{ ...cell, textAlign: "right", borderColor: "#3d6b2e" }}>
+                          {fmtCLP(t.total)}
+                          {t.total === 0 && (
+                            <div style={{ fontSize: 9, fontWeight: 400, marginTop: 1, color: "#d4f5d4" }}>
+                              {t.hasTrips ? "vueltas creadas" : "sin vueltas"}
+                            </div>
+                          )}
+                        </td>
                       );
-                    }
-                    const t = transportByCycle.get(d.col.cycleId) || { total: 0, hasTrips: false };
-                    return (
-                      <td key={d.col.key} style={{ ...cell, textAlign: "right", borderColor: "#3d6b2e" }}>
-                        {fmtCLP(t.total)}
-                        {t.total === 0 && (
-                          <div style={{ fontSize: 9, fontWeight: 400, marginTop: 1, color: "#d4f5d4" }}>
-                            {t.hasTrips ? "vueltas creadas" : "sin vueltas"}
-                          </div>
-                        )}
-                      </td>
-                    );
-                  })}
-                  <td style={{ ...cell, textAlign: "right", borderColor: "#3d6b2e", fontSize: 13 }}>
-                    {fmtCLP(grandTotalTransport)}
-                  </td>
-                </tr>
+                    })}
+                    <td style={{ ...cell, textAlign: "right", borderColor: "#3d6b2e", fontSize: 13 }}>
+                      {fmtCLP(grandTotalTransport)}
+                    </td>
+                  </tr>
+                )}
                 {hasSupervisionCols && (
                   <tr style={{ background: ROW_IVA, color: "#274e13", fontWeight: 700 }}>
                     <td style={{ ...cell, borderColor: "#93c47d" }}>MONTO LIBRE</td>
@@ -953,7 +970,7 @@ function CombinedSummaryCard({ dataByColumn, days, transportByCycle, firstColKey
                     </td>
                   </tr>
                 )}
-                {grandTotalTransport !== 0 && (
+                {includeTransport && grandTotalTransport !== 0 && (
                   <tr style={{ background: ROW_IVA, color: "#274e13", fontWeight: 700 }}>
                     <td style={{ ...cell, borderColor: "#93c47d" }}>MONTO LIBRE NETO</td>
                     {dataByColumn.map((d) => (
