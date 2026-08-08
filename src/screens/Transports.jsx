@@ -1364,6 +1364,14 @@ function PaymentsTab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showHistoricPaid]);
 
+  // Reload compartido para ediciones que ocurren fuera del PaymentDetailModal
+  // (ej. editar/quitar vueltas desde la vista unificada) — misma lógica que
+  // el onChanged del detalle individual, pero sin refrescar `viewing`.
+  const refreshAfterEdit = async () => {
+    await reload();
+    setBalanceVersion((v) => v + 1);
+  };
+
   const carrierById = useMemo(() => new Map(carriers.map((c) => [c.id, c])), [carriers]);
   const faenaById = useMemo(() => new Map(faenas.map((f) => [f.id, f])), [faenas]);
   const subfaenaById = useMemo(() => new Map(subfaenas.map((s) => [s.id, s])), [subfaenas]);
@@ -1548,6 +1556,8 @@ function PaymentsTab() {
             cycleById={cycleById}
             onView={setViewing}
             empty={hasActiveFilter ? "Ningún pendiente coincide con el filtro" : "Sin resúmenes pendientes"}
+            carriers={carriers}
+            onChanged={refreshAfterEdit}
           />
           <div className="mt-6">
             <PaymentSection
@@ -1561,6 +1571,8 @@ function PaymentsTab() {
               onView={setViewing}
               empty={hasActiveFilter ? "Ningún pago coincide con el filtro" : "Sin pagos registrados"}
               dim
+              carriers={carriers}
+              onChanged={refreshAfterEdit}
             />
           </div>
         </>
@@ -2545,7 +2557,7 @@ function BalanceSummary({ carriers, reloadVersion }) {
   );
 }
 
-function PaymentSection({ title, payments, carrierById, transportPayrollById, faenaById, subfaenaById, cycleById, onView, empty, dim = false }) {
+function PaymentSection({ title, payments, carrierById, transportPayrollById, faenaById, subfaenaById, cycleById, onView, empty, dim = false, carriers = [], onChanged }) {
   // Agrupado por transportista. Cada grupo es colapsable; default expandido
   // porque típicamente hay pocos resúmenes por transportista (1-3) y el
   // usuario quiere verlos para click-to-detail.
@@ -2665,6 +2677,8 @@ function PaymentSection({ title, payments, carrierById, transportPayrollById, fa
         faenaById={faenaById}
         subfaenaById={subfaenaById}
         cycleById={cycleById}
+        carriers={carriers}
+        onChanged={onChanged}
       />
     </div>
   );
@@ -2755,15 +2769,24 @@ function paymentCardContent(p, c, period, transportPayrollById) {
 
 // Junta las vueltas de todos los resúmenes de un transportista (ej. las dos
 // quincenas de un mes) en una sola tabla, para verlas/imprimirlas/copiarlas
-// de corrido en vez de resumen por resumen. Solo lectura — editar montos o
-// quitar vueltas se sigue haciendo desde el resumen individual.
-function UnifiedSummaryModal({ open, onClose, group, faenaById, subfaenaById, cycleById }) {
+// de corrido en vez de resumen por resumen. También permite editar/quitar
+// vueltas desde acá mismo (mismo mecanismo que el resumen individual):
+// cada vuelta sabe a qué resumen pertenece (`items`/`paymentByTripId`), así
+// que editar recalcula el total de SU resumen de origen y quitar la
+// desvincula de ESE resumen puntual. Las vueltas ya pagadas quedan
+// bloqueadas fila por fila (t.status === "paid"), sin importar si otras
+// vueltas del mismo grupo siguen pendientes.
+function UnifiedSummaryModal({ open, onClose, group, faenaById, subfaenaById, cycleById, carriers = [], onChanged }) {
   const toast = useToast();
   const [trips, setTrips] = useState([]);
+  const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState("");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
+  const [editMode, setEditMode] = useState(false);
+  const [editingTrip, setEditingTrip] = useState(null);
+  const [confirmRemoveTrip, setConfirmRemoveTrip] = useState(null);
   const printRef = useRef(null);
 
   const fmtDate = (d) => {
@@ -2774,6 +2797,10 @@ function UnifiedSummaryModal({ open, onClose, group, faenaById, subfaenaById, cy
 
   useEffect(() => {
     if (!open || !group) return;
+    setEditMode(false);
+    setEditingTrip(null);
+    setConfirmRemoveTrip(null);
+    setItems(group.items);
     (async () => {
       setLoading(true);
       try {
@@ -2791,6 +2818,87 @@ function UnifiedSummaryModal({ open, onClose, group, faenaById, subfaenaById, cy
       }
     })();
   }, [open, group]);
+
+  // Qué resumen (item) es dueño de cada vuelta — necesario para saber a cuál
+  // recalcularle el total al editar, o de cuál desvincularla al quitar.
+  const paymentByTripId = useMemo(() => {
+    const map = new Map();
+    for (const p of items) for (const id of p.tripIds || []) map.set(id, p);
+    return map;
+  }, [items]);
+
+  const refreshTrips = async () => {
+    if (!group) return;
+    try {
+      const tripIds = new Set();
+      for (const p of items) for (const id of p.tripIds || []) tripIds.add(id);
+      const all = await tripsService.listByCarrier(group.carrierId);
+      const filtered = all
+        .filter((t) => tripIds.has(t.id))
+        .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+      setTrips(filtered);
+    } catch (err) {
+      toast.error("No se pudieron recargar las vueltas: " + (err.message || err));
+    }
+  };
+
+  const handleSaveTrip = async (form) => {
+    if (!editingTrip) return;
+    const owningPayment = paymentByTripId.get(editingTrip.id);
+    try {
+      // Preservar metadata de origen (ciclo/faena/subfaena) como hace
+      // TripsTab — el resumen no decide eso.
+      const payload = {
+        ...form,
+        cycleId: editingTrip.cycleId || null,
+        faenaId: editingTrip.faenaId || null,
+        subfaenaId: editingTrip.subfaenaId || null,
+      };
+      await tripsService.update(editingTrip.id, payload);
+      setEditingTrip(null);
+      await refreshTrips();
+      // El total del resumen de origen depende del amount: recalcular y
+      // persistir solo en ESE resumen (los demás items no se tocan).
+      if (owningPayment) {
+        const newTotal = (await tripsService.listByCarrier(group.carrierId))
+          .filter((t) => (owningPayment.tripIds || []).includes(t.id))
+          .reduce((s, t) => s + (Number(t.amount) || 0), 0);
+        await paymentsService.updateTotal(owningPayment.id, newTotal);
+      }
+      if (onChanged) await onChanged();
+      toast.success("Vuelta actualizada");
+    } catch (err) {
+      toast.error("Error al guardar: " + (err.message || err));
+    }
+  };
+
+  const handleRemoveTripFromPayment = async () => {
+    if (!confirmRemoveTrip) return;
+    const owningPayment = paymentByTripId.get(confirmRemoveTrip.id);
+    if (!owningPayment) {
+      toast.error("No se encontró el resumen de origen de esta vuelta");
+      setConfirmRemoveTrip(null);
+      return;
+    }
+    try {
+      await paymentsService.editSummaryTrips(owningPayment.id, {
+        removeTripIds: [confirmRemoveTrip.id],
+      });
+      setItems((prev) =>
+        prev.map((p) =>
+          p.id === owningPayment.id
+            ? { ...p, tripIds: (p.tripIds || []).filter((id) => id !== confirmRemoveTrip.id) }
+            : p,
+        ),
+      );
+      setTrips((prev) => prev.filter((t) => t.id !== confirmRemoveTrip.id));
+      setConfirmRemoveTrip(null);
+      if (onChanged) await onChanged();
+      toast.success("Vuelta quitada del resumen");
+    } catch (err) {
+      toast.error("Error al quitar: " + (err.message || err));
+    }
+  };
 
   if (!group) return null;
   const carrier = { id: group.carrierId, alias: group.alias, name: group.name };
@@ -2897,6 +3005,13 @@ function UnifiedSummaryModal({ open, onClose, group, faenaById, subfaenaById, cy
           >
             🖨 Imprimir
           </button>
+          <button
+            onClick={() => setEditMode((v) => !v)}
+            className={`rounded-md border px-3 py-1.5 text-sm ${editMode ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)] text-[var(--color-accent)]" : "border-[var(--color-border)] hover:bg-[var(--color-accent-soft)]"}`}
+            title="Editar detalles o quitar vueltas fila por fila. Las ya pagadas quedan bloqueadas."
+          >
+            {editMode ? "✓ Listo" : "✏️ Editar vueltas"}
+          </button>
         </>
       }
     >
@@ -2962,8 +3077,35 @@ function UnifiedSummaryModal({ open, onClose, group, faenaById, subfaenaById, cy
           faenaById={faenaById}
           subfaenaById={subfaenaById}
           cycleById={cycleById}
+          editable={editMode}
+          onEditTrip={editMode ? (t) => setEditingTrip(t) : null}
+          onRemoveTrip={editMode ? (t) => setConfirmRemoveTrip(t) : null}
+          isTripLocked={(t) => t.status === "paid"}
         />
       )}
+
+      <TripEditModal
+        open={!!editingTrip}
+        onClose={() => setEditingTrip(null)}
+        trip={editingTrip}
+        carriers={carriers}
+        days={[]}
+        onSave={handleSaveTrip}
+      />
+
+      <ConfirmDialog
+        open={!!confirmRemoveTrip}
+        title="Quitar vuelta del resumen"
+        message={
+          confirmRemoveTrip
+            ? `¿Sacar la vuelta del ${confirmRemoveTrip.date} (${fmtCurrency(confirmRemoveTrip.amount)}) de su resumen? La vuelta no se borra — vuelve a estar suelta para futuros resúmenes.`
+            : ""
+        }
+        confirmLabel="Quitar"
+        danger
+        onCancel={() => setConfirmRemoveTrip(null)}
+        onConfirm={handleRemoveTripFromPayment}
+      />
     </Modal>
   );
 }
@@ -3695,7 +3837,7 @@ function monthOfTrips(trips) {
 }
 
 const PrintableSummary = forwardRef(function PrintableSummary(
-  { payment, carrier, trips, periodLabel, faenaById, subfaenaById, cycleById, editable = false, onEditTrip, onRemoveTrip },
+  { payment, carrier, trips, periodLabel, faenaById, subfaenaById, cycleById, editable = false, onEditTrip, onRemoveTrip, isTripLocked },
   ref,
 ) {
   // Si el modal en edición pasó callbacks por trip, mostramos una columna
@@ -3743,6 +3885,7 @@ const PrintableSummary = forwardRef(function PrintableSummary(
             const sb = subfaenaById?.get(t.subfaenaId);
             const cy = cycleById?.get(t.cycleId);
             const labor = [fa?.name, sb?.name].filter(Boolean).join(" / ") || cy?.label || "—";
+            const locked = isTripLocked ? isTripLocked(t) : false;
             return (
               <tr key={t.id}>
                 <td style={cell}>{dateLabel(t.date)}</td>
@@ -3765,16 +3908,17 @@ const PrintableSummary = forwardRef(function PrintableSummary(
                       {onEditTrip && (
                         <button
                           type="button"
-                          onClick={() => onEditTrip(t)}
-                          title="Editar todos los detalles de esta vuelta"
+                          onClick={() => !locked && onEditTrip(t)}
+                          disabled={locked}
+                          title={locked ? "No se puede editar una vuelta pagada" : "Editar todos los detalles de esta vuelta"}
                           style={{
-                            background: "#dbeafe",
-                            color: "#1d4ed8",
-                            border: "1px solid #93c5fd",
+                            background: locked ? "#e5e7eb" : "#dbeafe",
+                            color: locked ? "#9ca3af" : "#1d4ed8",
+                            border: `1px solid ${locked ? "#d1d5db" : "#93c5fd"}`,
                             borderRadius: 4,
                             padding: "2px 6px",
                             fontSize: 11,
-                            cursor: "pointer",
+                            cursor: locked ? "not-allowed" : "pointer",
                           }}
                         >
                           ✏️
@@ -3783,16 +3927,17 @@ const PrintableSummary = forwardRef(function PrintableSummary(
                       {onRemoveTrip && (
                         <button
                           type="button"
-                          onClick={() => onRemoveTrip(t)}
-                          title="Quitar esta vuelta del resumen (no la borra)"
+                          onClick={() => !locked && onRemoveTrip(t)}
+                          disabled={locked}
+                          title={locked ? "No se puede quitar una vuelta pagada" : "Quitar esta vuelta del resumen (no la borra)"}
                           style={{
-                            background: "#fee2e2",
-                            color: "#b91c1c",
-                            border: "1px solid #fca5a5",
+                            background: locked ? "#e5e7eb" : "#fee2e2",
+                            color: locked ? "#9ca3af" : "#b91c1c",
+                            border: `1px solid ${locked ? "#d1d5db" : "#fca5a5"}`,
                             borderRadius: 4,
                             padding: "2px 6px",
                             fontSize: 11,
-                            cursor: "pointer",
+                            cursor: locked ? "not-allowed" : "pointer",
                           }}
                         >
                           ✕
