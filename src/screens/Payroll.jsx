@@ -1058,7 +1058,6 @@ export default function Payroll() {
       ) : (
         <WorkersHistory
           faenas={faenas}
-          onOpenPayroll={setDetailPayroll}
         />
       )}
 
@@ -4358,44 +4357,52 @@ function WorkerDetailRow({
                 catalogs={catalogs}
               />
 
-              {/* Resumen de pago — bruto/anticipos/bonos/neto */}
-              <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
-                <div className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] p-1.5">
-                  <div className="text-[9px] uppercase text-[var(--color-muted)]">Bruto</div>
-                  <div className="font-bold tabular-nums">{fmtCurrency(item.grossAmount || item.amount || 0)}</div>
-                </div>
-                <div className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] p-1.5">
-                  <div className="text-[9px] uppercase text-[var(--color-muted)]">Anticipos</div>
-                  <div className="font-bold tabular-nums text-amber-600 dark:text-amber-400">
-                    {Number(item.advance) > 0 ? `−${fmtCurrency(item.advance)}` : "—"}
-                  </div>
-                  {(item.anticipoApplications || []).length > 0 && (
-                    <div className="mt-0.5 text-[9px] text-[var(--color-muted)]">
-                      {(item.anticipoApplications || []).length} aplicación{(item.anticipoApplications || []).length === 1 ? "" : "es"}
-                    </div>
-                  )}
-                </div>
-                <div className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] p-1.5">
-                  <div className="text-[9px] uppercase text-[var(--color-muted)]">Bonos</div>
-                  <div className="font-bold tabular-nums text-emerald-600 dark:text-emerald-400">
-                    {Number(item.bonus) > 0 ? `+${fmtCurrency(item.bonus)}` : "—"}
-                  </div>
-                  {(item.bonoApplications || []).length > 0 && (
-                    <div className="mt-0.5 text-[9px] text-[var(--color-muted)]">
-                      {(item.bonoApplications || []).length} aplicación{(item.bonoApplications || []).length === 1 ? "" : "es"}
-                    </div>
-                  )}
-                </div>
-                <div className="rounded border border-[var(--color-accent)] bg-[var(--color-accent-soft)] p-1.5">
-                  <div className="text-[9px] uppercase text-[var(--color-muted)]">Neto</div>
-                  <div className="font-bold tabular-nums text-[var(--color-accent)]">{fmtCurrency(item.amount || 0)}</div>
-                </div>
-              </div>
+              <WorkerPaySummaryCards item={item} />
             </div>
           </td>
         </tr>
       )}
     </>
+  );
+}
+
+// Tarjetas bruto/anticipos/bonos/neto de un item de nómina — usado tanto en
+// la fila expandible de PayrollDetailModal como en el modal enfocado que se
+// abre desde el historial del trabajador (mismo contenido, dos entradas).
+function WorkerPaySummaryCards({ item }) {
+  return (
+    <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+      <div className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] p-1.5">
+        <div className="text-[9px] uppercase text-[var(--color-muted)]">Bruto</div>
+        <div className="font-bold tabular-nums">{fmtCurrency(item.grossAmount || item.amount || 0)}</div>
+      </div>
+      <div className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] p-1.5">
+        <div className="text-[9px] uppercase text-[var(--color-muted)]">Anticipos</div>
+        <div className="font-bold tabular-nums text-amber-600 dark:text-amber-400">
+          {Number(item.advance) > 0 ? `−${fmtCurrency(item.advance)}` : "—"}
+        </div>
+        {(item.anticipoApplications || []).length > 0 && (
+          <div className="mt-0.5 text-[9px] text-[var(--color-muted)]">
+            {(item.anticipoApplications || []).length} aplicación{(item.anticipoApplications || []).length === 1 ? "" : "es"}
+          </div>
+        )}
+      </div>
+      <div className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] p-1.5">
+        <div className="text-[9px] uppercase text-[var(--color-muted)]">Bonos</div>
+        <div className="font-bold tabular-nums text-emerald-600 dark:text-emerald-400">
+          {Number(item.bonus) > 0 ? `+${fmtCurrency(item.bonus)}` : "—"}
+        </div>
+        {(item.bonoApplications || []).length > 0 && (
+          <div className="mt-0.5 text-[9px] text-[var(--color-muted)]">
+            {(item.bonoApplications || []).length} aplicación{(item.bonoApplications || []).length === 1 ? "" : "es"}
+          </div>
+        )}
+      </div>
+      <div className="rounded border border-[var(--color-accent)] bg-[var(--color-accent-soft)] p-1.5">
+        <div className="text-[9px] uppercase text-[var(--color-muted)]">Neto</div>
+        <div className="font-bold tabular-nums text-[var(--color-accent)]">{fmtCurrency(item.amount || 0)}</div>
+      </div>
+    </div>
   );
 }
 
@@ -4407,10 +4414,10 @@ function WorkerDetailRow({
 function WorkerPaidDetailTables({ item, snapshot, snapshotLoading, cycleDetails, displayCycleLabel, catalogs }) {
   const toast = useToast();
   const [busy, setBusy] = useState("");
-  // porCiclo (default): una tabla por ciclo con subtotales, más un bloque
-  // final de ajustes. cronologico: todo en una sola tabla ordenada por
-  // fecha, con los anticipos/bonos interleaved en su fecha real.
-  const [viewMode, setViewMode] = useState("porCiclo");
+  // cronologico (default): todo en una sola tabla ordenada por fecha, con
+  // los anticipos/bonos interleaved en su fecha real. porCiclo: una tabla
+  // por ciclo con subtotales, más un bloque final de ajustes.
+  const [viewMode, setViewMode] = useState("cronologico");
   const captureRef = useRef(null);
 
   // Fallback "Por ciclo" simple (montos sin detalle día×labor).
@@ -5002,7 +5009,7 @@ const payrollDateISO = (p) => {
 
 const normRut = (r) => String(r || "").replace(/[^a-z0-9]/gi, "").toLowerCase();
 
-function WorkersHistory({ faenas, onOpenPayroll }) {
+function WorkersHistory({ faenas }) {
   const toast = useToast();
   const [loading, setLoading] = useState(true);
   const [allPayrolls, setAllPayrolls] = useState([]);
@@ -5256,7 +5263,13 @@ function WorkersHistory({ faenas, onOpenPayroll }) {
           <input
             type="text"
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={(e) => {
+              setSearch(e.target.value);
+              // Escribir una nueva búsqueda vuelve directo al listado (ya
+              // filtrado) sin el paso intermedio de clickear "Volver" —
+              // antes quedaba pegado en el detalle del trabajador anterior.
+              if (selectedRut) setSelectedRut(null);
+            }}
             placeholder="🔍 Buscar por RUT o nombre…"
             className="min-w-[220px] flex-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-sm outline-none focus:border-[var(--color-accent)]"
           />
@@ -5367,7 +5380,6 @@ function WorkersHistory({ faenas, onOpenPayroll }) {
             onBack={() => setSelectedRut(null)}
             onExport={handleExport}
             exporting={exporting}
-            onOpenPayroll={onOpenPayroll}
           />
         )}
       </div>
@@ -5417,7 +5429,92 @@ function WorkersList({ workers, search, onSelect }) {
   );
 }
 
-function WorkerDetail({ worker, onBack, onExport, exporting, onOpenPayroll }) {
+// Detalle de lo que un trabajador cobró EN UNA nómina puntual — mismo
+// contenido que la fila expandible dentro de PayrollDetailModal
+// (WorkerPaidDetailTables + WorkerPaySummaryCards), pero abierto directo
+// desde el historial del trabajador sin cargar la nómina completa con
+// todos los demás trabajadores. `payment.payroll` ya viene en memoria
+// (guardado al armar el historial), así que lo único que se pide a
+// Firestore acá es el snapshot de esa nómina puntual — igual que hace
+// PayrollDetailModal, un solo doc por id.
+function WorkerPayrollDetailModal({ open, payment, worker, catalogs, onClose, onShowFullHistory }) {
+  const payroll = payment?.payroll || null;
+  const [snapshot, setSnapshot] = useState(null);
+  const [snapshotLoading, setSnapshotLoading] = useState(false);
+
+  useEffect(() => {
+    if (!open || !payroll?.id) return;
+    let cancelled = false;
+    setSnapshotLoading(true);
+    payrollSnapshotsService.getById(payroll.id)
+      .then((doc) => {
+        if (cancelled) return;
+        if (doc) {
+          const { id: _omit, ...rest } = doc;
+          setSnapshot(rest);
+        } else if (payroll.snapshot) {
+          setSnapshot(payroll.snapshot);
+        } else {
+          setSnapshot(null);
+        }
+      })
+      .catch(() => { if (!cancelled) setSnapshot(payroll.snapshot || null); })
+      .finally(() => { if (!cancelled) setSnapshotLoading(false); });
+    return () => { cancelled = true; };
+  }, [open, payroll?.id]);
+
+  if (!payroll) return null;
+  const item = (payroll.items || []).find((it) => it.rut === worker.rut) || null;
+  const cycleDetails = payroll.cycleDetails || [];
+  const displayCycleLabel = (cycle) => payroll.cycleLabelOverrides?.[cycle.id] || cycle.label || cycle.id;
+
+  return (
+    <Modal open={open} onClose={onClose} title={`${worker.name} — ${payroll.name || "Nómina"}`} size="lg">
+      {!item ? (
+        <p className="rounded-md border border-dashed border-[var(--color-border)] py-8 text-center text-sm text-[var(--color-muted)]">
+          No se encontró el detalle de este trabajador en esta nómina.
+        </p>
+      ) : (
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+            <div className="flex flex-wrap items-center gap-2">
+              {item.groupLeader && (
+                <span className="rounded bg-[var(--color-surface-2)] px-1.5 py-0.5 text-[10px]">
+                  👥 <b>{item.groupLeader}</b>
+                </span>
+              )}
+              {item.email && (
+                <span className="text-[10px] text-[var(--color-muted)]">✉ {item.email}</span>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={onShowFullHistory}
+              className="rounded-md border border-[var(--color-accent)] bg-[var(--color-accent-soft)] px-2 py-0.5 text-[10px] font-medium text-[var(--color-accent)] hover:bg-[var(--color-accent)] hover:text-[var(--color-accent-fg)]"
+              title="Abrir el historial completo del trabajador, a través de todas las nóminas"
+            >
+              📅 Ver historial completo
+            </button>
+          </div>
+
+          <WorkerPaidDetailTables
+            item={item}
+            snapshot={snapshot}
+            snapshotLoading={snapshotLoading}
+            cycleDetails={cycleDetails}
+            displayCycleLabel={displayCycleLabel}
+            catalogs={catalogs}
+          />
+
+          <WorkerPaySummaryCards item={item} />
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+function WorkerDetail({ worker, onBack, onExport, exporting }) {
+  const { catalogs } = useCatalogs();
   // Chart: bar por pago, X = orden cronológico, Y = monto neto.
   const chartData = useMemo(() => {
     const sorted = [...worker.payments].sort((a, b) => a.payrollDate - b.payrollDate);
@@ -5430,6 +5527,11 @@ function WorkerDetail({ worker, onBack, onExport, exporting, onOpenPayroll }) {
   // (incluso los que aún no se pagaron / no entraron a una nómina) ordenados
   // por ciclo + fecha.
   const [summaryOpen, setSummaryOpen] = useState(false);
+  // Detalle de lo que fue EN ESA nómina puntual (no el historial libre del
+  // trabajador) — mismo contenido que la fila expandible dentro del detalle
+  // completo de la nómina (WorkerPaidDetailTables + tarjetas de resumen),
+  // pero accesible directo desde acá sin abrir la nómina entera.
+  const [payDetailFor, setPayDetailFor] = useState(null);
 
   return (
     <div className="space-y-4">
@@ -5468,6 +5570,18 @@ function WorkerDetail({ worker, onBack, onExport, exporting, onOpenPayroll }) {
         onClose={() => setSummaryOpen(false)}
       />
 
+      <WorkerPayrollDetailModal
+        open={!!payDetailFor}
+        payment={payDetailFor}
+        worker={worker}
+        catalogs={catalogs}
+        onClose={() => setPayDetailFor(null)}
+        onShowFullHistory={() => {
+          setPayDetailFor(null);
+          setSummaryOpen(true);
+        }}
+      />
+
       {/* Métricas */}
       <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
         <MetricCard label="Total neto pagado" value={fmtCurrency(worker.totalAmount)} accent />
@@ -5504,7 +5618,8 @@ function WorkerDetail({ worker, onBack, onExport, exporting, onOpenPayroll }) {
           {worker.payments.map((pay, i) => (
             <button
               key={`${pay.payrollId}_${i}`}
-              onClick={() => onOpenPayroll?.(pay.payroll)}
+              onClick={() => setPayDetailFor(pay)}
+              title="Ver el detalle de lo que fue en esta nómina"
               className="flex w-full items-start justify-between gap-3 px-3 py-2.5 text-left text-sm hover:bg-[var(--color-accent-soft)]"
             >
               <div className="min-w-0 flex-1">
