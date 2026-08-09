@@ -12,8 +12,6 @@ import {
   paymentsService,
   transportPayrollsService,
   TRIP_KINDS,
-  groupTripsByDay,
-  groupTripsByFaena,
   titleCase,
 } from "../services/transportsService";
 import { faenasService, subfaenasService, cyclesService } from "../services";
@@ -42,6 +40,17 @@ const TABS = [
 
 export default function Transports() {
   const [tab, setTab] = useState("carriers");
+  // Deep-link puntual desde "Transportistas" → "Vueltas": guarda a qué
+  // transportista saltar y se consume una sola vez al montar TripsTab (ver
+  // su prop `initialCarrierId`). Cualquier click directo en un tab del nav
+  // (incluido "Vueltas") lo limpia, para que no quede un filtro fantasma si
+  // el usuario vuelve a la tab por su cuenta más tarde.
+  const [tripsCarrierPreset, setTripsCarrierPreset] = useState(null);
+
+  const openCarrierTrips = (carrier) => {
+    setTripsCarrierPreset(carrier);
+    setTab("trips");
+  };
 
   return (
     <div>
@@ -53,7 +62,10 @@ export default function Transports() {
         {TABS.map((t) => (
           <button
             key={t.value}
-            onClick={() => setTab(t.value)}
+            onClick={() => {
+              setTripsCarrierPreset(null);
+              setTab(t.value);
+            }}
             className={`relative px-4 py-2 text-sm transition-colors ${
               tab === t.value ? "font-medium text-[var(--color-accent)]" : "text-[var(--color-muted)] hover:text-[var(--color-text)]"
             }`}
@@ -64,8 +76,8 @@ export default function Transports() {
         ))}
       </div>
 
-      {tab === "carriers" && <CarriersTab />}
-      {tab === "trips" && <TripsTab />}
+      {tab === "carriers" && <CarriersTab onViewTrips={openCarrierTrips} />}
+      {tab === "trips" && <TripsTab initialCarrierId={tripsCarrierPreset?.id || null} />}
       {tab === "byFaena" && <FaenaBatchTab />}
       {tab === "payments" && <PaymentsTab />}
       {tab === "payrolls" && <PayrollsTab />}
@@ -77,10 +89,9 @@ export default function Transports() {
 // CARRIERS TAB
 // ============================================================
 
-function CarriersTab() {
+function CarriersTab({ onViewTrips }) {
   const { carriers, addCarrier, updateCarrier, softDeleteCarrier, restoreCarrier } = useCarriers();
   const [edit, setEdit] = useState(null); // null | "new" | carrier
-  const [viewingTrips, setViewingTrips] = useState(null); // carrier cuyas vueltas se están viendo
   const [showInactive, setShowInactive] = useState(false);
   // Filtro por tipo (all/own/contracted) y orden de la grilla.
   const [typeFilter, setTypeFilter] = useState("all");
@@ -261,11 +272,11 @@ function CarriersTab() {
                 key={c.id}
                 role="button"
                 tabIndex={0}
-                onClick={() => setViewingTrips(c)}
+                onClick={() => onViewTrips(c)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === " ") {
                     e.preventDefault();
-                    setViewingTrips(c);
+                    onViewTrips(c);
                   }
                 }}
                 className={`group relative cursor-pointer overflow-hidden rounded-lg border bg-[var(--color-surface)] shadow-sm transition-all hover:shadow-md ${
@@ -370,366 +381,7 @@ function CarriersTab() {
       )}
 
       <CarrierEditModal open={!!edit} carrier={edit === "new" ? null : edit} onClose={() => setEdit(null)} onSave={handleSave} />
-      <CarrierTripsModal
-        open={!!viewingTrips}
-        carrier={viewingTrips}
-        onClose={() => setViewingTrips(null)}
-      />
     </div>
-  );
-}
-
-// Listado de vueltas de un transportista. Carga todas sus vueltas (no
-// filtrado por ciclo). Permite editar via TripEditModal y eliminar las que
-// no estén pagadas. Filtros: estado y rango de fechas.
-function CarrierTripsModal({ open, onClose, carrier }) {
-  const toast = useToast();
-  const { carriers } = useCarriers();
-  const [trips, setTrips] = useState([]);
-  const [cycles, setCycles] = useState([]);
-  const [faenas, setFaenas] = useState([]);
-  const [subfaenas, setSubfaenas] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [statusFilter, setStatusFilter] = useState("");
-  // Default: rango últimos 3 meses (today - 90 días) → today. Reduce el
-  // ruido de vueltas antiguas y la carga inicial. El usuario puede ampliar
-  // o limpiar el rango cuando quiera ver todo.
-  const defaultRange = () => {
-    const today = new Date();
-    const from = new Date(today);
-    from.setMonth(from.getMonth() - 3);
-    const iso = (d) => d.toISOString().slice(0, 10);
-    return { from: iso(from), to: iso(today) };
-  };
-  const [dateFrom, setDateFrom] = useState("");
-  const [dateTo, setDateTo] = useState("");
-  // Toggle para incluir vueltas ya pagadas. Por default solo pending — las
-  // pagadas son las más numerosas y casi nunca se necesitan al abrir la
-  // vista. Cuando se activa, hacemos un re-fetch que las trae todas.
-  const [includePaid, setIncludePaid] = useState(false);
-  const [editing, setEditing] = useState(null); // trip object o null
-  const [confirmDel, setConfirmDel] = useState(null);
-
-  const reload = async (opts = {}) => {
-    if (!carrier?.id) return;
-    const wantPaid = opts.includePaid ?? includePaid;
-    setLoading(true);
-    try {
-      const [tripList, cyc, fa, sub] = await Promise.all([
-        tripsService.listByCarrier(carrier.id, { onlyPending: !wantPaid }),
-        cyclesService.list({ cache: true, persist: true, ttl: 5 * 60 * 1000 }),
-        faenasService.list({ cache: true, persist: true, ttl: 10 * 60 * 1000 }),
-        subfaenasService.list({ cache: true, persist: true, ttl: 10 * 60 * 1000 }),
-      ]);
-      tripList.sort((a, b) => (a.date < b.date ? 1 : -1));
-      setTrips(tripList);
-      setCycles(cyc);
-      setFaenas(fa);
-      setSubfaenas(sub);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    if (open) {
-      // Al abrir el modal: rango default últimos 3 meses, sin pagadas.
-      const r = defaultRange();
-      setDateFrom(r.from);
-      setDateTo(r.to);
-      setStatusFilter("");
-      setIncludePaid(false);
-      reload({ includePaid: false });
-    } else {
-      setEditing(null);
-      setConfirmDel(null);
-      setStatusFilter("");
-      setDateFrom("");
-      setDateTo("");
-      setIncludePaid(false);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, carrier?.id]);
-
-  // Cuando el usuario alterna "incluir pagadas" re-fetcheamos: la decisión
-  // está acoplada al query del server (onlyPending), no es solo un filtro
-  // cliente. El primer load ya se dispara en el useEffect de arriba; este
-  // hook responde solo a cambios posteriores.
-  const isFirstToggle = useRef(true);
-  useEffect(() => {
-    if (!open) return;
-    if (isFirstToggle.current) { isFirstToggle.current = false; return; }
-    reload({ includePaid });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [includePaid]);
-
-  const cycleById = useMemo(() => new Map(cycles.map((c) => [c.id, c])), [cycles]);
-  const faenaById = useMemo(() => new Map(faenas.map((f) => [f.id, f])), [faenas]);
-  const subfaenaById = useMemo(() => new Map(subfaenas.map((s) => [s.id, s])), [subfaenas]);
-
-  const filtered = useMemo(() => {
-    return trips.filter((t) => {
-      if (statusFilter && t.status !== statusFilter) return false;
-      if (dateFrom && t.date && t.date < dateFrom) return false;
-      if (dateTo && t.date && t.date > dateTo) return false;
-      return true;
-    });
-  }, [trips, statusFilter, dateFrom, dateTo]);
-
-  const totalAmount = filtered.reduce((s, t) => s + (Number(t.amount) || 0), 0);
-  const pendingCount = filtered.filter((t) => t.status === "pending").length;
-  const paidCount = filtered.filter((t) => t.status === "paid").length;
-
-  const handleSave = async (form) => {
-    if (!editing) return;
-    // Preservar contexto del ciclo/faena/subfaena originales (no se editan
-    // desde acá; si el usuario quiere mover la vuelta a otro ciclo lo hace
-    // desde el módulo del ciclo).
-    const payload = {
-      ...form,
-      cycleId: editing.cycleId || null,
-      faenaId: editing.faenaId || null,
-      subfaenaId: editing.subfaenaId || null,
-    };
-    await tripsService.update(editing.id, payload);
-    setEditing(null);
-    await reload();
-  };
-
-  const handleDelete = async () => {
-    if (!confirmDel) return;
-    try {
-      await tripsService.remove(confirmDel.id);
-      setConfirmDel(null);
-      await reload();
-    } catch (err) {
-      toast.error(err.message || "Error al eliminar");
-    }
-  };
-
-  if (!carrier) return null;
-
-  return (
-    <>
-      <Modal
-        open={open}
-        onClose={onClose}
-        title={`🚐 Vueltas — ${carrier.alias} · ${carrier.name}`}
-        size="3xl"
-      >
-        <div className="mb-3 flex flex-wrap items-end justify-between gap-2 text-xs">
-          <div className="flex flex-wrap items-center gap-2">
-            <label className={`flex items-center gap-1 rounded-md border px-2 py-1 ${
-              includePaid
-                ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
-                : "border-[var(--color-border)] bg-[var(--color-surface-2)]"
-            }`}>
-              <input
-                type="checkbox"
-                checked={includePaid}
-                onChange={(e) => setIncludePaid(e.target.checked)}
-              />
-              <span>{includePaid ? "✓ Pagadas incluidas" : "Incluir pagadas"}</span>
-            </label>
-            {includePaid && (
-              <div className="flex gap-1">
-                {[
-                  { v: "", l: "Todas" },
-                  { v: "pending", l: "⏳ Pendientes" },
-                  { v: "paid", l: "✓ Pagadas" },
-                ].map((o) => (
-                  <button
-                    key={o.v}
-                    type="button"
-                    onClick={() => setStatusFilter(o.v)}
-                    className={`rounded-md border px-2 py-1 ${
-                      statusFilter === o.v
-                        ? "border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
-                        : "border-[var(--color-border)] bg-[var(--color-surface-2)] hover:bg-[var(--color-accent-soft)]"
-                    }`}
-                  >
-                    {o.l}
-                  </button>
-                ))}
-              </div>
-            )}
-            <label className="flex items-center gap-1">
-              <span className="text-[var(--color-muted)]">Desde</span>
-              <input
-                type="date"
-                value={dateFrom}
-                onChange={(e) => setDateFrom(e.target.value)}
-                className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1"
-              />
-            </label>
-            <label className="flex items-center gap-1">
-              <span className="text-[var(--color-muted)]">Hasta</span>
-              <input
-                type="date"
-                value={dateTo}
-                onChange={(e) => setDateTo(e.target.value)}
-                className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1"
-              />
-            </label>
-            <button
-              type="button"
-              onClick={() => {
-                const r = defaultRange();
-                setDateFrom(r.from);
-                setDateTo(r.to);
-              }}
-              className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 hover:bg-[var(--color-accent-soft)]"
-              title="Volver al rango default (últimos 3 meses)"
-            >
-              ⟲ 3 meses
-            </button>
-            <button
-              type="button"
-              onClick={() => { setDateFrom(""); setDateTo(""); }}
-              className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 hover:bg-[var(--color-accent-soft)]"
-              title="Ver todas las vueltas sin filtro de fecha"
-            >
-              ∞ Sin rango
-            </button>
-            {(statusFilter || dateFrom || dateTo) && (
-              <button
-                type="button"
-                onClick={() => {
-                  setStatusFilter("");
-                  setDateFrom("");
-                  setDateTo("");
-                }}
-                className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 hover:bg-[var(--color-accent-soft)]"
-              >
-                ✕ Limpiar
-              </button>
-            )}
-          </div>
-          <div className="text-sm">
-            <span className="text-[var(--color-muted)]">
-              {filtered.length} vuelta{filtered.length === 1 ? "" : "s"} (
-              {pendingCount} pend{includePaid ? ` · ${paidCount} pag` : ""}) ·{" "}
-            </span>
-            <span className="font-semibold tabular-nums">{fmtCurrency(totalAmount)}</span>
-          </div>
-        </div>
-
-        {loading ? (
-          <div className="py-8 text-center text-sm text-[var(--color-muted)]">Cargando...</div>
-        ) : filtered.length === 0 ? (
-          <div className="rounded-md border border-dashed border-[var(--color-border)] py-8 text-center text-sm text-[var(--color-muted)]">
-            {trips.length === 0
-              ? (includePaid
-                  ? "Este transportista no tiene vueltas en el rango seleccionado"
-                  : "Sin vueltas pendientes en el rango. Activá \"Incluir pagadas\" o ampliá el rango para ver más.")
-              : "Sin vueltas para los filtros aplicados"}
-          </div>
-        ) : (
-          <div className="max-h-[55vh] overflow-auto rounded-md border border-[var(--color-border)]">
-            <table className="w-full text-sm">
-              <thead className="sticky top-0 bg-[var(--color-surface-2)] text-left text-[var(--color-muted)]">
-                <tr>
-                  <th className="px-2 py-2">Fecha</th>
-                  <th className="px-2 py-2">Vehículo</th>
-                  <th className="px-2 py-2">Ciclo</th>
-                  <th className="px-2 py-2">Faena / Subfaena</th>
-                  <th className="px-2 py-2">Lugar → Destino</th>
-                  <th className="px-2 py-2 text-right">#Pers</th>
-                  <th className="px-2 py-2">Tipo</th>
-                  <th className="px-2 py-2 text-right">Vlts</th>
-                  <th className="px-2 py-2 text-right">Tarifa</th>
-                  <th className="px-2 py-2 text-right">Monto</th>
-                  <th className="px-2 py-2">Estado</th>
-                  <th className="px-2 py-2"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.map((t) => {
-                  const cy = cycleById.get(t.cycleId);
-                  const fa = faenaById.get(t.faenaId);
-                  const sb = subfaenaById.get(t.subfaenaId);
-                  const isPaid = t.status === "paid";
-                  return (
-                    <tr key={t.id} className="border-t border-[var(--color-border)] hover:bg-[var(--color-accent-soft)]">
-                      <td className="px-2 py-1.5 tabular-nums">{t.date}</td>
-                      <td className="px-2 py-1.5">{t.vehicleAlias || "—"}</td>
-                      <td className="px-2 py-1.5">{cy?.label || t.cycleId || "—"}</td>
-                      <td className="px-2 py-1.5">
-                        {fa?.name || "—"}
-                        {sb && <span className="text-[var(--color-muted)]"> / {sb.name}</span>}
-                      </td>
-                      <td className="px-2 py-1.5">
-                        {titleCase(t.lugar) || "—"}
-                        {t.destino && <span className="text-[var(--color-muted)]"> → {titleCase(t.destino)}</span>}
-                      </td>
-                      <td className="px-2 py-1.5 text-right tabular-nums">{t.personCount ?? "—"}</td>
-                      <td className="px-2 py-1.5">{t.kind === "approach" ? "acerc." : "vuelta"}</td>
-                      <td className="px-2 py-1.5 text-right tabular-nums">{t.qty}</td>
-                      <td className="px-2 py-1.5 text-right tabular-nums">{fmtCurrency(t.rate)}</td>
-                      <td className="px-2 py-1.5 text-right font-medium tabular-nums">{fmtCurrency(t.amount)}</td>
-                      <td className="px-2 py-1.5">
-                        {isPaid ? (
-                          <span className="rounded-full bg-[var(--color-success-soft)] px-1.5 py-0.5 text-[11px] text-[var(--color-success)]">
-                            pagado
-                          </span>
-                        ) : (
-                          <span className="rounded-full bg-[var(--color-warning-soft)] px-1.5 py-0.5 text-[11px] text-[var(--color-warning)]">
-                            pendiente
-                          </span>
-                        )}
-                      </td>
-                      <td className="px-2 py-1.5">
-                        <div className="flex gap-1">
-                          <button
-                            onClick={() => setEditing(t)}
-                            disabled={isPaid}
-                            title={isPaid ? "No se puede editar una vuelta pagada" : "Editar"}
-                            className="rounded px-2 py-0.5 text-xs text-[var(--color-accent)] hover:bg-[var(--color-accent-soft)] disabled:opacity-40 disabled:cursor-not-allowed"
-                          >
-                            Editar
-                          </button>
-                          <button
-                            onClick={() => setConfirmDel(t)}
-                            disabled={isPaid}
-                            title={isPaid ? "No se puede eliminar una vuelta pagada" : "Eliminar"}
-                            className="rounded px-2 py-0.5 text-xs text-[var(--color-danger)] hover:bg-[var(--color-danger-soft)] disabled:opacity-40 disabled:cursor-not-allowed"
-                          >
-                            ✕
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Modal>
-
-      <TripEditModal
-        open={!!editing}
-        onClose={() => setEditing(null)}
-        trip={editing}
-        carriers={carriers}
-        days={[]}
-        onSave={handleSave}
-      />
-
-      <ConfirmDialog
-        open={!!confirmDel}
-        title="Eliminar vuelta"
-        message={
-          confirmDel
-            ? `¿Eliminar la vuelta del ${confirmDel.date} (${fmtCurrency(confirmDel.amount)})?`
-            : ""
-        }
-        confirmLabel="Eliminar"
-        danger
-        onCancel={() => setConfirmDel(null)}
-        onConfirm={handleDelete}
-      />
-    </>
   );
 }
 
@@ -878,17 +530,30 @@ function CarrierEditModal({ open, onClose, carrier, onSave }) {
 // TRIPS TAB
 // ============================================================
 
-function TripsTab() {
+function TripsTab({ initialCarrierId = null }) {
   const isMobile = useIsMobile();
+  const toast = useToast();
   const { activeCarriers, carriers } = useCarriers();
   const [trips, setTrips] = useState([]);
   const [cycles, setCycles] = useState([]);
   const [faenas, setFaenas] = useState([]);
   const [subfaenas, setSubfaenas] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [filter, setFilter] = useState({ carrierId: "", status: "", cycleId: "", faenaId: "" });
+  // `initialCarrierId` llega una sola vez al montar (deep-link desde
+  // "Transportistas" → click en un transportista), TripsTab se remonta
+  // entero cada vez que se cambia de tab así que alcanza con leerlo en el
+  // init perezoso — no hace falta sincronizarlo con un efecto.
+  const [filter, setFilter] = useState({ carrierId: initialCarrierId || "", status: "", cycleId: "", faenaId: "" });
   const [sinceDate, setSinceDate] = useState(() => isoDateNDaysAgo(DEFAULT_HISTORY_DAYS));
   const [showHistoric, setShowHistoric] = useState(false);
+  // Filtro adicional de fecha "hasta" (client-side, no dispara re-fetch) +
+  // orden de las tablas por columna — mismas funcionalidades que tenía el
+  // modal por transportista que se fusionó acá.
+  const [dateTo, setDateTo] = useState("");
+  const [sortBy, setSortBy] = useState("date");
+  const [sortDir, setSortDir] = useState("desc");
+  const [editing, setEditing] = useState(null); // trip object o null
+  const [confirmDel, setConfirmDel] = useState(null);
 
   const reload = async () => {
     setLoading(true);
@@ -938,11 +603,123 @@ function TripsTab() {
       if (filter.status && t.status !== filter.status) return false;
       if (filter.cycleId && t.cycleId !== filter.cycleId) return false;
       if (filter.faenaId && t.faenaId !== filter.faenaId) return false;
+      if (dateTo && t.date && t.date > dateTo) return false;
       return true;
     });
-  }, [trips, filter]);
+  }, [trips, filter, dateTo]);
 
   const total = filtered.reduce((s, t) => s + (Number(t.amount) || 0), 0);
+
+  // El label del ciclo ya viene como "Faena/Subfaena/Ciclo N" — mostrado
+  // junto a la columna Faena/Subfaena repetiría el mismo nombre dos veces,
+  // así que acá solo interesa el tramo final.
+  const cycleShort = (cy) => {
+    const l = cy?.label || "";
+    const idx = l.lastIndexOf("/");
+    return idx >= 0 ? l.slice(idx + 1) : l;
+  };
+
+  const SORT_OPTIONS = [
+    { v: "date", l: "Fecha" },
+    { v: "vehicle", l: "Vehículo" },
+    { v: "faena", l: "Faena / Ciclo" },
+    { v: "destino", l: "Lugar / Destino" },
+    { v: "personas", l: "Personas" },
+    { v: "vueltas", l: "Vueltas" },
+    { v: "monto", l: "Monto" },
+    { v: "estado", l: "Estado" },
+  ];
+
+  // Orden compartido por todas las tablas/tarjetas de transportista — un
+  // solo estado global en vez de uno por grupo, más simple y consistente.
+  const sortTrips = (list) => {
+    const keyOf = (t) => {
+      switch (sortBy) {
+        case "date": return t.date || "";
+        case "vehicle": return (t.vehicleAlias || "").toLowerCase();
+        case "faena": {
+          const fa = faenaById.get(t.faenaId);
+          const sb = subfaenaById.get(t.subfaenaId);
+          return `${fa?.name || ""}/${sb?.name || ""}`.toLowerCase();
+        }
+        case "destino": return `${t.lugar || ""} ${t.destino || ""}`.toLowerCase();
+        case "personas": return Number(t.personCount) || 0;
+        case "vueltas": return Number(t.qty) || 0;
+        case "monto": return Number(t.amount) || 0;
+        case "estado": return t.status || "";
+        default: return "";
+      }
+    };
+    const arr = [...list];
+    arr.sort((a, b) => {
+      const ka = keyOf(a);
+      const kb = keyOf(b);
+      const cmp = typeof ka === "number" && typeof kb === "number"
+        ? ka - kb
+        : String(ka).localeCompare(String(kb), "es");
+      return sortDir === "asc" ? cmp : -cmp;
+    });
+    return arr;
+  };
+
+  const toggleSort = (field) => {
+    if (sortBy === field) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    else { setSortBy(field); setSortDir("asc"); }
+  };
+
+  // Función simple (no componente) para evitar que React trate cada header
+  // como un tipo de componente nuevo en cada render y lo remonte de más.
+  const sortTh = (field, label, align) => {
+    const active = sortBy === field;
+    return (
+      <th
+        key={field}
+        onClick={() => toggleSort(field)}
+        title="Ordenar"
+        className={`cursor-pointer select-none px-2 py-2 hover:text-[var(--color-foreground)] ${align === "right" ? "text-right" : ""}`}
+      >
+        <span className={`inline-flex items-center gap-1 ${align === "right" ? "flex-row-reverse" : ""}`}>
+          {label}
+          <span className={active ? "text-[var(--color-accent)]" : "text-[var(--color-muted)] opacity-50"}>
+            {active ? (sortDir === "asc" ? "▲" : "▼") : "⇅"}
+          </span>
+        </span>
+      </th>
+    );
+  };
+
+  const handleSaveTrip = async (form) => {
+    if (!editing) return;
+    // Preservar contexto del ciclo/faena/subfaena originales (no se editan
+    // desde acá; si el usuario quiere mover la vuelta a otro ciclo lo hace
+    // desde el módulo del ciclo).
+    const payload = {
+      ...form,
+      cycleId: editing.cycleId || null,
+      faenaId: editing.faenaId || null,
+      subfaenaId: editing.subfaenaId || null,
+    };
+    try {
+      await tripsService.update(editing.id, payload);
+      setEditing(null);
+      await reload();
+      toast.success("Vuelta actualizada");
+    } catch (err) {
+      toast.error("Error al guardar: " + (err.message || err));
+    }
+  };
+
+  const handleDeleteTrip = async () => {
+    if (!confirmDel) return;
+    try {
+      await tripsService.remove(confirmDel.id);
+      setConfirmDel(null);
+      await reload();
+      toast.success("Vuelta eliminada");
+    } catch (err) {
+      toast.error(err.message || "Error al eliminar");
+    }
+  };
 
   // Agrupado por transportista. Cada grupo trae el alias, el total, y el
   // desglose pendiente/pagado para que el header sea informativo sin tener
@@ -987,8 +764,30 @@ function TripsTab() {
   const expandAll = () => setExpandedCarriers(new Set(byCarrier.map((g) => g.carrierId)));
   const collapseAll = () => setExpandedCarriers(new Set());
 
+  const filterCarrier = filter.carrierId ? carrierById.get(filter.carrierId) : null;
+
   return (
+    <>
     <div>
+      {/* Título de transportista: aparece tanto si se llegó acá por el
+          deep-link desde "Transportistas" (click en un transportista) como
+          si se eligió a mano en el filtro de abajo — mismo mecanismo, mismo
+          título que tenía el modal por transportista que se fusionó acá. */}
+      {filterCarrier && (
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-[var(--color-accent)] bg-[var(--color-accent-soft)] px-3 py-2 text-sm">
+          <span className="font-medium text-[var(--color-accent)]">
+            🚐 Vueltas — {filterCarrier.alias}{filterCarrier.name ? ` · ${filterCarrier.name}` : ""}
+          </span>
+          <button
+            type="button"
+            onClick={() => setFilter((f) => ({ ...f, carrierId: "" }))}
+            className="rounded border border-[var(--color-accent)] px-2 py-1 text-xs text-[var(--color-accent)] hover:bg-[var(--color-accent)] hover:text-[var(--color-accent-fg)]"
+          >
+            ✕ Ver todos los transportistas
+          </button>
+        </div>
+      )}
+
       <div className="mb-4 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)] p-3">
         <div className="grid grid-cols-1 gap-2 md:grid-cols-5">
           <Select
@@ -1020,7 +819,7 @@ function TripsTab() {
             value={filter.cycleId}
             onChange={(v) => setFilter((f) => ({ ...f, cycleId: v }))}
             options={cycleOptionsForFilter.map((c) => ({ value: c.id, label: c.label || c.id }))}
-            placeholder={filter.faenaId ? "Todos" : "Elegí una faena primero"}
+            placeholder={filter.faenaId ? "Todos" : "Elige una faena primero"}
             disabled={!filter.faenaId}
           />
           <div className="flex items-end justify-end text-sm">
@@ -1041,7 +840,16 @@ function TripsTab() {
             className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-xs outline-none focus:border-[var(--color-accent)] disabled:opacity-50"
           />
           <span className="text-[var(--color-muted)]">en adelante</span>
-          <label className="ml-2 flex items-center gap-1">
+          <label className="flex items-center gap-1">
+            <span className="text-[var(--color-muted)]">hasta</span>
+            <input
+              type="date"
+              value={dateTo}
+              onChange={(e) => setDateTo(e.target.value)}
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-xs outline-none focus:border-[var(--color-accent)]"
+            />
+          </label>
+          <label className="flex items-center gap-1">
             <input
               type="checkbox"
               checked={showHistoric}
@@ -1049,7 +857,28 @@ function TripsTab() {
             />
             <span>ver histórico completo</span>
           </label>
-          {!showHistoric && (
+          <span className="mx-1 h-4 w-px bg-[var(--color-border)]" />
+          <label className="flex items-center gap-1">
+            <span className="text-[var(--color-muted)]">Ordenar</span>
+            <select
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value)}
+              className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1"
+            >
+              {SORT_OPTIONS.map((o) => (
+                <option key={o.v} value={o.v}>{o.l}</option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            onClick={() => setSortDir((d) => (d === "asc" ? "desc" : "asc"))}
+            className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 hover:bg-[var(--color-accent-soft)]"
+            title={sortDir === "asc" ? "Ascendente — clic para invertir" : "Descendente — clic para invertir"}
+          >
+            {sortDir === "asc" ? "↑ Asc" : "↓ Desc"}
+          </button>
+          {!showHistoric && !dateTo && (
             <span className="ml-auto text-[var(--color-muted)]">
               Por defecto últimos {DEFAULT_HISTORY_DAYS} días
             </span>
@@ -1090,7 +919,9 @@ function TripsTab() {
           </div>
           <div className="space-y-2">
             {byCarrier.map((g) => {
-              const expanded = expandedCarriers.has(g.carrierId);
+              // Cuando el filtro deja un único transportista visible (deep-link
+              // o elegido a mano) no tiene sentido que arranque colapsado.
+              const expanded = expandedCarriers.has(g.carrierId) || byCarrier.length === 1;
               const carrierObj = carrierById.get(g.carrierId);
               const isOwn = carrierObj?.type === "own";
               const bandColor = g.carrierId === "__none__" ? "var(--color-muted)" : (isOwn ? "var(--color-accent)" : "#d97706");
@@ -1136,11 +967,12 @@ function TripsTab() {
                   {expanded && (
                     isMobile ? (
                       <div className="space-y-2 p-2">
-                        {g.trips.map((t) => {
+                        {sortTrips(g.trips).map((t) => {
                           const cy = cycleById.get(t.cycleId);
                           const fa = faenaById.get(t.faenaId);
                           const sb = subfaenaById.get(t.subfaenaId);
                           const zero = !(Number(t.amount) > 0);
+                          const isPaid = t.status === "paid";
                           return (
                             <div
                               key={t.id}
@@ -1152,7 +984,7 @@ function TripsTab() {
                                   <div className={`font-semibold tabular-nums ${zero ? "italic text-[var(--color-muted)]" : "text-[var(--color-accent)]"}`}>
                                     {fmtCurrency(t.amount)}
                                   </div>
-                                  {t.status === "paid" ? (
+                                  {isPaid ? (
                                     <span className="rounded-full bg-[var(--color-success-soft)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--color-success)]">
                                       pagado
                                     </span>
@@ -1167,39 +999,49 @@ function TripsTab() {
                                 <div>
                                   <span className="text-[var(--color-muted)]">Vehículo: </span>
                                   {t.vehicleAlias || "—"}
+                                  {t.kind === "approach" && (
+                                    <span className="ml-1 rounded-full bg-purple-100 px-1.5 py-0.5 text-[10px] font-medium text-purple-700 dark:bg-purple-900/30 dark:text-purple-300">
+                                      acercamiento
+                                    </span>
+                                  )}
                                 </div>
                                 <div>
-                                  <span className="text-[var(--color-muted)]">Ciclo: </span>
-                                  {cy?.label || t.cycleId}
-                                </div>
-                                <div className="col-span-2">
-                                  <span className="text-[var(--color-muted)]">Faena: </span>
-                                  {fa?.name || "—"}
-                                  {sb && <span className="text-[var(--color-muted)]"> / {sb.name}</span>}
-                                </div>
-                                <div>
-                                  <span className="text-[var(--color-muted)]">Destino: </span>
-                                  {titleCase(t.destino) || "—"}
-                                </div>
-                                <div>
-                                  <span className="text-[var(--color-muted)]">#Pers: </span>
+                                  <span className="text-[var(--color-muted)]">Personas: </span>
                                   {t.personCount ?? "—"}
                                 </div>
-                                <div>
-                                  <span
-                                    className={`rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
-                                      t.kind === "approach"
-                                        ? "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300"
-                                        : "bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-300"
-                                    }`}
-                                  >
-                                    {t.kind === "approach" ? "acercamiento" : "vuelta"}
-                                  </span>
+                                <div className="col-span-2">
+                                  <span className="text-[var(--color-muted)]">Faena / Ciclo: </span>
+                                  {fa?.name || "—"}
+                                  {sb && <span className="text-[var(--color-muted)]"> / {sb.name}</span>}
+                                  {cy && <span className="text-[var(--color-muted)]"> · {cycleShort(cy)}</span>}
+                                </div>
+                                <div className="col-span-2">
+                                  <span className="text-[var(--color-muted)]">Lugar → Destino: </span>
+                                  {titleCase(t.lugar) || "—"}
+                                  {t.destino && <span className="text-[var(--color-muted)]"> → {titleCase(t.destino)}</span>}
                                 </div>
                                 <div>
-                                  <span className="text-[var(--color-muted)]">Vlts/Tarifa: </span>
-                                  <span className="tabular-nums">{t.qty} × {fmtCurrency(t.rate)}</span>
+                                  <span className="text-[var(--color-muted)]">Vueltas: </span>
+                                  <span className="tabular-nums">{t.qty}</span>
                                 </div>
+                              </div>
+                              <div className="flex justify-end gap-1 border-t border-[var(--color-border)] pt-1.5">
+                                <button
+                                  onClick={() => setEditing(t)}
+                                  disabled={isPaid}
+                                  title={isPaid ? "No se puede editar una vuelta pagada" : "Editar"}
+                                  className="rounded px-2 py-0.5 text-xs text-[var(--color-accent)] hover:bg-[var(--color-accent-soft)] disabled:opacity-40 disabled:cursor-not-allowed"
+                                >
+                                  Editar
+                                </button>
+                                <button
+                                  onClick={() => setConfirmDel(t)}
+                                  disabled={isPaid}
+                                  title={isPaid ? "No se puede eliminar una vuelta pagada" : "Eliminar"}
+                                  className="rounded px-2 py-0.5 text-xs text-[var(--color-danger)] hover:bg-[var(--color-danger-soft)] disabled:opacity-40 disabled:cursor-not-allowed"
+                                >
+                                  ✕
+                                </button>
                               </div>
                             </div>
                           );
@@ -1210,54 +1052,59 @@ function TripsTab() {
                         <table className="w-full text-sm">
                           <thead className="bg-[var(--color-accent-soft)] text-left text-[10px] uppercase tracking-wide text-[var(--color-accent)]">
                             <tr>
-                              <th className="px-2 py-2">Fecha</th>
-                              <th className="px-2 py-2">Vehículo</th>
-                              <th className="px-2 py-2">Ciclo</th>
-                              <th className="px-2 py-2">Faena / Subfaena</th>
-                              <th className="px-2 py-2">Destino</th>
-                              <th className="px-2 py-2 text-right">#Pers</th>
-                              <th className="px-2 py-2">Tipo</th>
-                              <th className="px-2 py-2 text-right">Vlts</th>
-                              <th className="px-2 py-2 text-right">Tarifa</th>
-                              <th className="px-2 py-2 text-right">Monto</th>
-                              <th className="px-2 py-2">Estado</th>
+                              {sortTh("date", "Fecha")}
+                              {sortTh("vehicle", "Vehículo")}
+                              {sortTh("faena", "Faena / Ciclo")}
+                              {sortTh("destino", "Lugar → Destino")}
+                              {sortTh("personas", "Personas", "right")}
+                              {sortTh("vueltas", "Vueltas", "right")}
+                              {sortTh("monto", "Monto", "right")}
+                              {sortTh("estado", "Estado")}
+                              <th className="px-2 py-2"></th>
                             </tr>
                           </thead>
                           <tbody>
-                            {g.trips.map((t, idx) => {
+                            {sortTrips(g.trips).map((t, idx) => {
                               const cy = cycleById.get(t.cycleId);
                               const fa = faenaById.get(t.faenaId);
                               const sb = subfaenaById.get(t.subfaenaId);
                               const zero = !(Number(t.amount) > 0);
+                              const isPaid = t.status === "paid";
                               return (
                                 <tr
                                   key={t.id}
                                   className={`border-t border-[var(--color-border)] transition-colors hover:bg-[var(--color-accent-soft)]/50 ${idx % 2 === 1 ? "bg-[var(--color-surface-2)]/40" : ""}`}
                                 >
                                   <td className="px-2 py-1.5 font-mono tabular-nums">{t.date}</td>
-                                  <td className="px-2 py-1.5">{t.vehicleAlias || "—"}</td>
-                                  <td className="px-2 py-1.5">{cy?.label || t.cycleId}</td>
                                   <td className="px-2 py-1.5">
-                                    {fa?.name || "—"}
-                                    {sb && <span className="text-[var(--color-muted)]"> / {sb.name}</span>}
+                                    <div className="flex items-center gap-1.5">
+                                      <span>{t.vehicleAlias || "—"}</span>
+                                      {t.kind === "approach" && (
+                                        <span className="rounded-full bg-[var(--color-surface-2)] px-1.5 py-0.5 text-[10px] text-[var(--color-muted)]">
+                                          acercamiento
+                                        </span>
+                                      )}
+                                    </div>
                                   </td>
-                                  <td className="px-2 py-1.5">{titleCase(t.destino) || "—"}</td>
+                                  <td className="px-2 py-1.5">
+                                    <div className="flex flex-wrap items-center gap-1.5">
+                                      <span>
+                                        {fa?.name || "—"}
+                                        {sb && <span className="text-[var(--color-muted)]"> / {sb.name}</span>}
+                                      </span>
+                                      {cy && (
+                                        <span className="rounded-full bg-[var(--color-surface-2)] px-1.5 py-0.5 text-[10px] text-[var(--color-muted)]">
+                                          {cycleShort(cy)}
+                                        </span>
+                                      )}
+                                    </div>
+                                  </td>
+                                  <td className="px-2 py-1.5">
+                                    {titleCase(t.lugar) || "—"}
+                                    {t.destino && <span className="text-[var(--color-muted)]"> → {titleCase(t.destino)}</span>}
+                                  </td>
                                   <td className="px-2 py-1.5 text-right tabular-nums">{t.personCount ?? "—"}</td>
-                                  <td className="px-2 py-1.5">
-                                    <span
-                                      className={`rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
-                                        t.kind === "approach"
-                                          ? "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300"
-                                          : "bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-300"
-                                      }`}
-                                    >
-                                      {t.kind === "approach" ? "acercamiento" : "vuelta"}
-                                    </span>
-                                  </td>
                                   <td className="px-2 py-1.5 text-right tabular-nums">{t.qty}</td>
-                                  <td className={`px-2 py-1.5 text-right tabular-nums ${zero ? "text-[var(--color-muted)] italic" : ""}`}>
-                                    {fmtCurrency(t.rate)}
-                                  </td>
                                   <td
                                     className={`px-2 py-1.5 text-right tabular-nums ${
                                       zero ? "italic text-[var(--color-muted)]" : "font-semibold text-[var(--color-accent)]"
@@ -1266,7 +1113,7 @@ function TripsTab() {
                                     {fmtCurrency(t.amount)}
                                   </td>
                                   <td className="px-2 py-1.5">
-                                    {t.status === "paid" ? (
+                                    {isPaid ? (
                                       <span className="rounded-full bg-[var(--color-success-soft)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--color-success)]">
                                         pagado
                                       </span>
@@ -1275,6 +1122,26 @@ function TripsTab() {
                                         pendiente
                                       </span>
                                     )}
+                                  </td>
+                                  <td className="px-2 py-1.5">
+                                    <div className="flex gap-1">
+                                      <button
+                                        onClick={() => setEditing(t)}
+                                        disabled={isPaid}
+                                        title={isPaid ? "No se puede editar una vuelta pagada" : "Editar"}
+                                        className="rounded px-2 py-0.5 text-xs text-[var(--color-accent)] hover:bg-[var(--color-accent-soft)] disabled:opacity-40 disabled:cursor-not-allowed"
+                                      >
+                                        Editar
+                                      </button>
+                                      <button
+                                        onClick={() => setConfirmDel(t)}
+                                        disabled={isPaid}
+                                        title={isPaid ? "No se puede eliminar una vuelta pagada" : "Eliminar"}
+                                        className="rounded px-2 py-0.5 text-xs text-[var(--color-danger)] hover:bg-[var(--color-danger-soft)] disabled:opacity-40 disabled:cursor-not-allowed"
+                                      >
+                                        ✕
+                                      </button>
+                                    </div>
                                   </td>
                                 </tr>
                               );
@@ -1291,6 +1158,30 @@ function TripsTab() {
         </>
       )}
     </div>
+
+    <TripEditModal
+      open={!!editing}
+      onClose={() => setEditing(null)}
+      trip={editing}
+      carriers={carriers}
+      days={[]}
+      onSave={handleSaveTrip}
+    />
+
+    <ConfirmDialog
+      open={!!confirmDel}
+      title="Eliminar vuelta"
+      message={
+        confirmDel
+          ? `¿Eliminar la vuelta del ${confirmDel.date} (${fmtCurrency(confirmDel.amount)})?`
+          : ""
+      }
+      confirmLabel="Eliminar"
+      danger
+      onCancel={() => setConfirmDel(null)}
+      onConfirm={handleDeleteTrip}
+    />
+    </>
   );
 }
 
@@ -1582,8 +1473,10 @@ function PaymentsTab() {
         open={generating}
         onClose={() => setGenerating(false)}
         carriers={activeCarriers}
+        faenas={faenas}
         faenaById={faenaById}
         subfaenaById={subfaenaById}
+        cycleById={cycleById}
         onGenerated={async () => {
           setGenerating(false);
           await reload();
@@ -3110,46 +3003,78 @@ function UnifiedSummaryModal({ open, onClose, group, faenaById, subfaenaById, cy
   );
 }
 
-function GenerateSummaryModal({ open, onClose, carriers, faenaById, subfaenaById, onGenerated }) {
-  const groupLabel = (g) => {
-    if (g.date) return g.date;
-    const fName = faenaById?.get(g.faenaId)?.name;
-    const sName = subfaenaById?.get(g.subfaenaId)?.name;
-    if (fName && sName) return `${fName} / ${sName}`;
-    if (fName) return fName;
-    if (sName) return sName;
-    return "Sin faena";
-  };
+function GenerateSummaryModal({ open, onClose, carriers, faenas = [], faenaById, subfaenaById, cycleById, onGenerated }) {
   const [carrierId, setCarrierId] = useState("");
   const [periodFrom, setPeriodFrom] = useState("");
   const [periodTo, setPeriodTo] = useState("");
-  const [groupBy, setGroupBy] = useState("day");
+  const [faenaFilter, setFaenaFilter] = useState("");
   const [preview, setPreview] = useState(null); // { trips, total }
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [notes, setNotes] = useState("");
+  const [sortBy, setSortBy] = useState("date");
+  const [sortDir, setSortDir] = useState("desc");
+  // Cuántas vueltas sueltas (pendientes, sin resumen) tiene cada
+  // transportista — una sola consulta a Firestore al abrir el modal (misma
+  // que ya usa "Pago por faena"), para no listar transportistas sin nada
+  // que generar y mostrar de una el volumen de cada uno.
+  const [pendingByCarrier, setPendingByCarrier] = useState(() => new Map());
+  const [loadingCarrierCounts, setLoadingCarrierCounts] = useState(false);
 
   useEffect(() => {
     if (!open) {
       setCarrierId("");
       setPeriodFrom("");
       setPeriodTo("");
-      setGroupBy("day");
+      setFaenaFilter("");
       setPreview(null);
       setNotes("");
+      setSortBy("date");
+      setSortDir("desc");
+      return;
     }
+    let cancelled = false;
+    setLoadingCarrierCounts(true);
+    tripsService.listPendingUnlinked()
+      .then((trips) => {
+        if (cancelled) return;
+        const map = new Map();
+        for (const t of trips) {
+          if (!t.carrierId) continue;
+          const cur = map.get(t.carrierId) || { count: 0, total: 0 };
+          cur.count += 1;
+          cur.total += Number(t.amount) || 0;
+          map.set(t.carrierId, cur);
+        }
+        setPendingByCarrier(map);
+      })
+      .finally(() => { if (!cancelled) setLoadingCarrierCounts(false); });
+    return () => { cancelled = true; };
   }, [open]);
 
-  const loadPreview = async () => {
-    if (!carrierId) return;
+  const carrierOptions = useMemo(() => {
+    return carriers
+      .filter((c) => pendingByCarrier.has(c.id))
+      .map((c) => {
+        const p = pendingByCarrier.get(c.id);
+        return { value: c.id, label: `${c.alias} — ${c.name} · ${p.count} suelta${p.count === 1 ? "" : "s"} (${fmtCurrency(p.total)})` };
+      })
+      .sort((a, b) => (pendingByCarrier.get(b.value)?.count || 0) - (pendingByCarrier.get(a.value)?.count || 0));
+  }, [carriers, pendingByCarrier]);
+
+  // Vista previa dinámica: se recarga sola apenas cambia el transportista o
+  // el rango de fechas, sin depender de un botón manual — antes había que
+  // acordarse de clickear "Vista previa" cada vez.
+  useEffect(() => {
+    if (!open || !carrierId) { setPreview(null); return; }
+    let cancelled = false;
+    setFaenaFilter("");
     setLoading(true);
-    try {
-      const r = await paymentsService.previewSummary({ carrierId, periodFrom, periodTo });
-      setPreview(r);
-    } finally {
-      setLoading(false);
-    }
-  };
+    paymentsService.previewSummary({ carrierId, periodFrom, periodTo })
+      .then((r) => { if (!cancelled) setPreview(r); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [open, carrierId, periodFrom, periodTo]);
 
   const handleGenerate = async () => {
     if (!preview || preview.trips.length === 0) return;
@@ -3159,7 +3084,7 @@ function GenerateSummaryModal({ open, onClose, carriers, faenaById, subfaenaById
         carrierId,
         periodFrom: periodFrom || null,
         periodTo: periodTo || null,
-        groupBy,
+        groupBy: "day",
         tripIds: preview.trips.map((t) => t.id),
         total: preview.total,
         notes,
@@ -3170,10 +3095,89 @@ function GenerateSummaryModal({ open, onClose, carriers, faenaById, subfaenaById
     }
   };
 
-  const grouped = useMemo(() => {
+  // El filtro de faena es solo para revisar el detalle más cómodo — el
+  // resumen que se genera siempre incluye TODAS las vueltas pendientes del
+  // período (preview.trips), no solo las que quedan visibles con el filtro.
+  const faenaOptions = useMemo(() => {
+    const ids = new Set((preview?.trips || []).map((t) => t.faenaId).filter(Boolean));
+    return [...ids]
+      .map((id) => ({ value: id, label: faenaById?.get(id)?.name || id }))
+      .sort((a, b) => a.label.localeCompare(b.label, "es"));
+  }, [preview, faenaById]);
+
+  const visibleTrips = useMemo(() => {
     if (!preview) return [];
-    return groupBy === "day" ? groupTripsByDay(preview.trips) : groupTripsByFaena(preview.trips);
-  }, [preview, groupBy]);
+    return faenaFilter ? preview.trips.filter((t) => t.faenaId === faenaFilter) : preview.trips;
+  }, [preview, faenaFilter]);
+
+  const cycleShort = (cy) => {
+    const l = cy?.label || "";
+    const idx = l.lastIndexOf("/");
+    return idx >= 0 ? l.slice(idx + 1) : l;
+  };
+
+  const SORT_OPTIONS = [
+    { v: "date", l: "Fecha" },
+    { v: "vehicle", l: "Vehículo" },
+    { v: "faena", l: "Faena / Ciclo" },
+    { v: "destino", l: "Lugar / Destino" },
+    { v: "personas", l: "Personas" },
+    { v: "vueltas", l: "Vueltas" },
+    { v: "monto", l: "Monto" },
+  ];
+
+  const sortedTrips = useMemo(() => {
+    const keyOf = (t) => {
+      switch (sortBy) {
+        case "date": return t.date || "";
+        case "vehicle": return (t.vehicleAlias || "").toLowerCase();
+        case "faena": {
+          const fa = faenaById?.get(t.faenaId);
+          const sb = subfaenaById?.get(t.subfaenaId);
+          return `${fa?.name || ""}/${sb?.name || ""}`.toLowerCase();
+        }
+        case "destino": return `${t.lugar || ""} ${t.destino || ""}`.toLowerCase();
+        case "personas": return Number(t.personCount) || 0;
+        case "vueltas": return Number(t.qty) || 0;
+        case "monto": return Number(t.amount) || 0;
+        default: return "";
+      }
+    };
+    const arr = [...visibleTrips];
+    arr.sort((a, b) => {
+      const ka = keyOf(a);
+      const kb = keyOf(b);
+      const cmp = typeof ka === "number" && typeof kb === "number"
+        ? ka - kb
+        : String(ka).localeCompare(String(kb), "es");
+      return sortDir === "asc" ? cmp : -cmp;
+    });
+    return arr;
+  }, [visibleTrips, sortBy, sortDir, faenaById, subfaenaById]);
+
+  const toggleSort = (field) => {
+    if (sortBy === field) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    else { setSortBy(field); setSortDir("asc"); }
+  };
+
+  const sortTh = (field, label, align) => {
+    const active = sortBy === field;
+    return (
+      <th
+        key={field}
+        onClick={() => toggleSort(field)}
+        title="Ordenar"
+        className={`cursor-pointer select-none px-2 py-1.5 hover:text-[var(--color-foreground)] ${align === "right" ? "text-right" : ""}`}
+      >
+        <span className={`inline-flex items-center gap-1 ${align === "right" ? "flex-row-reverse" : ""}`}>
+          {label}
+          <span className={active ? "text-[var(--color-accent)]" : "text-[var(--color-muted)] opacity-50"}>
+            {active ? (sortDir === "asc" ? "▲" : "▼") : "⇅"}
+          </span>
+        </span>
+      </th>
+    );
+  };
 
   return (
     <Modal
@@ -3196,75 +3200,121 @@ function GenerateSummaryModal({ open, onClose, carriers, faenaById, subfaenaById
         </>
       }
     >
-      <div className="grid grid-cols-4 gap-3">
-        <div className="col-span-2">
-          <Select
-            label="Transportista"
-            value={carrierId}
-            onChange={setCarrierId}
-            options={carriers.map((c) => ({ value: c.id, label: `${c.alias} — ${c.name}` }))}
-            required
-          />
-        </div>
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
         <Select
-          label="Agrupar por"
-          value={groupBy}
-          onChange={setGroupBy}
-          options={[
-            { value: "day", label: "Día" },
-            { value: "faena", label: "Faena" },
-          ]}
+          label="Transportista"
+          value={carrierId}
+          onChange={setCarrierId}
+          options={carrierOptions}
+          placeholder={loadingCarrierCounts ? "Cargando..." : carrierOptions.length ? "Selecciona" : "Sin vueltas sueltas"}
+          disabled={loadingCarrierCounts || carrierOptions.length === 0}
+          required
         />
-        <div className="flex items-end">
-          <button
-            onClick={loadPreview}
-            disabled={!carrierId || loading}
-            className="w-full rounded-md border border-[var(--color-border)] px-3 py-2 text-sm hover:bg-[var(--color-accent-soft)] disabled:opacity-50"
-          >
-            {loading ? "Cargando..." : "Vista previa"}
-          </button>
-        </div>
+        <Select
+          label="Filtrar detalle por faena"
+          value={faenaFilter}
+          onChange={setFaenaFilter}
+          options={faenaOptions}
+          placeholder={faenaOptions.length ? "Todas" : "—"}
+          disabled={faenaOptions.length === 0}
+        />
         <TextField label="Desde" type="date" value={periodFrom} onChange={setPeriodFrom} />
         <TextField label="Hasta" type="date" value={periodTo} onChange={setPeriodTo} />
-        <div className="col-span-2">
+        <div className="md:col-span-2">
           <TextField label="Notas" value={notes} onChange={setNotes} />
         </div>
       </div>
 
-      {preview && (
-        <div className="mt-4">
-          <div className="mb-2 flex items-center justify-between text-sm">
-            <span className="text-[var(--color-muted)]">{preview.trips.length} vueltas pendientes</span>
-            <span className="font-semibold tabular-nums">{fmtCurrency(preview.total)}</span>
-          </div>
-          {preview.trips.length === 0 ? (
-            <p className="rounded-md border border-dashed border-[var(--color-border)] py-4 text-center text-xs text-[var(--color-muted)]">
-              No hay vueltas pendientes en el período seleccionado.
-            </p>
-          ) : (
-            <div className="max-h-64 overflow-auto rounded-md border border-[var(--color-border)]">
+      <div className="mt-4">
+        {!loadingCarrierCounts && carrierOptions.length === 0 ? (
+          <p className="rounded-md border border-dashed border-[var(--color-border)] py-8 text-center text-sm text-[var(--color-muted)]">
+            No hay vueltas sueltas de ningún transportista en este momento.
+          </p>
+        ) : !carrierId ? (
+          <p className="rounded-md border border-dashed border-[var(--color-border)] py-8 text-center text-sm text-[var(--color-muted)]">
+            Elige un transportista para ver sus vueltas pendientes.
+          </p>
+        ) : loading && !preview ? (
+          <p className="py-8 text-center text-sm text-[var(--color-muted)]">Cargando vueltas pendientes...</p>
+        ) : preview && preview.trips.length === 0 ? (
+          <p className="rounded-md border border-dashed border-[var(--color-border)] py-8 text-center text-sm text-[var(--color-muted)]">
+            No hay vueltas pendientes en el período seleccionado.
+          </p>
+        ) : preview ? (
+          <>
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-sm">
+              <span className="text-[var(--color-muted)]">
+                {faenaFilter ? `Mostrando ${visibleTrips.length} de ${preview.trips.length}` : `${preview.trips.length}`} vuelta{preview.trips.length === 1 ? "" : "s"} pendiente{preview.trips.length === 1 ? "" : "s"}
+                {loading && <span className="ml-1 italic">(actualizando...)</span>}
+              </span>
+              <span className="text-right">
+                <span className="text-[10px] uppercase tracking-wide text-[var(--color-muted)]">Total a generar </span>
+                <span className="font-semibold tabular-nums">{fmtCurrency(preview.total)}</span>
+              </span>
+            </div>
+            <div className="max-h-72 overflow-auto rounded-md border border-[var(--color-border)]">
               <table className="w-full text-xs">
-                <thead className="sticky top-0 bg-[var(--color-surface-2)] text-left text-[var(--color-muted)]">
+                <thead className="sticky top-0 z-10 border-b-2 border-[var(--color-accent)]/40 bg-[var(--color-surface-2)] text-left text-[10px] uppercase tracking-wide text-[var(--color-accent)]">
                   <tr>
-                    <th className="px-2 py-1.5">{groupBy === "day" ? "Día" : "Grupo"}</th>
-                    <th className="px-2 py-1.5 text-right"># Vueltas</th>
-                    <th className="px-2 py-1.5 text-right">Subtotal</th>
+                    {sortTh("date", "Fecha")}
+                    {sortTh("vehicle", "Vehículo")}
+                    {sortTh("faena", "Faena / Ciclo")}
+                    {sortTh("destino", "Lugar → Destino")}
+                    {sortTh("personas", "Personas", "right")}
+                    {sortTh("vueltas", "Vueltas", "right")}
+                    {sortTh("monto", "Monto", "right")}
                   </tr>
                 </thead>
                 <tbody>
-                  {grouped.map((g, i) => (
-                    <tr key={i} className="border-t border-[var(--color-border)]">
-                      <td className="px-2 py-1">{groupLabel(g)}</td>
-                      <td className="px-2 py-1 text-right tabular-nums">{g.trips.length}</td>
-                      <td className="px-2 py-1 text-right tabular-nums">{fmtCurrency(g.total)}</td>
-                    </tr>
-                  ))}
+                  {sortedTrips.map((t, idx) => {
+                    const cy = cycleById?.get(t.cycleId);
+                    const fa = faenaById?.get(t.faenaId);
+                    const sb = subfaenaById?.get(t.subfaenaId);
+                    return (
+                      <tr
+                        key={t.id}
+                        className={`border-t border-[var(--color-border)] transition-colors hover:bg-[var(--color-accent-soft)]/50 ${idx % 2 === 1 ? "bg-[var(--color-surface-2)]/40" : ""}`}
+                      >
+                        <td className="px-2 py-1.5 font-mono tabular-nums">{t.date}</td>
+                        <td className="px-2 py-1.5">
+                          <div className="flex items-center gap-1.5">
+                            <span>{t.vehicleAlias || "—"}</span>
+                            {t.kind === "approach" && (
+                              <span className="rounded-full bg-[var(--color-surface-2)] px-1.5 py-0.5 text-[10px] text-[var(--color-muted)]">
+                                acercamiento
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-2 py-1.5">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span>
+                              {fa?.name || "—"}
+                              {sb && <span className="text-[var(--color-muted)]"> / {sb.name}</span>}
+                            </span>
+                            {cy && (
+                              <span className="rounded-full bg-[var(--color-surface-2)] px-1.5 py-0.5 text-[10px] text-[var(--color-muted)]">
+                                {cycleShort(cy)}
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-2 py-1.5">
+                          {titleCase(t.lugar) || "—"}
+                          {t.destino && <span className="text-[var(--color-muted)]"> → {titleCase(t.destino)}</span>}
+                        </td>
+                        <td className="px-2 py-1.5 text-right tabular-nums">{t.personCount ?? "—"}</td>
+                        <td className="px-2 py-1.5 text-right tabular-nums">{t.qty}</td>
+                        <td className="px-2 py-1.5 text-right font-semibold tabular-nums">{fmtCurrency(t.amount)}</td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
-          )}
-        </div>
-      )}
+          </>
+        ) : null}
+      </div>
     </Modal>
   );
 }
