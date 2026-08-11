@@ -49,4 +49,13 @@ export const contactCardsService = createService("contactCard", "contactCards");
 // `indicators/main` con los 3 valores — no hace falta más para valores fijos.
 export const indicatorsService = createService("indicator", "indicators");
 
+// Libro de precios — registro contable independiente de faenas/labores y sus
+// precios (histórico, incluye faenas "dummy" que no viven en `faenas`). No
+// alimenta ni depende de cycles/workdays. Ver PriceBook.jsx.
+export const priceBookService = createService("priceBookEntry", "priceBookEntries");
+// Config chica y compartida del libro de precios (ej. qué faenas reales se
+// esconden del selector porque su nombre no es legible). Un único doc `main`,
+// mismo patrón que `indicators/main`.
+export const priceBookConfigService = createService("priceBookConfig", "priceBookConfig");
+
 export { logAction } from "./logger";

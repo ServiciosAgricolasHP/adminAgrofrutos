@@ -23,6 +23,7 @@ import AdminConsole from "./screens/AdminConsole";
 import Audit from "./screens/Audit";
 import Calendar from "./screens/Calendar";
 import Facturacion from "./screens/Facturacion";
+import PriceBook from "./screens/PriceBook";
 
 export default function App() {
   return (
@@ -52,6 +53,7 @@ export default function App() {
                 <Route path="info-cuentas" element={<InfoAccounts />} />
                 <Route path="calendar" element={<Calendar />} />
                 <Route path="facturacion" element={<Facturacion />} />
+                <Route path="price-book" element={<PriceBook />} />
                 <Route
                   path="audit"
                   element={
