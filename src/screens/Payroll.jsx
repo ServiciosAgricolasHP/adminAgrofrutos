@@ -4766,7 +4766,7 @@ function WorkerPaidDetailTables({ item, snapshot, snapshotLoading, cycleDetails,
         </table>
 
         {viewMode === "cronologico" ? (
-          <div>
+          <div className="overflow-x-auto">
             <div style={{ fontSize: 12, fontWeight: 700, color: "#000", marginBottom: 4 }}>Detalle cronológico</div>
             <table style={{ borderCollapse: "collapse", width: "100%" }}>
               <thead>

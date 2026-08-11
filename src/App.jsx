@@ -23,6 +23,7 @@ import AdminConsole from "./screens/AdminConsole";
 import Audit from "./screens/Audit";
 import Calendar from "./screens/Calendar";
 import Facturacion from "./screens/Facturacion";
+import HarvestQr from "./screens/HarvestQr";
 import PriceBook from "./screens/PriceBook";
 
 export default function App() {
@@ -83,6 +84,14 @@ export default function App() {
                   element={
                     <ProtectedRoute adminOnly>
                       <AdminConsole />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="admin/harvest-qr"
+                  element={
+                    <ProtectedRoute adminOnly>
+                      <HarvestQr />
                     </ProtectedRoute>
                   }
                 />

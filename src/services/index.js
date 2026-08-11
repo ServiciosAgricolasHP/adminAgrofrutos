@@ -49,6 +49,17 @@ export const contactCardsService = createService("contactCard", "contactCards");
 // `indicators/main` con los 3 valores — no hace falta más para valores fijos.
 export const indicatorsService = createService("indicator", "indicators");
 
+// Pesajes de cosecha escaneados por QR (app scan_IS) — colección plana,
+// log de eventos (N por trabajador por día). Fuente de verdad; nunca se edita
+// desde acá, solo se lee para sincronizar hacia `workdays`. Ver HarvestQr.jsx.
+export const harvestWeightsService = createService("harvestWeight", "harvestWeights");
+
+// Config/puente entre un prefijo de QR físico y el (faena, ciclo, labor)
+// vigente al que debe sincronizarse. Doc id = el prefijo (ej. "HP"). El
+// ciclo/labor vigente se reapunta a mano cada vez que se abre un ciclo nuevo
+// — deliberadamente semi-manual, ver HarvestQr.jsx.
+export const qrPrefixesService = createService("qrPrefix", "qrPrefixes");
+
 // Libro de precios — registro contable independiente de faenas/labores y sus
 // precios (histórico, incluye faenas "dummy" que no viven en `faenas`). No
 // alimenta ni depende de cycles/workdays. Ver PriceBook.jsx.

@@ -201,6 +201,10 @@ export default function Layout() {
                   <span>📟</span>
                   <span>Consola</span>
                 </NavLink>
+                <NavLink to="/admin/harvest-qr" className={linkClass}>
+                  <span>📷</span>
+                  <span>Cosecha QR</span>
+                </NavLink>
               </div>
             )}
           </div>
