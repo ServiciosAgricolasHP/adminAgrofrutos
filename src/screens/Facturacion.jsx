@@ -9,7 +9,7 @@ import React, { forwardRef, useEffect, useMemo, useRef, useState } from "react";
 import { toPng, toBlob } from "html-to-image";
 import { writeBatch, doc, serverTimestamp } from "firebase/firestore";
 import { db, auth } from "../firebase";
-import { companiesService, dteDocumentsService, costCentersService } from "../services";
+import { companiesService, dteDocumentsService, costCentersService, informalExpensesService } from "../services";
 import { parseSiiRcvCsv, dteTypeLabel, buildDteDocId, normalizeRut, extractRutFromFilename, otroImpuestoLabel, otroImpuestoCategory, OTRO_IMP_CATEGORIES } from "../utils/siiCsvParser";
 import { formatRutForDisplay } from "../utils/rutUtils";
 import Modal from "../components/Modal";
@@ -212,6 +212,10 @@ export default function Facturacion() {
   // Global — compartido entre todas las empresas, igual que se definió con el
   // usuario. "Combustibles" no vive acá: sigue siendo automático por SII.
   const [costCenters, setCostCenters] = useState([]);
+  // Gastos informales (sin factura/boleta formal) por centro de costo — ver
+  // informalExpensesService. Puramente informativo, nunca entra a dteDocuments
+  // ni a los totales/exports fiscales reales.
+  const [informalExpenses, setInformalExpenses] = useState([]);
   // Modal unificado: crear/editar/eliminar centros de costo + vista global de
   // TODOS los documentos de un centro elegido, de todas las empresas y
   // períodos (ignora los filtros de la tabla principal), ordenados
@@ -264,14 +268,16 @@ export default function Facturacion() {
   const loadAll = async () => {
     setLoading(true);
     try {
-      const [comps, list, centers] = await Promise.all([
+      const [comps, list, centers, expenses] = await Promise.all([
         companiesService.list({ order: ["razonSocial", "asc"], cache: true, ttl: 600_000 }),
         dteDocumentsService.list({ order: ["fechaEmision", "desc"], cache: true, ttl: 600_000 }),
         costCentersService.list({ order: ["label", "asc"], cache: true, ttl: 600_000 }),
+        informalExpensesService.list({ order: ["date", "desc"], cache: true, ttl: 600_000 }),
       ]);
       setCompanies(comps);
       setDocs(list);
       setCostCenters(centers);
+      setInformalExpenses(expenses);
       // Si lo guardado en localStorage ya no existe (empresa borrada) o no hay
       // nada elegido, caemos al primero. Sino respetamos la última elección.
       if (comps.length > 0 && !comps.some((c) => c.id === selectedCompanyId)) {
@@ -2296,6 +2302,22 @@ export default function Facturacion() {
         />
       )}
 
+      {costCentersModalOpen && (
+        <CostCentersModal
+          costCenters={costCenters}
+          docs={docs}
+          informalExpenses={informalExpenses}
+          companiesById={companiesById}
+          onClose={() => setCostCentersModalOpen(false)}
+          onChanged={loadAll}
+          onSelectDoc={(d) => setDetailDoc(d)}
+        />
+      )}
+
+      {/* Se renderiza después de CostCentersModal a propósito: si ambos están
+          abiertos (se abrió un documento desde la vista de un centro de
+          costo), este queda apilado encima y al cerrarlo vuelve al modal de
+          centros de costo en vez de cerrar todo hasta la pantalla base. */}
       {detailDoc && (
         <DocDetailModal
           dteDoc={detailDoc}
@@ -2306,17 +2328,6 @@ export default function Facturacion() {
           onSetStatus={(next) => setPaymentStatus(detailDoc, next)}
           onSavePayments={(payments) => saveDocPayments(detailDoc, payments)}
           onSetCostCenter={(next) => saveDocCostCenter(detailDoc, next)}
-        />
-      )}
-
-      {costCentersModalOpen && (
-        <CostCentersModal
-          costCenters={costCenters}
-          docs={docs}
-          companiesById={companiesById}
-          onClose={() => setCostCentersModalOpen(false)}
-          onChanged={loadAll}
-          onSelectDoc={(d) => { setCostCentersModalOpen(false); setDetailDoc(d); }}
         />
       )}
     </div>
@@ -2359,7 +2370,7 @@ const FUEL_VIEW_ID = "__fuel__";
 // ordenables y export (copiar/PNG/imprimir/XLSX). Incluye "Combustibles"
 // como chip fijo no editable aunque viva fuera del catálogo manual — es la
 // otra mitad del mismo concepto (automático vs. manual).
-function CostCentersModal({ costCenters, docs, companiesById, onClose, onChanged, onSelectDoc }) {
+function CostCentersModal({ costCenters, docs, informalExpenses, companiesById, onClose, onChanged, onSelectDoc }) {
   const toast = useToast();
   const printRef = useRef(null);
 
@@ -2412,6 +2423,8 @@ function CostCentersModal({ costCenters, docs, companiesById, onClose, onChanged
   const [dateTo, setDateTo] = useState("");
   const [sortBy, setSortBy] = useState({ key: "fechaEmision", dir: "asc" });
   const [exportBusy, setExportBusy] = useState("");
+  // Modal de gasto informal: null = cerrado, "new" = crear, {expense} = editar.
+  const [expenseModal, setExpenseModal] = useState(null);
 
   const companiesList = useMemo(
     () => [...companiesById.values()].sort((a, b) => (a.alias || a.razonSocial || "").localeCompare(b.alias || b.razonSocial || "")),
@@ -2454,6 +2467,28 @@ function CostCentersModal({ costCenters, docs, companiesById, onClose, onChanged
     return list;
   }, [baseDocs, kindFilter, companyFilterId, dateFrom, dateTo, search]);
 
+  // Gastos informales del centro elegido — plata sin factura/boleta formal.
+  // Puramente informativo: nunca entran a `totals` (esos quedan 100% fiscales,
+  // fieles a los dteDocuments reales); tienen su propio subtotal aparte.
+  // Nunca aparecen si el filtro Mov. está en "Venta" (un gasto informal nunca
+  // es una venta).
+  const baseInformal = useMemo(() => {
+    if (!selectedId || kindFilter === "venta") return [];
+    return informalExpenses.filter((e) => e.costCenterId === selectedId).map((e) => ({ ...e, __informal: true }));
+  }, [informalExpenses, selectedId, kindFilter]);
+
+  const filteredInformal = useMemo(() => {
+    let list = baseInformal;
+    if (companyFilterId) list = list.filter((e) => e.companyId === companyFilterId);
+    if (dateFrom) list = list.filter((e) => (e.date || "") >= dateFrom);
+    if (dateTo) list = list.filter((e) => (e.date || "") <= dateTo);
+    if (search.trim()) {
+      const q = search.trim().toLowerCase();
+      list = list.filter((e) => (e.detail || "").toLowerCase().includes(q));
+    }
+    return list;
+  }, [baseInformal, companyFilterId, dateFrom, dateTo, search]);
+
   const totals = useMemo(() => {
     let neto = 0, iva = 0, total = 0;
     for (const d of filtered) {
@@ -2465,7 +2500,27 @@ function CostCentersModal({ costCenters, docs, companiesById, onClose, onChanged
     return { neto, iva, total };
   }, [filtered]);
 
+  const informalTotal = useMemo(
+    () => filteredInformal.reduce((s, e) => s + (Number(e.amount) || 0), 0),
+    [filteredInformal],
+  );
+
   const sortGetter = (d, key) => {
+    if (d.__informal) {
+      switch (key) {
+        case "fechaEmision": return d.date || "";
+        case "empresa": {
+          const co = companiesById.get(d.companyId);
+          return co?.alias || co?.razonSocial || "";
+        }
+        case "folio": return 0;
+        case "razon": return d.detail || "";
+        case "neto": return 0;
+        case "iva": return 0;
+        case "total": return Number(d.amount) || 0;
+        default: return "";
+      }
+    }
     switch (key) {
       case "fechaEmision": return d.fechaEmision || "";
       case "empresa": {
@@ -2481,7 +2536,7 @@ function CostCentersModal({ costCenters, docs, companiesById, onClose, onChanged
     }
   };
   const sorted = useMemo(() => {
-    const arr = [...filtered];
+    const arr = [...filtered, ...filteredInformal];
     arr.sort((a, b) => {
       const av = sortGetter(a, sortBy.key);
       const bv = sortGetter(b, sortBy.key);
@@ -2490,7 +2545,7 @@ function CostCentersModal({ costCenters, docs, companiesById, onClose, onChanged
     });
     return arr;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filtered, sortBy, companiesById]);
+  }, [filtered, filteredInformal, sortBy, companiesById]);
   const toggleSort = (key) => {
     setSortBy((cur) => cur.key === key ? { key, dir: cur.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" });
   };
@@ -2573,7 +2628,11 @@ function CostCentersModal({ costCenters, docs, companiesById, onClose, onChanged
       ws.getCell("B2").value = `CENTRO DE COSTO — ${selectedLabel}`;
       ws.getCell("B2").font = { bold: true, size: 14 };
       ws.mergeCells("B2:K2");
-      ws.getCell("B3").value = `${sorted.length} documento${sorted.length === 1 ? "" : "s"} · Neto ${fmtCurrency(totals.neto)} · IVA ${fmtCurrency(totals.iva)} · Total ${fmtCurrency(totals.total)}`;
+      const summaryLine = `${filtered.length} documento${filtered.length === 1 ? "" : "s"} · Neto ${fmtCurrency(totals.neto)} · IVA ${fmtCurrency(totals.iva)} · Total ${fmtCurrency(totals.total)}`
+        + (filteredInformal.length > 0
+          ? ` · + ${filteredInformal.length} gasto${filteredInformal.length === 1 ? "" : "s"} informal${filteredInformal.length === 1 ? "" : "es"} ${fmtCurrency(informalTotal)} · Total combinado ${fmtCurrency(totals.total + informalTotal)}`
+          : "");
+      ws.getCell("B3").value = summaryLine;
       ws.getCell("B3").font = { italic: true, color: { argb: "FF555555" } };
       ws.mergeCells("B3:K3");
 
@@ -2590,6 +2649,20 @@ function CostCentersModal({ costCenters, docs, companiesById, onClose, onChanged
 
       let r = HR + 1;
       for (const d of sorted) {
+        if (d.__informal) {
+          const company = companiesById.get(d.companyId);
+          const cells = [d.date || "", company?.alias || company?.razonSocial || "", "Informal", "", "", d.detail || "", "", "", "", Number(d.amount) || 0];
+          cells.forEach((v, j) => {
+            const c = ws.getCell(r, 2 + j);
+            c.value = v;
+            c.alignment = { horizontal: j <= 6 ? "left" : "right" };
+            c.border = { top: { style: "thin" }, left: { style: "thin" }, right: { style: "thin" }, bottom: { style: "thin" } };
+            if (j === 9) c.numFmt = '"$"#,##0';
+            if (j === 2) c.font = { color: { argb: "FFB8860B" } };
+          });
+          r++;
+          continue;
+        }
         const isNC = CREDIT_NOTE_TYPES.has(Number(d.tipo));
         const sign = isNC ? -1 : 1;
         const razon = d.kind === "venta" ? d.razonSocialReceptor : d.razonSocialEmisor;
@@ -2618,7 +2691,7 @@ function CostCentersModal({ costCenters, docs, companiesById, onClose, onChanged
         r++;
       }
 
-      ws.getCell(r, 2).value = `TOTAL (${sorted.length})`;
+      ws.getCell(r, 2).value = `TOTAL (${filtered.length})`;
       ws.mergeCells(r, 2, r, 8);
       for (let col = 2; col <= 11; col++) {
         ws.getCell(r, col).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFC6EFCE" } };
@@ -2631,6 +2704,32 @@ function CostCentersModal({ costCenters, docs, companiesById, onClose, onChanged
         c.numFmt = '"$"#,##0';
         c.alignment = { horizontal: "right" };
       });
+      r++;
+
+      if (filteredInformal.length > 0) {
+        ws.getCell(r, 2).value = `GASTOS INFORMALES (${filteredInformal.length})`;
+        ws.mergeCells(r, 2, r, 8);
+        for (let col = 2; col <= 11; col++) {
+          ws.getCell(r, col).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFDE9C8" } };
+          ws.getCell(r, col).border = { top: { style: "thin" }, left: { style: "thin" }, right: { style: "thin" }, bottom: { style: "thin" } };
+          ws.getCell(r, col).font = { bold: true };
+        }
+        ws.getCell(r, 11).value = informalTotal;
+        ws.getCell(r, 11).numFmt = '"$"#,##0';
+        ws.getCell(r, 11).alignment = { horizontal: "right" };
+        r++;
+
+        ws.getCell(r, 2).value = "TOTAL COMBINADO";
+        ws.mergeCells(r, 2, r, 8);
+        for (let col = 2; col <= 11; col++) {
+          ws.getCell(r, col).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFC6EFCE" } };
+          ws.getCell(r, col).border = { top: { style: "thin" }, left: { style: "thin" }, right: { style: "thin" }, bottom: { style: "thin" } };
+          ws.getCell(r, col).font = { bold: true };
+        }
+        ws.getCell(r, 11).value = totals.total + informalTotal;
+        ws.getCell(r, 11).numFmt = '"$"#,##0';
+        ws.getCell(r, 11).alignment = { horizontal: "right" };
+      }
 
       const buf = await wb.xlsx.writeBuffer();
       const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
@@ -2816,9 +2915,25 @@ function CostCentersModal({ costCenters, docs, companiesById, onClose, onChanged
               </div>
 
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="text-xs text-[var(--color-muted)]">
-                  {sorted.length} documento{sorted.length === 1 ? "" : "s"} · Neto {fmtCurrency(totals.neto)} · IVA {fmtCurrency(totals.iva)} ·{" "}
-                  <span className="font-semibold text-[var(--color-text)]">Total {fmtCurrency(totals.total)}</span>
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="text-xs text-[var(--color-muted)]">
+                    {filtered.length} documento{filtered.length === 1 ? "" : "s"} · Neto {fmtCurrency(totals.neto)} · IVA {fmtCurrency(totals.iva)} ·{" "}
+                    <span className="font-semibold text-[var(--color-text)]">Total {fmtCurrency(totals.total)}</span>
+                    {filteredInformal.length > 0 && (
+                      <>
+                        {" "}· <span className="text-[var(--color-warning)]">
+                          + {filteredInformal.length} gasto{filteredInformal.length === 1 ? "" : "s"} informal{filteredInformal.length === 1 ? "" : "es"} · {fmtCurrency(informalTotal)}
+                        </span>
+                        {" "}· <span className="font-semibold text-[var(--color-text)]">Total combinado {fmtCurrency(totals.total + informalTotal)}</span>
+                      </>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => setExpenseModal("new")}
+                    className="rounded-md border border-[var(--color-warning)] bg-[var(--color-warning-soft)] px-2 py-1 text-xs font-medium text-[var(--color-warning)] hover:opacity-80"
+                  >
+                    + Gasto informal
+                  </button>
                 </div>
                 <div className="flex gap-1">
                   <button onClick={handleCopy} disabled={!!exportBusy || sorted.length === 0} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)] disabled:opacity-60" title="Copiar como imagen">
@@ -2838,9 +2953,9 @@ function CostCentersModal({ costCenters, docs, companiesById, onClose, onChanged
 
               {sorted.length === 0 ? (
                 <div className="rounded-md border border-dashed border-[var(--color-border)] p-6 text-center text-sm text-[var(--color-muted)]">
-                  {baseDocs.length === 0
-                    ? `No hay documentos etiquetados con "${selectedLabel}" todavía.`
-                    : "Ningún documento calza con estos filtros."}
+                  {baseDocs.length === 0 && baseInformal.length === 0
+                    ? `No hay nada registrado en "${selectedLabel}" todavía.`
+                    : "Nada calza con estos filtros."}
                 </div>
               ) : (
                 <div className="max-h-[50vh] overflow-auto rounded-md border border-[var(--color-border)]">
@@ -2861,6 +2976,31 @@ function CostCentersModal({ costCenters, docs, companiesById, onClose, onChanged
                     </thead>
                     <tbody>
                       {sorted.map((d) => {
+                        if (d.__informal) {
+                          const company = companiesById.get(d.companyId);
+                          return (
+                            <tr
+                              key={`inf_${d.id}`}
+                              onClick={() => setExpenseModal(d)}
+                              className="cursor-pointer border-t border-[var(--color-border)] bg-[var(--color-warning-soft)]/40 hover:bg-[var(--color-warning-soft)]"
+                            >
+                              <td className="px-2 py-1.5 font-mono text-xs">{d.date || "—"}</td>
+                              <td className="px-2 py-1.5 truncate max-w-[160px]">{company?.alias || company?.razonSocial || "—"}</td>
+                              <td className="px-2 py-1.5 text-xs">
+                                <span className="rounded px-1.5 py-0.5 bg-[var(--color-warning-soft)] text-[var(--color-warning)]">
+                                  ⚠ Informal
+                                </span>
+                              </td>
+                              <td className="px-2 py-1.5 text-xs text-[var(--color-muted)]">—</td>
+                              <td className="px-2 py-1.5 text-right text-[var(--color-muted)]">—</td>
+                              <td className="px-2 py-1.5 truncate max-w-[220px]">{d.detail || "—"}</td>
+                              <td className="px-2 py-1.5 text-[var(--color-muted)]">—</td>
+                              <td className="px-2 py-1.5 text-right text-[var(--color-muted)]">—</td>
+                              <td className="px-2 py-1.5 text-right text-[var(--color-muted)]">—</td>
+                              <td className="px-2 py-1.5 text-right font-semibold tabular-nums">{fmtCurrency(d.amount)}</td>
+                            </tr>
+                          );
+                        }
                         const isNC = CREDIT_NOTE_TYPES.has(Number(d.tipo));
                         const razon = d.kind === "venta" ? d.razonSocialReceptor : d.razonSocialEmisor;
                         const rut = d.kind === "venta" ? d.rutReceptor : d.rutEmisor;
@@ -2896,13 +3036,34 @@ function CostCentersModal({ costCenters, docs, companiesById, onClose, onChanged
                   </table>
                 </div>
               )}
-              <p className="text-[10px] text-[var(--color-muted)]">Click en una fila para abrir el detalle del documento.</p>
+              <p className="text-[10px] text-[var(--color-muted)]">
+                Click en una fila para abrir su detalle. Las filas ⚠ Informal son gastos sin factura/boleta formal — no afectan la data fiscal real.
+              </p>
 
               {/* Off-screen printable — capturado por html-to-image / print. */}
               <div style={{ position: "absolute", left: -99999, top: 0, pointerEvents: "none" }} aria-hidden>
-                <PrintableCostCenterDocs ref={printRef} label={selectedLabel} docs={sorted} totals={totals} companiesById={companiesById} />
+                <PrintableCostCenterDocs
+                  ref={printRef}
+                  label={selectedLabel}
+                  docs={sorted}
+                  totals={totals}
+                  informalTotal={informalTotal}
+                  informalCount={filteredInformal.length}
+                  companiesById={companiesById}
+                />
               </div>
             </div>
+          )}
+
+          {expenseModal && (
+            <InformalExpenseFormModal
+              expense={expenseModal === "new" ? null : expenseModal}
+              costCenterId={selectedId}
+              companiesList={companiesList}
+              onClose={() => setExpenseModal(null)}
+              onSaved={onChanged}
+              onDeleted={onChanged}
+            />
           )}
 
           <div className="flex justify-end pt-2">
@@ -2919,15 +3080,19 @@ function CostCentersModal({ costCenters, docs, companiesById, onClose, onChanged
 // Printable de la vista global de un centro de costo — limpio, sin controles,
 // mismo aesthetic Excel-style del resto de los exports del proyecto.
 const PrintableCostCenterDocs = forwardRef(function PrintableCostCenterDocs(
-  { label, docs, totals, companiesById },
+  { label, docs, totals, informalTotal = 0, informalCount = 0, companiesById },
   ref,
 ) {
   const today = todayIso();
+  const realCount = docs.filter((d) => !d.__informal).length;
   return (
     <div ref={ref} style={{ background: "#fff", padding: 20, width: 1400, fontFamily: "ui-sans-serif, system-ui, sans-serif", color: "#000" }}>
       <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 2 }}>CENTRO DE COSTO — {label}</div>
       <div style={{ fontSize: 12, color: "#555", marginBottom: 10 }}>
-        Generado {today} · {docs.length} documento{docs.length === 1 ? "" : "s"} · Neto {fmtCurrency(totals.neto)} · IVA {fmtCurrency(totals.iva)} · Total {fmtCurrency(totals.total)}
+        Generado {today} · {realCount} documento{realCount === 1 ? "" : "s"} · Neto {fmtCurrency(totals.neto)} · IVA {fmtCurrency(totals.iva)} · Total {fmtCurrency(totals.total)}
+        {informalCount > 0 && (
+          <> · + {informalCount} gasto{informalCount === 1 ? "" : "s"} informal{informalCount === 1 ? "" : "es"} {fmtCurrency(informalTotal)} · Total combinado {fmtCurrency(totals.total + informalTotal)}</>
+        )}
       </div>
       <table style={{ borderCollapse: "collapse", width: "100%" }}>
         <thead>
@@ -2946,6 +3111,23 @@ const PrintableCostCenterDocs = forwardRef(function PrintableCostCenterDocs(
         </thead>
         <tbody>
           {docs.map((d) => {
+            if (d.__informal) {
+              const company = companiesById.get(d.companyId);
+              return (
+                <tr key={`inf_${d.id}`} style={{ background: "#fdf3e2" }}>
+                  <td style={{ ...pCell, fontVariantNumeric: "tabular-nums" }}>{d.date || "—"}</td>
+                  <td style={pCell}>{company?.alias || company?.razonSocial || "—"}</td>
+                  <td style={{ ...pCell, color: "#b8860b" }}>Informal</td>
+                  <td style={pCell}>—</td>
+                  <td style={{ ...pCell, textAlign: "right" }}>—</td>
+                  <td style={pCell}>{d.detail || "—"}</td>
+                  <td style={pCell}>—</td>
+                  <td style={{ ...pCell, textAlign: "right" }}>—</td>
+                  <td style={{ ...pCell, textAlign: "right" }}>—</td>
+                  <td style={{ ...pCell, textAlign: "right", fontVariantNumeric: "tabular-nums", fontWeight: 600 }}>{fmtCurrency(d.amount)}</td>
+                </tr>
+              );
+            }
             const isNC = CREDIT_NOTE_TYPES.has(Number(d.tipo));
             const sign = isNC ? "−" : "";
             const razon = d.kind === "venta" ? d.razonSocialReceptor : d.razonSocialEmisor;
@@ -2973,11 +3155,159 @@ const PrintableCostCenterDocs = forwardRef(function PrintableCostCenterDocs(
             <td style={{ ...pCell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(totals.iva)}</td>
             <td style={{ ...pCell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(totals.total)}</td>
           </tr>
+          {informalCount > 0 && (
+            <>
+              <tr style={{ background: "#fdf3e2" }}>
+                <td style={{ ...pCell, fontWeight: 700 }} colSpan={9}>GASTOS INFORMALES ({informalCount})</td>
+                <td style={{ ...pCell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(informalTotal)}</td>
+              </tr>
+              <tr style={{ background: "#c6efce" }}>
+                <td style={{ ...pCell, fontWeight: 700 }} colSpan={9}>TOTAL COMBINADO</td>
+                <td style={{ ...pCell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(totals.total + informalTotal)}</td>
+              </tr>
+            </>
+          )}
         </tbody>
       </table>
     </div>
   );
 });
+
+// Crear/editar/eliminar un gasto informal (sin factura/boleta formal) de un
+// centro de costo. Vive puramente en `informalExpenses` — nunca toca
+// `dteDocuments` ni la data fiscal real. El centro de costo viene fijo del
+// contexto (el que se está viendo en CostCentersModal), no es elegible acá.
+function InformalExpenseFormModal({ expense, costCenterId, companiesList, onClose, onSaved, onDeleted }) {
+  const toast = useToast();
+  const [date, setDate] = useState(expense?.date || todayIso());
+  const [amount, setAmount] = useState(expense ? String(expense.amount) : "");
+  const [detail, setDetail] = useState(expense?.detail || "");
+  const [companyId, setCompanyId] = useState(expense?.companyId || "");
+  const [busy, setBusy] = useState(false);
+
+  const save = async () => {
+    if (!date) { toast.warning("Falta la fecha."); return; }
+    const amt = Number(amount);
+    if (!amt || amt <= 0) { toast.warning("Ingresá un monto válido."); return; }
+    if (!detail.trim()) { toast.warning("Agregá un detalle."); return; }
+    setBusy(true);
+    try {
+      const payload = { costCenterId, date, amount: amt, detail: detail.trim(), companyId: companyId || null };
+      if (expense) {
+        await informalExpensesService.update(expense.id, payload);
+      } else {
+        await informalExpensesService.create(payload);
+      }
+      await onSaved();
+      onClose();
+    } catch (err) {
+      toast.error("Error al guardar: " + (err.message || err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    if (!confirm("¿Eliminar este gasto informal?")) return;
+    setBusy(true);
+    try {
+      await informalExpensesService.remove(expense.id);
+      await onDeleted();
+      onClose();
+    } catch (err) {
+      toast.error("Error al eliminar: " + (err.message || err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      size="md"
+      title={expense ? "Editar gasto informal" : "Nuevo gasto informal"}
+      footer={
+        <>
+          {expense && (
+            <button
+              onClick={remove}
+              disabled={busy}
+              className="mr-auto rounded-md border border-[var(--color-danger)] px-3 py-1.5 text-sm text-[var(--color-danger)] hover:bg-[var(--color-danger-soft)] disabled:opacity-50"
+            >
+              Eliminar
+            </button>
+          )}
+          <button
+            onClick={onClose}
+            disabled={busy}
+            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm"
+          >
+            Cancelar
+          </button>
+          <button
+            onClick={save}
+            disabled={busy}
+            className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
+          >
+            {busy ? "Guardando..." : "Guardar"}
+          </button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        <p className="text-xs text-[var(--color-muted)]">
+          Plata sin factura/boleta formal (o boleta pedida pero nunca ingresada). Puramente informativo — no afecta la data fiscal real.
+        </p>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="mb-1 block text-xs font-medium text-[var(--color-muted)]">Fecha</label>
+            <input
+              type="date"
+              value={date}
+              onChange={(e) => setDate(e.target.value)}
+              className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-medium text-[var(--color-muted)]">Monto</label>
+            <input
+              type="number"
+              min="0"
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+              placeholder="0"
+              className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm"
+            />
+          </div>
+        </div>
+        <div>
+          <label className="mb-1 block text-xs font-medium text-[var(--color-muted)]">Detalle</label>
+          <textarea
+            value={detail}
+            onChange={(e) => setDetail(e.target.value)}
+            rows={2}
+            placeholder='Ej: "Flete informal a Juan Pérez", "Ferretería, se pidió boleta pero no llegó"'
+            className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm"
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs font-medium text-[var(--color-muted)]">Empresa (opcional)</label>
+          <select
+            value={companyId}
+            onChange={(e) => setCompanyId(e.target.value)}
+            className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm"
+          >
+            <option value="">— Sin empresa —</option>
+            {companiesList.map((co) => (
+              <option key={co.id} value={co.id}>{co.alias || co.razonSocial}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+    </Modal>
+  );
+}
 
 // Select inline en cada fila para cambiar el estado de pago de una factura.
 // Reemplaza el viejo botón cíclico — con 4 estados el ciclo se vuelve confuso.

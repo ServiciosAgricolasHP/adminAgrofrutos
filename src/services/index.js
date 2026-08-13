@@ -76,4 +76,10 @@ export const priceBookConfigService = createService("priceBookConfig", "priceBoo
 // "otro impuesto", no vive en esta colección. Ver Facturacion.jsx.
 export const costCentersService = createService("costCenter", "costCenters");
 
+// Gastos informales por centro de costo — plata sin factura/boleta formal
+// (o con boleta pedida pero nunca ingresada al SII). Puramente informativo:
+// NO son dteDocuments, no se mezclan con la data fiscal real, solo se
+// muestran dentro de la vista de un centro de costo en Facturacion.jsx.
+export const informalExpensesService = createService("informalExpense", "informalExpenses");
+
 export { logAction } from "./logger";
