@@ -69,4 +69,11 @@ export const priceBookService = createService("priceBookEntry", "priceBookEntrie
 // mismo patrón que `indicators/main`.
 export const priceBookConfigService = createService("priceBookConfig", "priceBookConfig");
 
+// Centros de costo ficticios para el Libro de Facturación — catálogo global
+// (compartido entre empresas) para etiquetar manualmente documentos que no
+// calzan con la agrupación por proveedor (ej. "Arriendo", "Mantención").
+// "Combustibles" es aparte: sigue siendo 100% automático por código SII de
+// "otro impuesto", no vive en esta colección. Ver Facturacion.jsx.
+export const costCentersService = createService("costCenter", "costCenters");
+
 export { logAction } from "./logger";

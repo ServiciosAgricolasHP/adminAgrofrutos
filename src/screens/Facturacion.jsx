@@ -9,7 +9,7 @@ import React, { forwardRef, useEffect, useMemo, useRef, useState } from "react";
 import { toPng, toBlob } from "html-to-image";
 import { writeBatch, doc, serverTimestamp } from "firebase/firestore";
 import { db, auth } from "../firebase";
-import { companiesService, dteDocumentsService } from "../services";
+import { companiesService, dteDocumentsService, costCentersService } from "../services";
 import { parseSiiRcvCsv, dteTypeLabel, buildDteDocId, normalizeRut, extractRutFromFilename, otroImpuestoLabel, otroImpuestoCategory, OTRO_IMP_CATEGORIES } from "../utils/siiCsvParser";
 import { formatRutForDisplay } from "../utils/rutUtils";
 import Modal from "../components/Modal";
@@ -208,6 +208,15 @@ export default function Facturacion() {
   const [importing, setImporting] = useState(false);
   const [companiesModalOpen, setCompaniesModalOpen] = useState(false);
   const [pendientesModalOpen, setPendientesModalOpen] = useState(false);
+  // Catálogo de centros de costo ficticios (manual, ver costCentersService).
+  // Global — compartido entre todas las empresas, igual que se definió con el
+  // usuario. "Combustibles" no vive acá: sigue siendo automático por SII.
+  const [costCenters, setCostCenters] = useState([]);
+  // Modal unificado: crear/editar/eliminar centros de costo + vista global de
+  // TODOS los documentos de un centro elegido, de todas las empresas y
+  // períodos (ignora los filtros de la tabla principal), ordenados
+  // cronológicamente. Independiente del toggle de agrupación de la tabla.
+  const [costCentersModalOpen, setCostCentersModalOpen] = useState(false);
   // Modal de detalle: muestra todos los campos del DTE + notas editables.
   // Se abre al click en el botón ℹ de cada fila.
   const [detailDoc, setDetailDoc] = useState(null);
@@ -247,16 +256,22 @@ export default function Facturacion() {
     () => new Map(companies.map((c) => [c.id, c])),
     [companies],
   );
+  const costCentersById = useMemo(
+    () => new Map(costCenters.map((c) => [c.id, c])),
+    [costCenters],
+  );
 
   const loadAll = async () => {
     setLoading(true);
     try {
-      const [comps, list] = await Promise.all([
+      const [comps, list, centers] = await Promise.all([
         companiesService.list({ order: ["razonSocial", "asc"], cache: true, ttl: 600_000 }),
         dteDocumentsService.list({ order: ["fechaEmision", "desc"], cache: true, ttl: 600_000 }),
+        costCentersService.list({ order: ["label", "asc"], cache: true, ttl: 600_000 }),
       ]);
       setCompanies(comps);
       setDocs(list);
+      setCostCenters(centers);
       // Si lo guardado en localStorage ya no existe (empresa borrada) o no hay
       // nada elegido, caemos al primero. Sino respetamos la última elección.
       if (comps.length > 0 && !comps.some((c) => c.id === selectedCompanyId)) {
@@ -791,6 +806,20 @@ export default function Facturacion() {
       setDetailDoc((cur) => (cur?.id === dteDoc.id ? { ...cur, notes } : cur));
     } catch (err) {
       toast.error("Error al guardar notas: " + (err.message || err));
+    }
+  };
+
+  // Asigna (o quita) el centro de costo ficticio manual de un documento.
+  // Los combustibles siguen agrupándose solo, automático — este campo es para
+  // el resto de las categorías que el usuario define a mano.
+  const saveDocCostCenter = async (dteDoc, costCenterId) => {
+    const next = costCenterId || null;
+    try {
+      await dteDocumentsService.update(dteDoc.id, { costCenterId: next });
+      setDocs((prev) => prev.map((d) => (d.id === dteDoc.id ? { ...d, costCenterId: next } : d)));
+      setDetailDoc((cur) => (cur?.id === dteDoc.id ? { ...cur, costCenterId: next } : cur));
+    } catch (err) {
+      toast.error("Error al asignar centro de costo: " + (err.message || err));
     }
   };
 
@@ -1343,12 +1372,13 @@ export default function Facturacion() {
         });
       };
 
-      const writeGroupHeader = (r, label, count, isFuel) => {
+      const writeGroupHeader = (r, label, count, isFuel, isManual) => {
         ws.getCell(r, 2).value = `${isFuel ? "⛽ COMBUSTIBLES" : label} · ${count} doc${count === 1 ? "" : "s"}`;
         ws.getCell(r, 2).font = { bold: true };
         ws.mergeCells(r, 2, r, lastCol);
+        const fillColor = isFuel ? "FFFDE2CC" : isManual ? "FFDCE6F1" : "FFE2EFDA";
         for (let col = 2; col <= lastCol; col++) {
-          ws.getCell(r, col).fill = { type: "pattern", pattern: "solid", fgColor: { argb: isFuel ? "FFFDE2CC" : "FFE2EFDA" } };
+          ws.getCell(r, col).fill = { type: "pattern", pattern: "solid", fgColor: { argb: fillColor } };
           ws.getCell(r, col).border = { top: { style: "thin" }, left: { style: "thin" }, right: { style: "thin" }, bottom: { style: "thin" } };
         }
       };
@@ -1374,9 +1404,9 @@ export default function Facturacion() {
       const dataStart = HR + 1;
       let r = dataStart;
       if (groupByCostCenter) {
-        const groups = groupDocsByCostCenter(sortedFiltered, kindTab);
+        const groups = groupDocsByCostCenter(sortedFiltered, kindTab, costCentersById);
         for (const g of groups) {
-          writeGroupHeader(r, g.razon, g.docs.length, g.isFuel);
+          writeGroupHeader(r, g.razon, g.docs.length, g.isFuel, g.isManual);
           r++;
           for (const d of g.docs) {
             writeDocRow(r, d);
@@ -1987,10 +2017,17 @@ export default function Facturacion() {
                   : "border-[var(--color-border)] bg-[var(--color-surface-2)] hover:bg-[var(--color-accent-soft)]"
               }`}
               title={groupByCostCenter
-                ? "Export agrupado por centro de costo (combustibles juntos, resto por proveedor). Click para volver a vista plana."
-                : "Agrupar el export por centro de costo: combustibles como un grupo aparte y el resto por proveedor."}
+                ? "Esta tabla y su export están agrupados por centro de costo (combustibles juntos, resto por proveedor). Click para volver a la vista plana."
+                : "Agrupar ESTA tabla y su export por centro de costo: combustibles como un grupo aparte y el resto por proveedor."}
             >
-              {groupByCostCenter ? "🗂 Centro de costo · ON" : "🗂 Centro de costo"}
+              {groupByCostCenter ? "🗂 Agrupar tabla por centro · ON" : "🗂 Agrupar tabla por centro"}
+            </button>
+            <button
+              onClick={() => setCostCentersModalOpen(true)}
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
+              title="Abrir el panel de centros de costo: crear/editar/eliminar categorías y ver todos sus documentos, de todas las empresas y períodos"
+            >
+              🏷 Gestionar centros de costo
             </button>
           </div>
 
@@ -2004,6 +2041,7 @@ export default function Facturacion() {
               periodo={periodoFilter}
               totals={totals}
               groupByCostCenter={groupByCostCenter}
+              costCentersById={costCentersById}
               showEstado={kindTab === "venta"}
             />
           </div>
@@ -2021,6 +2059,7 @@ export default function Facturacion() {
                 <SortHeader sortKey="iva" sortBy={sortBy} onToggle={toggleSort} align="right">IVA</SortHeader>
                 <SortHeader sortKey="total" sortBy={sortBy} onToggle={toggleSort} align="right">Total</SortHeader>
                 <SortHeader sortKey="pagado" sortBy={sortBy} onToggle={toggleSort} align="right">Abonos</SortHeader>
+                <th className="px-2 py-2 text-left">C. Costo</th>
                 {kindTab === "venta" && (
                   <SortHeader sortKey="estado" sortBy={sortBy} onToggle={toggleSort} align="center">Estado</SortHeader>
                 )}
@@ -2033,6 +2072,7 @@ export default function Facturacion() {
                 const razon = kindTab === "venta" ? d.razonSocialReceptor : d.razonSocialEmisor;
                 const rut = kindTab === "venta" ? d.rutReceptor : d.rutEmisor;
                 const isNC = CREDIT_NOTE_TYPES.has(Number(d.tipo));
+                const isFuel = d.otroImpuestoCategory === "combustible";
                 const st = d.paymentStatus || "unpaid";
                 const hasNotes = !!(d.notes && d.notes.trim());
                 return (
@@ -2074,6 +2114,22 @@ export default function Facturacion() {
                         );
                       })()}
                     </td>
+                    <td className="px-2 py-1.5">
+                      {isFuel ? (
+                        <span
+                          title="Ya agrupado automático como Combustible (código SII de otro impuesto)"
+                          className="rounded-full bg-[var(--color-warning-soft)] px-2 py-0.5 text-[10px] font-medium text-[var(--color-warning)]"
+                        >
+                          ⛽ auto
+                        </span>
+                      ) : (
+                        <CostCenterSelect
+                          value={d.costCenterId || ""}
+                          costCenters={costCenters}
+                          onChange={(next) => saveDocCostCenter(d, next)}
+                        />
+                      )}
+                    </td>
                     {kindTab === "venta" && (
                       <td className="px-2 py-1.5 text-center">
                         {isNC ? (
@@ -2114,11 +2170,19 @@ export default function Facturacion() {
 
                 if (!groupByCostCenter) return pagedDocs.map(renderDocRow);
 
-                const totalCols = kindTab === "venta" ? 11 : 10;
-                const groups = groupDocsByCostCenter(sortedFiltered, kindTab);
+                const totalCols = kindTab === "venta" ? 12 : 11;
+                const groups = groupDocsByCostCenter(sortedFiltered, kindTab, costCentersById);
                 return groups.map((g) => (
                   <React.Fragment key={`g_${g.key}`}>
-                    <tr className={g.isFuel ? "bg-[var(--color-warning-soft)]" : "bg-[var(--color-accent-soft)]"}>
+                    <tr
+                      className={
+                        g.isFuel
+                          ? "bg-[var(--color-warning-soft)]"
+                          : g.isManual
+                            ? "bg-[var(--color-success-soft)]"
+                            : "bg-[var(--color-accent-soft)]"
+                      }
+                    >
                       <td colSpan={totalCols} className="px-2 py-1.5 text-xs font-semibold">
                         {g.isFuel ? "⛽ COMBUSTIBLES" : (g.razon || "—")}
                         {!g.isFuel && g.rut && (
@@ -2133,7 +2197,7 @@ export default function Facturacion() {
                       <td className="px-2 py-1.5 text-right tabular-nums">{fmtCurrency(g.neto)}</td>
                       <td className="px-2 py-1.5 text-right tabular-nums">{fmtCurrency(g.iva)}</td>
                       <td className="px-2 py-1.5 text-right tabular-nums">{fmtCurrency(g.total)}</td>
-                      <td colSpan={kindTab === "venta" ? 3 : 2}></td>
+                      <td colSpan={kindTab === "venta" ? 4 : 3}></td>
                     </tr>
                   </React.Fragment>
                 ));
@@ -2236,15 +2300,684 @@ export default function Facturacion() {
         <DocDetailModal
           dteDoc={detailDoc}
           candidateNcs={cancellingByDocId.get(detailDoc.id) || []}
+          costCenters={costCenters}
           onClose={() => setDetailDoc(null)}
           onSaveNotes={(notes) => saveDocNotes(detailDoc, notes)}
           onSetStatus={(next) => setPaymentStatus(detailDoc, next)}
           onSavePayments={(payments) => saveDocPayments(detailDoc, payments)}
+          onSetCostCenter={(next) => saveDocCostCenter(detailDoc, next)}
+        />
+      )}
+
+      {costCentersModalOpen && (
+        <CostCentersModal
+          costCenters={costCenters}
+          docs={docs}
+          companiesById={companiesById}
+          onClose={() => setCostCentersModalOpen(false)}
+          onChanged={loadAll}
+          onSelectDoc={(d) => { setCostCentersModalOpen(false); setDetailDoc(d); }}
         />
       )}
     </div>
   );
 }
+
+// Select inline en cada fila para etiquetar el centro de costo ficticio
+// manual de un documento. Combustibles no pasan por acá — se muestran como
+// chip fijo "⛽ auto" porque su agrupación es automática y no se puede pisar
+// con un tag manual (ver groupDocsByCostCenter).
+function CostCenterSelect({ value, costCenters, onChange }) {
+  const optionStyle = { backgroundColor: "var(--color-surface)", color: "var(--color-text)" };
+  const selected = costCenters.find((c) => c.id === value);
+  return (
+    <select
+      value={value || ""}
+      onChange={(e) => onChange(e.target.value || null)}
+      className={`rounded-full px-2 py-0.5 text-[10px] font-medium outline-none border-0 cursor-pointer ${
+        selected
+          ? "bg-[var(--color-success-soft)] text-[var(--color-success)]"
+          : "bg-[var(--color-surface-2)] text-[var(--color-muted)]"
+      }`}
+    >
+      <option value="" style={optionStyle}>—</option>
+      {costCenters.map((c) => (
+        <option key={c.id} value={c.id} style={optionStyle}>
+          {c.emoji ? `${c.emoji} ` : ""}{c.label}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+const FUEL_VIEW_ID = "__fuel__";
+
+// Modal unificado de Centros de costo: catálogo (crear/editar/eliminar,
+// arriba, como chips) + vista global del centro elegido (abajo) — TODOS sus
+// documentos, de TODAS las empresas y períodos (ignora a propósito los
+// filtros de la tabla principal), con búsqueda/filtros propios, columnas
+// ordenables y export (copiar/PNG/imprimir/XLSX). Incluye "Combustibles"
+// como chip fijo no editable aunque viva fuera del catálogo manual — es la
+// otra mitad del mismo concepto (automático vs. manual).
+function CostCentersModal({ costCenters, docs, companiesById, onClose, onChanged, onSelectDoc }) {
+  const toast = useToast();
+  const printRef = useRef(null);
+
+  // --- CRUD del catálogo ---
+  const [editing, setEditing] = useState(null); // { id?, label, emoji }
+  const [busy, setBusy] = useState(false);
+
+  const startNew = () => setEditing({ id: null, label: "", emoji: "" });
+  const startEdit = (c) => setEditing({ id: c.id, label: c.label, emoji: c.emoji || "" });
+
+  const save = async () => {
+    if (!editing.label.trim()) {
+      toast.warning("Ponele un nombre al centro de costo.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const payload = { label: editing.label.trim(), emoji: (editing.emoji || "").trim() || null };
+      if (editing.id) {
+        await costCentersService.update(editing.id, payload);
+      } else {
+        await costCentersService.create(payload);
+      }
+      setEditing(null);
+      await onChanged();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async (c) => {
+    if (!confirm(`¿Eliminar el centro de costo "${c.label}"?\n\nLos documentos que ya tenían este centro asignado quedarán sin etiqueta.`)) return;
+    setBusy(true);
+    try {
+      await costCentersService.remove(c.id);
+      if (selectedId === c.id) setSelectedId("");
+      await onChanged();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // --- Vista global del centro elegido ---
+  const [selectedId, setSelectedId] = useState("");
+  const [showCatalog, setShowCatalog] = useState(false);
+  const [search, setSearch] = useState("");
+  const [kindFilter, setKindFilter] = useState(""); // "" | "venta" | "compra"
+  const [companyFilterId, setCompanyFilterId] = useState("");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [sortBy, setSortBy] = useState({ key: "fechaEmision", dir: "asc" });
+  const [exportBusy, setExportBusy] = useState("");
+
+  const companiesList = useMemo(
+    () => [...companiesById.values()].sort((a, b) => (a.alias || a.razonSocial || "").localeCompare(b.alias || b.razonSocial || "")),
+    [companiesById],
+  );
+
+  const selectedCenter = costCenters.find((c) => c.id === selectedId);
+  const selectedLabel = selectedId === FUEL_VIEW_ID
+    ? "⛽ Combustibles"
+    : selectedCenter
+      ? (selectedCenter.emoji ? `${selectedCenter.emoji} ${selectedCenter.label}` : selectedCenter.label)
+      : "";
+
+  const baseDocs = useMemo(() => {
+    if (!selectedId) return [];
+    return selectedId === FUEL_VIEW_ID
+      ? docs.filter((d) => d.otroImpuestoCategory === "combustible")
+      : docs.filter((d) => d.costCenterId === selectedId);
+  }, [docs, selectedId]);
+
+  const hasFilters = !!(search.trim() || kindFilter || companyFilterId || dateFrom || dateTo);
+  const clearFilters = () => {
+    setSearch(""); setKindFilter(""); setCompanyFilterId(""); setDateFrom(""); setDateTo("");
+  };
+
+  const filtered = useMemo(() => {
+    let list = baseDocs;
+    if (kindFilter) list = list.filter((d) => d.kind === kindFilter);
+    if (companyFilterId) list = list.filter((d) => d.companyId === companyFilterId);
+    if (dateFrom) list = list.filter((d) => (d.fechaEmision || "") >= dateFrom);
+    if (dateTo) list = list.filter((d) => (d.fechaEmision || "") <= dateTo);
+    if (search.trim()) {
+      const q = search.trim().toLowerCase();
+      list = list.filter((d) => {
+        const razon = (d.kind === "venta" ? d.razonSocialReceptor : d.razonSocialEmisor) || "";
+        const rut = (d.kind === "venta" ? d.rutReceptor : d.rutEmisor) || "";
+        return razon.toLowerCase().includes(q) || rut.toLowerCase().includes(q) || String(d.folio || "").includes(q);
+      });
+    }
+    return list;
+  }, [baseDocs, kindFilter, companyFilterId, dateFrom, dateTo, search]);
+
+  const totals = useMemo(() => {
+    let neto = 0, iva = 0, total = 0;
+    for (const d of filtered) {
+      const s = CREDIT_NOTE_TYPES.has(Number(d.tipo)) ? -1 : 1;
+      neto += s * (Number(d.neto) || 0);
+      iva += s * (Number(d.iva) || 0);
+      total += s * (Number(d.total) || 0);
+    }
+    return { neto, iva, total };
+  }, [filtered]);
+
+  const sortGetter = (d, key) => {
+    switch (key) {
+      case "fechaEmision": return d.fechaEmision || "";
+      case "empresa": {
+        const co = companiesById.get(d.companyId);
+        return co?.alias || co?.razonSocial || "";
+      }
+      case "folio": return Number(d.folio) || 0;
+      case "razon": return (d.kind === "venta" ? d.razonSocialReceptor : d.razonSocialEmisor) || "";
+      case "neto": return Number(d.neto) || 0;
+      case "iva": return Number(d.iva) || 0;
+      case "total": return Number(d.total) || 0;
+      default: return "";
+    }
+  };
+  const sorted = useMemo(() => {
+    const arr = [...filtered];
+    arr.sort((a, b) => {
+      const av = sortGetter(a, sortBy.key);
+      const bv = sortGetter(b, sortBy.key);
+      const cmp = typeof av === "number" && typeof bv === "number" ? av - bv : String(av).localeCompare(String(bv));
+      return sortBy.dir === "asc" ? cmp : -cmp;
+    });
+    return arr;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filtered, sortBy, companiesById]);
+  const toggleSort = (key) => {
+    setSortBy((cur) => cur.key === key ? { key, dir: cur.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" });
+  };
+
+  // --- Export: copiar/PNG/imprimir/XLSX del listado ya filtrado/ordenado ---
+  const fileBase = useMemo(() => {
+    const label = (selectedLabel || "centro_de_costo").replace(/[^\w-]+/g, "_");
+    return `CentroCosto_${label}_${todayIso()}`;
+  }, [selectedLabel]);
+
+  const handleCopy = async () => {
+    if (!printRef.current) return;
+    setExportBusy("copy");
+    try {
+      const blob = await toBlob(printRef.current, { backgroundColor: "#ffffff", pixelRatio: 2 });
+      if (!blob) throw new Error("No se pudo generar la imagen");
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+      toast.success("Imagen copiada al portapapeles");
+    } catch (err) {
+      toast.error("Error al copiar: " + (err.message || err));
+    } finally {
+      setExportBusy("");
+    }
+  };
+
+  const handlePng = async () => {
+    if (!printRef.current) return;
+    setExportBusy("png");
+    try {
+      const dataUrl = await toPng(printRef.current, { backgroundColor: "#ffffff", pixelRatio: 2 });
+      const link = document.createElement("a");
+      link.download = `${fileBase}.png`;
+      link.href = dataUrl;
+      link.click();
+    } catch (err) {
+      toast.error("Error PNG: " + (err.message || err));
+    } finally {
+      setExportBusy("");
+    }
+  };
+
+  const handlePrint = () => {
+    if (!printRef.current) return;
+    const html = printRef.current.outerHTML;
+    const win = window.open("", "_blank", "width=1000,height=700");
+    if (!win) { toast.warning("Permite las ventanas emergentes para imprimir."); return; }
+    win.document.write(`<!DOCTYPE html><html><head><title>Centro de costo — ${selectedLabel}</title>
+      <style>
+        * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; color-adjust: exact !important; }
+        body { font-family: ui-sans-serif, system-ui, sans-serif; padding: 20px; color: #000; }
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid #999; padding: 5px 7px; font-size: 11px; }
+        thead th { background: #92d050 !important; text-align: left; }
+        @media print { @page { size: landscape; margin: 10mm; } }
+      </style>
+    </head><body>${html}</body></html>`);
+    win.document.close();
+    win.focus();
+    setTimeout(() => { win.print(); }, 250);
+  };
+
+  const handleXlsx = async () => {
+    setExportBusy("xlsx");
+    try {
+      const ExcelJS = (await import("exceljs")).default || (await import("exceljs"));
+      const wb = new ExcelJS.Workbook();
+      const ws = wb.addWorksheet("Centro de costo");
+      ws.getColumn(1).width = 6;  // col A vacía half-width (convención)
+      ws.getColumn(2).width = 12; // Fecha
+      ws.getColumn(3).width = 22; // Empresa
+      ws.getColumn(4).width = 10; // Mov.
+      ws.getColumn(5).width = 22; // Documento
+      ws.getColumn(6).width = 10; // Folio
+      ws.getColumn(7).width = 30; // Contraparte
+      ws.getColumn(8).width = 16; // RUT
+      ws.getColumn(9).width = 14; // Neto
+      ws.getColumn(10).width = 14; // IVA
+      ws.getColumn(11).width = 14; // Total
+
+      ws.getCell("B2").value = `CENTRO DE COSTO — ${selectedLabel}`;
+      ws.getCell("B2").font = { bold: true, size: 14 };
+      ws.mergeCells("B2:K2");
+      ws.getCell("B3").value = `${sorted.length} documento${sorted.length === 1 ? "" : "s"} · Neto ${fmtCurrency(totals.neto)} · IVA ${fmtCurrency(totals.iva)} · Total ${fmtCurrency(totals.total)}`;
+      ws.getCell("B3").font = { italic: true, color: { argb: "FF555555" } };
+      ws.mergeCells("B3:K3");
+
+      const HR = 5;
+      const headers = ["Fecha", "Empresa", "Mov.", "Documento", "Folio", "Contraparte", "RUT", "Neto", "IVA", "Total"];
+      headers.forEach((h, i) => {
+        const c = ws.getCell(HR, 2 + i);
+        c.value = h;
+        c.font = { bold: true };
+        c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF92D050" } };
+        c.alignment = { horizontal: i <= 6 ? "left" : "right", vertical: "middle" };
+        c.border = { top: { style: "thin" }, left: { style: "thin" }, right: { style: "thin" }, bottom: { style: "thin" } };
+      });
+
+      let r = HR + 1;
+      for (const d of sorted) {
+        const isNC = CREDIT_NOTE_TYPES.has(Number(d.tipo));
+        const sign = isNC ? -1 : 1;
+        const razon = d.kind === "venta" ? d.razonSocialReceptor : d.razonSocialEmisor;
+        const rut = d.kind === "venta" ? d.rutReceptor : d.rutEmisor;
+        const company = companiesById.get(d.companyId);
+        const cells = [
+          d.fechaEmision || "",
+          company?.alias || company?.razonSocial || "",
+          d.kind === "venta" ? "Venta" : "Compra",
+          d.tipoLabel || dteTypeLabel(d.tipo),
+          d.folio,
+          razon || "",
+          formatRutForDisplay(rut) || "",
+          sign * (Number(d.neto) || 0),
+          sign * (Number(d.iva) || 0),
+          sign * (Number(d.total) || 0),
+        ];
+        cells.forEach((v, j) => {
+          const c = ws.getCell(r, 2 + j);
+          c.value = v;
+          c.alignment = { horizontal: j <= 6 ? "left" : "right" };
+          c.border = { top: { style: "thin" }, left: { style: "thin" }, right: { style: "thin" }, bottom: { style: "thin" } };
+          if (j >= 7 && j <= 9) c.numFmt = '"$"#,##0';
+          if (isNC && j >= 7 && j <= 9) c.font = { color: { argb: "FFCC0000" } };
+        });
+        r++;
+      }
+
+      ws.getCell(r, 2).value = `TOTAL (${sorted.length})`;
+      ws.mergeCells(r, 2, r, 8);
+      for (let col = 2; col <= 11; col++) {
+        ws.getCell(r, col).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFC6EFCE" } };
+        ws.getCell(r, col).border = { top: { style: "thin" }, left: { style: "thin" }, right: { style: "thin" }, bottom: { style: "thin" } };
+        ws.getCell(r, col).font = { bold: true };
+      }
+      [totals.neto, totals.iva, totals.total].forEach((v, j) => {
+        const c = ws.getCell(r, 9 + j);
+        c.value = v;
+        c.numFmt = '"$"#,##0';
+        c.alignment = { horizontal: "right" };
+      });
+
+      const buf = await wb.xlsx.writeBuffer();
+      const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = `${fileBase}.xlsx`;
+      link.click();
+      URL.revokeObjectURL(link.href);
+    } catch (err) {
+      toast.error("Error XLSX: " + (err.message || err));
+    } finally {
+      setExportBusy("");
+    }
+  };
+
+  const selectClass = "rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1.5 text-xs";
+
+  return (
+    <Modal open onClose={onClose} size="full" title="Centros de costo">
+      {editing ? (
+        <div className="space-y-3">
+          <div>
+            <label className="mb-1 block text-xs font-medium text-[var(--color-muted)]">Nombre</label>
+            <input
+              value={editing.label}
+              onChange={(e) => setEditing({ ...editing, label: e.target.value })}
+              placeholder="Arriendo, Mantención, etc."
+              className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-medium text-[var(--color-muted)]">Emoji (opcional)</label>
+            <input
+              value={editing.emoji}
+              onChange={(e) => setEditing({ ...editing, emoji: e.target.value })}
+              placeholder="🏠"
+              maxLength={4}
+              className="w-24 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm"
+            />
+          </div>
+          <div className="flex justify-end gap-2 pt-2">
+            <button
+              onClick={() => setEditing(null)}
+              disabled={busy}
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm"
+            >
+              Cancelar
+            </button>
+            <button
+              onClick={save}
+              disabled={busy}
+              className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
+            >
+              {busy ? "Guardando..." : "Guardar"}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          <p className="text-xs text-[var(--color-muted)]">
+            Categorías para agrupar documentos que no calzan con la agrupación por proveedor (ej. "Arriendo",
+            "Mantención"). "Combustibles" es aparte — se detecta automático por código SII, no hace falta crearlo.
+          </p>
+
+          <div className="flex flex-wrap items-end justify-between gap-3">
+            <div className="flex-1">
+              <label className="mb-1 block text-xs font-medium text-[var(--color-muted)]">Ver documentos de</label>
+              <select
+                value={selectedId}
+                onChange={(e) => setSelectedId(e.target.value)}
+                className="w-full max-w-sm rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm"
+              >
+                <option value="">Elegí un centro de costo…</option>
+                <option value={FUEL_VIEW_ID}>⛽ Combustibles (automático)</option>
+                {costCenters.map((c) => (
+                  <option key={c.id} value={c.id}>{c.emoji ? `${c.emoji} ${c.label}` : c.label}</option>
+                ))}
+              </select>
+            </div>
+            <button
+              onClick={() => setShowCatalog((v) => !v)}
+              className={`shrink-0 rounded-md border px-3 py-1.5 text-xs font-medium ${
+                showCatalog
+                  ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+                  : "border-[var(--color-border)] bg-[var(--color-surface-2)] hover:bg-[var(--color-accent-soft)]"
+              }`}
+            >
+              🗂 Gestión de centros{showCatalog ? " ▲" : " ▼"}
+            </button>
+          </div>
+
+          {showCatalog && (
+            <div className="rounded-md border border-[var(--color-border)] p-3">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <span className="text-xs font-semibold uppercase tracking-wide text-[var(--color-muted)]">
+                  Crear y editar centros de costo
+                </span>
+                <button
+                  onClick={startNew}
+                  className="rounded-md bg-[var(--color-accent)] px-2.5 py-1.5 text-xs font-medium text-[var(--color-accent-fg)]"
+                >
+                  + Nuevo centro de costo
+                </button>
+              </div>
+              {costCenters.length === 0 ? (
+                <div className="py-3 text-center text-xs text-[var(--color-muted)]">No hay centros de costo manuales todavía.</div>
+              ) : (
+                <div className="space-y-1">
+                  {costCenters.map((c) => (
+                    <div
+                      key={c.id}
+                      className="flex items-center gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5"
+                    >
+                      <div className="min-w-0 flex-1 truncate text-sm font-medium">
+                        {c.emoji ? `${c.emoji} ` : ""}{c.label}
+                      </div>
+                      <button
+                        onClick={() => startEdit(c)}
+                        className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)]"
+                      >
+                        Editar
+                      </button>
+                      <button
+                        onClick={() => remove(c)}
+                        className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs text-[var(--color-danger)] hover:bg-[var(--color-danger-soft)]"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {!selectedId ? (
+            <div className="rounded-md border border-dashed border-[var(--color-border)] p-8 text-center text-sm text-[var(--color-muted)]">
+              Elegí un centro de costo arriba para ver todos sus documentos.
+            </div>
+          ) : (
+            <div className="space-y-2 border-t border-[var(--color-border)] pt-3">
+              {/* Filtros propios de la vista — no tocan los filtros de la tabla principal. */}
+              <div className="flex flex-wrap items-end gap-2">
+                <div>
+                  <label className="mb-1 block text-[10px] uppercase tracking-wide text-[var(--color-muted)]">Buscar</label>
+                  <input
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    placeholder="Contraparte, RUT o folio"
+                    className={`${selectClass} w-44`}
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-[10px] uppercase tracking-wide text-[var(--color-muted)]">Mov.</label>
+                  <select value={kindFilter} onChange={(e) => setKindFilter(e.target.value)} className={selectClass}>
+                    <option value="">Todos</option>
+                    <option value="venta">Venta</option>
+                    <option value="compra">Compra</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="mb-1 block text-[10px] uppercase tracking-wide text-[var(--color-muted)]">Empresa</label>
+                  <select value={companyFilterId} onChange={(e) => setCompanyFilterId(e.target.value)} className={selectClass}>
+                    <option value="">Todas</option>
+                    {companiesList.map((co) => (
+                      <option key={co.id} value={co.id}>{co.alias || co.razonSocial}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="mb-1 block text-[10px] uppercase tracking-wide text-[var(--color-muted)]">Desde</label>
+                  <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} className={selectClass} />
+                </div>
+                <div>
+                  <label className="mb-1 block text-[10px] uppercase tracking-wide text-[var(--color-muted)]">Hasta</label>
+                  <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className={selectClass} />
+                </div>
+                {hasFilters && (
+                  <button onClick={clearFilters} className="pb-1.5 text-xs text-[var(--color-muted)] underline hover:text-[var(--color-text)]">
+                    Limpiar filtros
+                  </button>
+                )}
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="text-xs text-[var(--color-muted)]">
+                  {sorted.length} documento{sorted.length === 1 ? "" : "s"} · Neto {fmtCurrency(totals.neto)} · IVA {fmtCurrency(totals.iva)} ·{" "}
+                  <span className="font-semibold text-[var(--color-text)]">Total {fmtCurrency(totals.total)}</span>
+                </div>
+                <div className="flex gap-1">
+                  <button onClick={handleCopy} disabled={!!exportBusy || sorted.length === 0} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)] disabled:opacity-60" title="Copiar como imagen">
+                    {exportBusy === "copy" ? "..." : "📋 Copiar"}
+                  </button>
+                  <button onClick={handlePng} disabled={!!exportBusy || sorted.length === 0} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)] disabled:opacity-60" title="Descargar PNG">
+                    {exportBusy === "png" ? "..." : "📥 PNG"}
+                  </button>
+                  <button onClick={handlePrint} disabled={!!exportBusy || sorted.length === 0} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)] disabled:opacity-60" title="Imprimir">
+                    🖨 Imprimir
+                  </button>
+                  <button onClick={handleXlsx} disabled={!!exportBusy || sorted.length === 0} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 text-xs hover:bg-[var(--color-accent-soft)] disabled:opacity-60" title="Exportar XLSX">
+                    {exportBusy === "xlsx" ? "..." : "📊 XLSX"}
+                  </button>
+                </div>
+              </div>
+
+              {sorted.length === 0 ? (
+                <div className="rounded-md border border-dashed border-[var(--color-border)] p-6 text-center text-sm text-[var(--color-muted)]">
+                  {baseDocs.length === 0
+                    ? `No hay documentos etiquetados con "${selectedLabel}" todavía.`
+                    : "Ningún documento calza con estos filtros."}
+                </div>
+              ) : (
+                <div className="max-h-[50vh] overflow-auto rounded-md border border-[var(--color-border)]">
+                  <table className="w-full text-sm">
+                    <thead className="sticky top-0 bg-[var(--color-surface-2)] text-xs uppercase tracking-wide text-[var(--color-muted)]">
+                      <tr>
+                        <SortHeader sortKey="fechaEmision" sortBy={sortBy} onToggle={toggleSort}>Fecha</SortHeader>
+                        <SortHeader sortKey="empresa" sortBy={sortBy} onToggle={toggleSort}>Empresa</SortHeader>
+                        <th className="px-2 py-2 text-left">Mov.</th>
+                        <th className="px-2 py-2 text-left">Tipo</th>
+                        <SortHeader sortKey="folio" sortBy={sortBy} onToggle={toggleSort} align="right">Folio</SortHeader>
+                        <SortHeader sortKey="razon" sortBy={sortBy} onToggle={toggleSort}>Contraparte</SortHeader>
+                        <th className="px-2 py-2 text-left">RUT</th>
+                        <SortHeader sortKey="neto" sortBy={sortBy} onToggle={toggleSort} align="right">Neto</SortHeader>
+                        <SortHeader sortKey="iva" sortBy={sortBy} onToggle={toggleSort} align="right">IVA</SortHeader>
+                        <SortHeader sortKey="total" sortBy={sortBy} onToggle={toggleSort} align="right">Total</SortHeader>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sorted.map((d) => {
+                        const isNC = CREDIT_NOTE_TYPES.has(Number(d.tipo));
+                        const razon = d.kind === "venta" ? d.razonSocialReceptor : d.razonSocialEmisor;
+                        const rut = d.kind === "venta" ? d.rutReceptor : d.rutEmisor;
+                        const company = companiesById.get(d.companyId);
+                        return (
+                          <tr
+                            key={d.id}
+                            onClick={() => onSelectDoc(d)}
+                            className="cursor-pointer border-t border-[var(--color-border)] hover:bg-[var(--color-surface-2)]"
+                          >
+                            <td className="px-2 py-1.5 font-mono text-xs">{d.fechaEmision || "—"}</td>
+                            <td className="px-2 py-1.5 truncate max-w-[160px]">{company?.alias || company?.razonSocial || "—"}</td>
+                            <td className="px-2 py-1.5 text-xs">
+                              <span className={`rounded px-1.5 py-0.5 ${d.kind === "venta" ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)]" : "bg-[var(--color-surface-2)]"}`}>
+                                {d.kind === "venta" ? "Venta" : "Compra"}
+                              </span>
+                            </td>
+                            <td className="px-2 py-1.5 text-xs">
+                              <span className={isNC ? "rounded px-1.5 py-0.5 bg-[var(--color-danger-soft)] text-[var(--color-danger)]" : ""}>
+                                {d.tipoLabel || dteTypeLabel(d.tipo)}
+                              </span>
+                            </td>
+                            <td className="px-2 py-1.5 text-right font-mono tabular-nums">{d.folio}</td>
+                            <td className="px-2 py-1.5 truncate max-w-[220px]">{razon || "—"}</td>
+                            <td className="px-2 py-1.5 font-mono text-xs">{formatRutForDisplay(rut)}</td>
+                            <td className={`px-2 py-1.5 text-right tabular-nums ${isNC ? "text-[var(--color-danger)]" : ""}`}>{isNC ? "−" : ""}{fmtCurrency(d.neto)}</td>
+                            <td className={`px-2 py-1.5 text-right tabular-nums ${isNC ? "text-[var(--color-danger)]" : ""}`}>{isNC ? "−" : ""}{fmtCurrency(d.iva)}</td>
+                            <td className={`px-2 py-1.5 text-right font-semibold tabular-nums ${isNC ? "text-[var(--color-danger)]" : ""}`}>{isNC ? "−" : ""}{fmtCurrency(d.total)}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              <p className="text-[10px] text-[var(--color-muted)]">Click en una fila para abrir el detalle del documento.</p>
+
+              {/* Off-screen printable — capturado por html-to-image / print. */}
+              <div style={{ position: "absolute", left: -99999, top: 0, pointerEvents: "none" }} aria-hidden>
+                <PrintableCostCenterDocs ref={printRef} label={selectedLabel} docs={sorted} totals={totals} companiesById={companiesById} />
+              </div>
+            </div>
+          )}
+
+          <div className="flex justify-end pt-2">
+            <button onClick={onClose} className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-sm">
+              Cerrar
+            </button>
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+// Printable de la vista global de un centro de costo — limpio, sin controles,
+// mismo aesthetic Excel-style del resto de los exports del proyecto.
+const PrintableCostCenterDocs = forwardRef(function PrintableCostCenterDocs(
+  { label, docs, totals, companiesById },
+  ref,
+) {
+  const today = todayIso();
+  return (
+    <div ref={ref} style={{ background: "#fff", padding: 20, width: 1400, fontFamily: "ui-sans-serif, system-ui, sans-serif", color: "#000" }}>
+      <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 2 }}>CENTRO DE COSTO — {label}</div>
+      <div style={{ fontSize: 12, color: "#555", marginBottom: 10 }}>
+        Generado {today} · {docs.length} documento{docs.length === 1 ? "" : "s"} · Neto {fmtCurrency(totals.neto)} · IVA {fmtCurrency(totals.iva)} · Total {fmtCurrency(totals.total)}
+      </div>
+      <table style={{ borderCollapse: "collapse", width: "100%" }}>
+        <thead>
+          <tr style={{ background: "#92d050" }}>
+            <th style={pCellH}>Fecha</th>
+            <th style={pCellH}>Empresa</th>
+            <th style={pCellH}>Mov.</th>
+            <th style={pCellH}>Documento</th>
+            <th style={{ ...pCellH, textAlign: "right" }}>Folio</th>
+            <th style={pCellH}>Contraparte</th>
+            <th style={pCellH}>RUT</th>
+            <th style={{ ...pCellH, textAlign: "right" }}>Neto</th>
+            <th style={{ ...pCellH, textAlign: "right" }}>IVA</th>
+            <th style={{ ...pCellH, textAlign: "right" }}>Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          {docs.map((d) => {
+            const isNC = CREDIT_NOTE_TYPES.has(Number(d.tipo));
+            const sign = isNC ? "−" : "";
+            const razon = d.kind === "venta" ? d.razonSocialReceptor : d.razonSocialEmisor;
+            const rut = d.kind === "venta" ? d.rutReceptor : d.rutEmisor;
+            const company = companiesById.get(d.companyId);
+            const ncColor = isNC ? { color: "#cc0000" } : null;
+            return (
+              <tr key={d.id}>
+                <td style={{ ...pCell, fontVariantNumeric: "tabular-nums" }}>{d.fechaEmision || "—"}</td>
+                <td style={pCell}>{company?.alias || company?.razonSocial || "—"}</td>
+                <td style={pCell}>{d.kind === "venta" ? "Venta" : "Compra"}</td>
+                <td style={{ ...pCell, ...(ncColor || {}) }}>{d.tipoLabel || dteTypeLabel(d.tipo)}</td>
+                <td style={{ ...pCell, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{d.folio}</td>
+                <td style={pCell}>{razon || "—"}</td>
+                <td style={{ ...pCell, fontVariantNumeric: "tabular-nums" }}>{formatRutForDisplay(rut) || "—"}</td>
+                <td style={{ ...pCell, textAlign: "right", fontVariantNumeric: "tabular-nums", ...(ncColor || {}) }}>{sign}{fmtCurrency(d.neto)}</td>
+                <td style={{ ...pCell, textAlign: "right", fontVariantNumeric: "tabular-nums", ...(ncColor || {}) }}>{sign}{fmtCurrency(d.iva)}</td>
+                <td style={{ ...pCell, textAlign: "right", fontVariantNumeric: "tabular-nums", fontWeight: 600, ...(ncColor || {}) }}>{sign}{fmtCurrency(d.total)}</td>
+              </tr>
+            );
+          })}
+          <tr style={{ background: "#c6efce" }}>
+            <td style={{ ...pCell, fontWeight: 700 }} colSpan={7}>TOTAL</td>
+            <td style={{ ...pCell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(totals.neto)}</td>
+            <td style={{ ...pCell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(totals.iva)}</td>
+            <td style={{ ...pCell, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtCurrency(totals.total)}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  );
+});
 
 // Select inline en cada fila para cambiar el estado de pago de una factura.
 // Reemplaza el viejo botón cíclico — con 4 estados el ciclo se vuelve confuso.
@@ -2537,13 +3270,34 @@ const PrintableResumen = forwardRef(function PrintableResumen(
 //   - El resto se agrupa por contraparte (rutEmisor para compras, rutReceptor
 //     para ventas). Cada proveedor / cliente queda como un grupo individual.
 //   - Los grupos no-combustible se ordenan por total desc.
-function groupDocsByCostCenter(docs, kind) {
+// `costCentersById` es opcional (los printables/export sin este mapa siguen
+// funcionando, solo caen a agrupar todo lo no-combustible por proveedor).
+// Combustibles siempre gana — es automático y no se puede pisar con un tag
+// manual, para no volver confusa la regla de agrupación.
+function groupDocsByCostCenter(docs, kind, costCentersById = new Map()) {
   const fuel = { key: "__combustibles__", isFuel: true, razon: "Combustibles", rut: "", docs: [], neto: 0, iva: 0, total: 0 };
+  const manualGroups = new Map();
   const byContra = new Map();
   for (const d of docs) {
     const isFuel = d.otroImpuestoCategory === "combustible";
+    const cc = !isFuel && d.costCenterId ? costCentersById.get(d.costCenterId) : null;
     if (isFuel) {
       fuel.docs.push(d);
+    } else if (cc) {
+      if (!manualGroups.has(d.costCenterId)) {
+        manualGroups.set(d.costCenterId, {
+          key: `cc_${d.costCenterId}`,
+          isFuel: false,
+          isManual: true,
+          razon: cc.emoji ? `${cc.emoji} ${cc.label}` : cc.label,
+          rut: "",
+          docs: [],
+          neto: 0,
+          iva: 0,
+          total: 0,
+        });
+      }
+      manualGroups.get(d.costCenterId).docs.push(d);
     } else {
       const rut = d.kind === "venta" ? d.rutReceptor : d.rutEmisor;
       const razon = d.kind === "venta" ? d.razonSocialReceptor : d.razonSocialEmisor;
@@ -2565,19 +3319,21 @@ function groupDocsByCostCenter(docs, kind) {
     g.docs.sort((a, b) => String(a.fechaEmision || "").localeCompare(String(b.fechaEmision || "")));
   };
   accumulate(fuel);
+  for (const g of manualGroups.values()) accumulate(g);
   for (const g of byContra.values()) accumulate(g);
+  const manual = [...manualGroups.values()].sort((a, b) => Math.abs(b.total) - Math.abs(a.total));
   const others = [...byContra.values()].sort((a, b) => Math.abs(b.total) - Math.abs(a.total));
-  return fuel.docs.length > 0 ? [fuel, ...others] : others;
+  return [...(fuel.docs.length > 0 ? [fuel] : []), ...manual, ...others];
 }
 
 const PrintableDocList = forwardRef(function PrintableDocList(
-  { kind, docs, company, periodo, totals, groupByCostCenter = false, showEstado = true },
+  { kind, docs, company, periodo, totals, groupByCostCenter = false, costCentersById = new Map(), showEstado = true },
   ref,
 ) {
   const periodLabel = formatPeriodPretty(periodo);
   const kindTitle = kindTitleLabel(kind).toUpperCase();
   const contraLabel = kind === "venta" ? "Cliente" : "Proveedor";
-  const groups = groupByCostCenter ? groupDocsByCostCenter(docs, kind) : null;
+  const groups = groupByCostCenter ? groupDocsByCostCenter(docs, kind, costCentersById) : null;
 
   // Columnas: en venta ocultamos Estado (sin control real); el colSpan del
   // TOTAL al pie se ajusta dinámicamente.
@@ -2665,7 +3421,7 @@ const PrintableDocList = forwardRef(function PrintableDocList(
           {/* Vista agrupada por centro de costo */}
           {docs.length > 0 && groupByCostCenter && groups.map((g) => (
             <React.Fragment key={`g_${g.key}`}>
-              <tr style={{ background: g.isFuel ? "#fde2cc" : "#e2efda" }}>
+              <tr style={{ background: g.isFuel ? "#fde2cc" : g.isManual ? "#dce6f1" : "#e2efda" }}>
                 <td style={{ ...pCell, fontWeight: 700 }} colSpan={colCount}>
                   {g.isFuel ? "⛽ COMBUSTIBLES" : g.razon}
                   {!g.isFuel && g.rut && (
@@ -3132,10 +3888,11 @@ function PaymentsSection({ dteDoc, payments, amountPaid, balance, onSavePayments
 // editar las notas (la "glosa" interna del usuario, ya que el SII RCV CSV no
 // trae los items de la factura). Para NCs muestra un campo extra opcional
 // para registrar manualmente la factura referenciada (tipo + folio).
-function DocDetailModal({ dteDoc, candidateNcs = [], onClose, onSaveNotes, onSetStatus, onSavePayments }) {
+function DocDetailModal({ dteDoc, candidateNcs = [], costCenters = [], onClose, onSaveNotes, onSetStatus, onSavePayments, onSetCostCenter }) {
   const [notes, setNotes] = useState(dteDoc.notes || "");
   const [dirty, setDirty] = useState(false);
   const isNC = CREDIT_NOTE_TYPES.has(Number(dteDoc.tipo));
+  const isFuelDoc = dteDoc.otroImpuestoCategory === "combustible";
   const st = dteDoc.paymentStatus || "unpaid";
   const showNcSuggestion = !isNC && st !== "cancelled" && candidateNcs.length > 0;
   const { payments, amountPaid, balance } = paymentsSummary(dteDoc);
@@ -3235,6 +3992,14 @@ function DocDetailModal({ dteDoc, candidateNcs = [], onClose, onSaveNotes, onSet
           <div>
             <div className="text-[10px] uppercase tracking-wide text-[var(--color-muted)]">Período</div>
             <div className="font-mono">{dteDoc.periodo || "—"}</div>
+          </div>
+          <div className="col-span-2">
+            <div className="text-[10px] uppercase tracking-wide text-[var(--color-muted)]">Centro de costo</div>
+            {isFuelDoc ? (
+              <span className="text-xs text-[var(--color-muted)]">⛽ Combustible (agrupación automática, no editable acá)</span>
+            ) : (
+              <CostCenterSelect value={dteDoc.costCenterId || ""} costCenters={costCenters} onChange={onSetCostCenter} />
+            )}
           </div>
           {dteDoc.otroImpuestoCodigo && (
             <div className="col-span-2">
