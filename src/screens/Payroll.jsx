@@ -2467,6 +2467,7 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
   const isDetail = mode === "detail";
   const summaries = options.summaries || [];
   const subfaenaSummary = options.subfaenaSummary || null;
+  const laborSummary = options.laborSummary || null;
   const overviewTitle = isDetail ? "Detalle de pago" : "Comprobante de pago en efectivo";
   const docTitle = isDetail ? `${payroll.name} — Detalle pago` : `${payroll.name} — Efectivo`;
   const cycleLabel = (cycleId) => titleOverrides[cycleId] || cyclesById[cycleId]?.label || cycleDetails.find((c) => c.id === cycleId)?.label || cycleId;
@@ -2864,48 +2865,62 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
     })
     .join("");
 
+  // Período cubierto por un conjunto de ciclos: primer día más temprano →
+  // último día más tardío. Si hay un solo ciclo, queda el rango del ciclo
+  // tal cual. Compartido entre "Resumen por subfaena" y "Resumen por labor".
+  const cyclesPeriod = (cycleIds) => {
+    let minFirst = null;
+    let maxLast = null;
+    for (const cid of cycleIds) {
+      const cd = cycleDetails.find((c) => c.id === cid);
+      let first = cd?.firstDay || "";
+      let last = cd?.lastDay || "";
+      if (!first && !last) {
+        const days = cyclesById[cid]?.days;
+        if (Array.isArray(days) && days.length) {
+          const sorted = [...days].sort();
+          first = sorted[0]; last = sorted[sorted.length - 1];
+        }
+      }
+      if (first && (!minFirst || first < minFirst)) minFirst = first;
+      if (last && (!maxLast || last > maxLast)) maxLast = last;
+    }
+    const a = fmtDayShort(minFirst);
+    const b = fmtDayShort(maxLast);
+    if (a && b && a !== b) return `${a} → ${b}`;
+    return a || b || "—";
+  };
+
   // Resumen ejecutivo por subfaena (primera hoja del detalle imprimible).
   // Filas: subfaena (faena se imprime sólo en la 1ra fila del bloque), cols:
   // Con cuenta RUT vs Efectivo + TOTAL. Se rinde solo en mode "detail".
   const subfaenaSummaryHtml = (isDetail && subfaenaSummary && subfaenaSummary.rows.length > 0)
     ? (() => {
-        // Período por subfaena: el span total que cubren los ciclos de esa
-        // subfaena (primer día más temprano → último día más tardío). Si hay
-        // un solo ciclo, queda el rango del ciclo tal cual.
-        const subfaenaPeriod = (cycleIds) => {
-          let minFirst = null;
-          let maxLast = null;
-          for (const cid of cycleIds) {
-            const cd = cycleDetails.find((c) => c.id === cid);
-            let first = cd?.firstDay || "";
-            let last = cd?.lastDay || "";
-            if (!first && !last) {
-              const days = cyclesById[cid]?.days;
-              if (Array.isArray(days) && days.length) {
-                const sorted = [...days].sort();
-                first = sorted[0]; last = sorted[sorted.length - 1];
-              }
-            }
-            if (first && (!minFirst || first < minFirst)) minFirst = first;
-            if (last && (!maxLast || last > maxLast)) maxLast = last;
-          }
-          const a = fmtDayShort(minFirst);
-          const b = fmtDayShort(maxLast);
-          if (a && b && a !== b) return `${a} → ${b}`;
-          return a || b || "—";
-        };
         let prevFaena = null;
-        const rowsHtml = subfaenaSummary.rows.map((r) => {
+        const rowsHtml = subfaenaSummary.rows.map((r, i, arr) => {
           const showFaena = r.faenaName !== prevFaena;
           prevFaena = r.faenaName;
-          return `
+          const row = `
             <tr>
               <td>${showFaena ? r.faenaName : ""}</td>
               <td>${r.subfaenaName}</td>
-              <td style="font-size:11px;color:#444">${subfaenaPeriod(r.cycleIds)}</td>
+              <td style="font-size:11px;color:#444">${cyclesPeriod(r.cycleIds)}</td>
               <td style="text-align:right">${fmt(r.bank)}</td>
               <td style="text-align:right">${fmt(r.cash)}</td>
               <td style="text-align:right"><b>${fmt(r.total)}</b></td>
+            </tr>`;
+          const isLastOfFaena = i === arr.length - 1 || arr[i + 1].faenaName !== r.faenaName;
+          if (!isLastOfFaena) return row;
+          const faenaRows = arr.filter((x) => x.faenaName === r.faenaName);
+          const subBank = faenaRows.reduce((s, x) => s + x.bank, 0);
+          const subCash = faenaRows.reduce((s, x) => s + x.cash, 0);
+          const subTotal = faenaRows.reduce((s, x) => s + x.total, 0);
+          return `${row}
+            <tr class="subtotal-faena">
+              <td colspan="3" style="text-align:right"><b>Sub total por faena</b></td>
+              <td style="text-align:right"><b>${fmt(subBank)}</b></td>
+              <td style="text-align:right"><b>${fmt(subCash)}</b></td>
+              <td style="text-align:right"><b>${fmt(subTotal)}</b></td>
             </tr>`;
         }).join("");
         return `<section class="receipt summary-page">
@@ -2934,6 +2949,74 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
                 <td style="text-align:right"><b>${fmt(subfaenaSummary.totals.bank)}</b></td>
                 <td style="text-align:right"><b>${fmt(subfaenaSummary.totals.cash)}</b></td>
                 <td style="text-align:right"><b>${fmt(subfaenaSummary.totals.total)}</b></td>
+              </tr>
+            </tfoot>
+          </table>
+        </section>`;
+      })()
+    : "";
+
+  // Resumen por labor (segunda hoja del detalle imprimible, justo después
+  // del resumen por subfaena). Mismo formato de tabla, pero desglosado
+  // también por labor dentro de cada subfaena. Se rinde solo en mode
+  // "detail".
+  const laborSummaryHtml = (isDetail && laborSummary && laborSummary.rows.length > 0)
+    ? (() => {
+        let prevSubfaena = null;
+        const rowsHtml = laborSummary.rows.map((r, i, arr) => {
+          const showSubfaena = r.subfaenaName !== prevSubfaena;
+          prevSubfaena = r.subfaenaName;
+          const row = `
+            <tr>
+              <td>${showSubfaena ? r.faenaName : ""}</td>
+              <td>${showSubfaena ? r.subfaenaName : ""}</td>
+              <td>${r.laborName}</td>
+              <td style="font-size:11px;color:#444">${cyclesPeriod(r.cycleIds)}</td>
+              <td style="text-align:right">${fmt(r.bank)}</td>
+              <td style="text-align:right">${fmt(r.cash)}</td>
+              <td style="text-align:right"><b>${fmt(r.total)}</b></td>
+            </tr>`;
+          const isLastOfFaena = i === arr.length - 1 || arr[i + 1].faenaName !== r.faenaName;
+          if (!isLastOfFaena) return row;
+          const faenaRows = arr.filter((x) => x.faenaName === r.faenaName);
+          const subBank = faenaRows.reduce((s, x) => s + x.bank, 0);
+          const subCash = faenaRows.reduce((s, x) => s + x.cash, 0);
+          const subTotal = faenaRows.reduce((s, x) => s + x.total, 0);
+          return `${row}
+            <tr class="subtotal-faena">
+              <td colspan="4" style="text-align:right"><b>Sub total por faena</b></td>
+              <td style="text-align:right"><b>${fmt(subBank)}</b></td>
+              <td style="text-align:right"><b>${fmt(subCash)}</b></td>
+              <td style="text-align:right"><b>${fmt(subTotal)}</b></td>
+            </tr>`;
+        }).join("");
+        return `<section class="receipt summary-page">
+          <div class="hd">
+            <div>
+              <h1>Resumen por labor</h1>
+              <div class="sub">${payroll.name} · ${cyclesLine}</div>
+            </div>
+            <div class="meta"><div><b>Fecha:</b> ${today}</div></div>
+          </div>
+          <table class="subfaena-summary">
+            <thead>
+              <tr>
+                <th>Faena</th>
+                <th>Subfaena</th>
+                <th>Labor</th>
+                <th style="width:130px">Período</th>
+                <th style="text-align:right">Con cuenta RUT</th>
+                <th style="text-align:right">Efectivo</th>
+                <th style="text-align:right">TOTAL</th>
+              </tr>
+            </thead>
+            <tbody>${rowsHtml}</tbody>
+            <tfoot>
+              <tr class="summary-total">
+                <td colspan="4"><b>TOTAL</b></td>
+                <td style="text-align:right"><b>${fmt(laborSummary.totals.bank)}</b></td>
+                <td style="text-align:right"><b>${fmt(laborSummary.totals.cash)}</b></td>
+                <td style="text-align:right"><b>${fmt(laborSummary.totals.total)}</b></td>
               </tr>
             </tfoot>
           </table>
@@ -3044,10 +3127,11 @@ function buildCashReceiptHtml(payroll, cashGroups, options = {}) {
   h1.group-h1 .group-leader-name { color: #555; font-weight: 600; }
   table.subfaena-summary { width: 100%; margin-top: 8px; }
   table.subfaena-summary .summary-total td { background: #FFE699; }
+  table.subfaena-summary .subtotal-faena td { background: #F2F2F2; font-style: italic; }
   table.prod .prod-total { text-align: right; min-width: 70px; }
   @media print { @page { margin: 14mm landscape; } .receipt { padding: 0; } }
 </style>
-</head><body>${subfaenaSummaryHtml}${summariesHtml}${groupsHtml}
+</head><body>${subfaenaSummaryHtml}${laborSummaryHtml}${summariesHtml}${groupsHtml}
 <script>window.onload = () => { window.focus(); window.print(); };</script>
 </body></html>`;
 }
@@ -3082,6 +3166,50 @@ async function printPaymentDetails(payroll, allGroups, titleOverrides = {}, summ
     workdaysByGroup[g.leader] = byCycle;
   }
 
+  // Resumen por labor (segunda hoja del "Detalle de pago" imprimible).
+  // Mismo criterio que subfaenaSummary (bank vs cash por fila), pero
+  // desglosado también por labor dentro de cada subfaena, sumando a TODOS
+  // los trabajadores de la nómina (no solo a los de un grupo/líder).
+  const laborSummary = (() => {
+    const cashByRut = new Map(allItems.map((it) => [it.rut, isCashBank(it.bankCode)]));
+    const cycleDetails = payroll.cycleDetails || [];
+    const acc = new Map(); // key: subfaenaName||laborName
+    for (const g of allGroups) {
+      const byCycle = workdaysByGroup[g.leader] || {};
+      for (const [cid, snapshots] of Object.entries(byCycle)) {
+        const cd = cycleDetails.find((c) => c.id === cid);
+        const subfaenaName = cd?.subfaenaName || cd?.label || cid;
+        const faenaName = cd?.faenaName || "—";
+        for (const snap of snapshots) {
+          for (const row of snap.rows) {
+            if (!(row.totalAmount > 0)) continue;
+            const key = `${subfaenaName}||${snap.laborName}`;
+            if (!acc.has(key)) {
+              acc.set(key, { faenaName, subfaenaName, laborName: snap.laborName, bank: 0, cash: 0, total: 0, cycleIds: new Set() });
+            }
+            const entry = acc.get(key);
+            if (cashByRut.get(row.rut)) entry.cash += row.totalAmount;
+            else entry.bank += row.totalAmount;
+            entry.total += row.totalAmount;
+            entry.cycleIds.add(cid);
+          }
+        }
+      }
+    }
+    const rows = [...acc.values()].sort((a, b) => {
+      const f = a.faenaName.localeCompare(b.faenaName, "es");
+      if (f !== 0) return f;
+      const s = a.subfaenaName.localeCompare(b.subfaenaName, "es");
+      if (s !== 0) return s;
+      return a.laborName.localeCompare(b.laborName, "es");
+    });
+    const totals = rows.reduce(
+      (acc2, r) => ({ bank: acc2.bank + r.bank, cash: acc2.cash + r.cash, total: acc2.total + r.total }),
+      { bank: 0, cash: 0, total: 0 },
+    );
+    return { rows, totals };
+  })();
+
   const html = buildCashReceiptHtml(payroll, allGroups, {
     titleOverrides,
     workdaysByGroup,
@@ -3090,6 +3218,7 @@ async function printPaymentDetails(payroll, allGroups, titleOverrides = {}, summ
     mode: "detail",
     summaries,
     subfaenaSummary,
+    laborSummary,
   });
   const w = window.open("", "_blank", "width=900,height=700");
   if (!w) {
