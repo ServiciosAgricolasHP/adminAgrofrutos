@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="robots" content="noindex" />
+    <title>Redirigiendo…</title>
+    <script>
+      (function () {
+        var OLD_BASE = "/adminAgrofrutos";
+        var NEW_ORIGIN = "https://serviciosagricolashp.github.io";
+        var NEW_BASE = "/TeRRaAdmin";
+        var path = location.pathname;
+        if (path.indexOf(OLD_BASE) === 0) path = path.slice(OLD_BASE.length);
+        var dest = NEW_ORIGIN + NEW_BASE + path + location.search + location.hash;
+        location.replace(dest);
+      })();
+    </script>
+    <meta http-equiv="refresh" content="0; url=https://serviciosagricolashp.github.io/TeRRaAdmin/" />
+  </head>
+  <body>
+    <p>
+      Esta app se mudó. Si no te redirige automáticamente, entrá a
+      <a href="https://serviciosagricolashp.github.io/TeRRaAdmin/">https://serviciosagricolashp.github.io/TeRRaAdmin/</a>.
+    </p>
+  </body>
+</html>
